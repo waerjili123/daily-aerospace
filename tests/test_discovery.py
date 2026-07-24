@@ -196,6 +196,29 @@ def test_bocha_maps_web_result_and_keeps_source_url(respx_mock, bocha_payload):
     assert rows[0].discovery_source == "bocha"
 
 
+def test_bocha_maps_web_result_from_data_wrapped_response(
+    respx_mock, bocha_payload
+) -> None:
+    respx_mock.post("https://api.bochaai.com/v1/web-search").respond(
+        200,
+        json={
+            "code": 200,
+            "msg": None,
+            "log_id": "safe-log-id",
+            "data": bocha_payload,
+        },
+    )
+
+    rows = BochaProvider("secret").search(
+        SearchQuery(kind="incremental", text="测试")
+    )
+
+    expected = bocha_payload["webPages"]["value"][0]
+    assert rows[0].title == expected["name"]
+    assert rows[0].url == expected["url"]
+    assert rows[0].summary == expected["summary"]
+
+
 def test_bocha_falls_back_to_snippet_when_summary_is_empty(
     respx_mock, bocha_payload
 ) -> None:
@@ -292,6 +315,38 @@ def test_bocha_maps_every_non_quota_4xx_to_safe_controlled_error(
     assert caught.value.reason == reason
 
 
+@pytest.mark.parametrize(
+    ("business_code", "exception_type", "reason"),
+    [
+        (400, DiscoveryUnavailableError, "request_rejected"),
+        (401, DiscoveryConfigurationError, "authentication"),
+        (403, DiscoveryConfigurationError, "authentication"),
+        (429, DiscoveryQuotaError, "quota_or_rate_limit"),
+        (503, DiscoveryUnavailableError, "server_error"),
+    ],
+)
+def test_bocha_maps_business_failures_inside_http_200_response(
+    respx_mock, business_code, exception_type, reason
+) -> None:
+    respx_mock.post("https://api.bochaai.com/v1/web-search").respond(
+        200,
+        json={
+            "code": business_code,
+            "msg": "private provider body containing super-secret",
+            "data": None,
+        },
+    )
+
+    with pytest.raises(exception_type) as caught:
+        BochaProvider("super-secret").search(
+            SearchQuery(kind="incremental", text="limited")
+        )
+
+    assert caught.value.reason == reason
+    assert "super-secret" not in str(caught.value)
+    assert "private provider body" not in str(caught.value)
+
+
 def test_bocha_maps_transport_failure_without_leaking_key(respx_mock) -> None:
     request = httpx.Request("POST", "https://api.bochaai.com/v1/web-search")
     respx_mock.post("https://api.bochaai.com/v1/web-search").mock(
@@ -312,6 +367,8 @@ def test_bocha_maps_transport_failure_without_leaking_key(respx_mock) -> None:
     [
         {"text": "{not-json", "headers": {"content-type": "application/json"}},
         {"json": {}},
+        {"json": {"code": 200, "data": {}}},
+        {"json": {"code": True, "data": {}}},
         {"json": {"webPages": {}}},
         {"json": {"webPages": {"value": {}}}},
         {"json": {"webPages": {"value": [None]}}},

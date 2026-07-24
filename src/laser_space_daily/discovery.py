@@ -217,7 +217,11 @@ class BochaProvider:
             payload = response.json()
             if not isinstance(payload, dict):
                 raise TypeError("response root must be an object")
-            web_pages = payload.get("webPages")
+            business_code = self._business_code(payload)
+            if business_code not in {None, 0, 200}:
+                self._raise_for_business_code(business_code)
+            search_payload = self._search_payload(payload)
+            web_pages = search_payload.get("webPages")
             if not isinstance(web_pages, dict):
                 raise TypeError("webPages must be an object")
             results = web_pages.get("value")
@@ -259,6 +263,48 @@ class BochaProvider:
             )
             for title, url, content in parsed_results
         ]
+
+    @staticmethod
+    def _business_code(payload: dict) -> int | None:
+        value = payload.get("code")
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise TypeError("business code must be numeric")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        raise TypeError("business code must be numeric")
+
+    @staticmethod
+    def _search_payload(payload: dict) -> dict:
+        if "webPages" in payload:
+            return payload
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise TypeError("response data must be an object")
+        return data
+
+    @staticmethod
+    def _raise_for_business_code(code: int) -> None:
+        if code in {401, 403}:
+            raise DiscoveryConfigurationError(
+                f"bocha business authentication rejected (code {code})"
+            )
+        if code == 429:
+            raise DiscoveryQuotaError(
+                "bocha business quota or rate limit exceeded (code 429)"
+            )
+        if 500 <= code <= 599:
+            raise DiscoveryUnavailableError(
+                f"bocha business server unavailable (code {code})",
+                reason="server_error",
+            )
+        raise DiscoveryUnavailableError(
+            f"bocha business request rejected (code {code})",
+            reason="request_rejected",
+        )
 
 
 class OfficialSeedCollector:
