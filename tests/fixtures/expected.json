@@ -1,0 +1,37 @@
+{
+  "summary": {
+    "candidate_count": 15,
+    "verified_decision_count": 13,
+    "formal_state_count": 12,
+    "event_count": 10,
+    "project_count": 5,
+    "financing_count": 2,
+    "pending_count": 1,
+    "rejected_count": 1
+  },
+  "records": [
+    {"id": "laser-comm-intention", "category": "laser_communication", "event_type": "procurement_intention", "buyer_or_company": "中国星网试验中心", "project_code": "XW-LC-2026-001", "project_chain": "laser-comm", "relation": "new_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：星间激光通信终端采购意向公告"},
+    {"id": "laser-comm-tender", "category": "laser_communication", "event_type": "tender", "buyer_or_company": "中国星网试验中心", "project_code": "XW-LC-2026-001", "project_chain": "laser-comm", "relation": "same_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：星间激光通信终端招标公告"},
+    {"id": "laser-comm-change", "category": "laser_communication", "event_type": "change", "buyer_or_company": "中国星网试验中心", "project_code": "XW-LC-2026-001", "project_chain": "laser-comm", "relation": "same_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：星间激光通信终端变更公告"},
+    {"id": "laser-comm-candidate", "category": "laser_communication", "event_type": "candidate", "buyer_or_company": "中国星网试验中心", "project_code": "XW-LC-2026-001", "project_chain": "laser-comm", "relation": "same_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：星间激光通信终端中标候选人公示"},
+    {"id": "laser-comm-award", "category": "laser_communication", "event_type": "award", "buyer_or_company": "中国星网试验中心", "project_code": "XW-LC-2026-001", "project_chain": "laser-comm", "relation": "same_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：星间激光通信终端中标结果公告"},
+    {"id": "laser-weapon-failed", "category": "laser_weapon", "event_type": "failed", "buyer_or_company": "某装备采购单位", "project_code": "LW-2026-009", "project_chain": "laser-weapon-rebid", "relation": "new_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：舰载激光反无人机系统废标公告"},
+    {"id": "laser-weapon-rebid", "category": "laser_weapon", "event_type": "rebid", "buyer_or_company": "某装备采购单位", "project_code": "LW-2026-009-R2", "project_chain": "laser-weapon-rebid", "relation": "same_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：舰载激光反无人机系统重新招标公告"},
+    {"id": "eo-turret-core", "category": "eo_turret", "event_type": "tender", "buyer_or_company": "航空光电研究所", "project_code": "EO-2026-015", "project_chain": "eo-turret-core", "relation": "new_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：机载光电转塔伺服稳像核心组件招标公告"},
+    {"id": "same-name-lot-1", "category": "eo_turret", "event_type": "tender", "buyer_or_company": "低空装备研究中心", "project_code": "EO-POD-2026-L1", "project_chain": "eo-pod-lot-1", "relation": "new_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：无人机光电吊舱核心组件第1标段招标公告"},
+    {"id": "same-name-lot-2", "category": "eo_turret", "event_type": "tender", "buyer_or_company": "低空装备研究中心", "project_code": "EO-POD-2026-L2", "project_chain": "eo-pod-lot-2", "relation": "new_project", "verification_result": "verified", "verification_reason": "verified_tender", "source_grade": "A", "literal_evidence": "项目名称：无人机光电吊舱核心组件第2标段招标公告"},
+    {"id": "financing-official-a", "category": "commercial_space_financing", "event_type": "financing", "buyer_or_company": "天穹火箭科技有限公司", "project_code": null, "project_chain": "official-financing", "relation": "new_financing", "verification_result": "verified", "verification_reason": "verified_financing_official_source", "source_grade": "A", "literal_evidence": "天穹火箭科技有限公司于2026-07-22完成A轮融资"},
+    {"id": "financing-two-b-primary", "category": "commercial_space_financing", "event_type": "financing", "buyer_or_company": "星舟卫星有限公司", "project_code": null, "project_chain": "two-b-financing", "relation": "new_financing", "verification_result": "verified", "verification_reason": "verified_financing_two_independent_sources", "source_grade": "B", "literal_evidence": "星舟卫星有限公司于2026-07-21完成B轮融资"},
+    {"id": "financing-two-b-corroborating", "category": "commercial_space_financing", "event_type": "financing", "buyer_or_company": "星舟卫星有限公司", "project_code": null, "project_chain": "two-b-financing", "relation": "same_financing", "verification_result": "verified", "verification_reason": "verified_financing_two_independent_sources", "source_grade": "B", "literal_evidence": "星舟卫星有限公司完成B轮融资"},
+    {"id": "financing-one-b-pending", "category": "commercial_space_financing", "event_type": "financing", "buyer_or_company": "远望航天有限公司", "project_code": null, "project_chain": "one-b-pending", "relation": "pending", "verification_result": "pending", "verification_reason": "financing_requires_official_or_two_independent_b_sources", "source_grade": "B", "literal_evidence": "远望航天有限公司于2026-07-22完成Pre-A轮融资"},
+    {"id": "bank-credit-rejected", "category": "commercial_space_financing", "event_type": "financing", "buyer_or_company": "云轨卫星公司", "project_code": null, "project_chain": "bank-credit-excluded", "relation": "rejected", "verification_result": "rejected", "verification_reason": "out_of_scope", "source_grade": "B", "literal_evidence": "本事项不属于股权融资"}
+  ],
+  "project_event_order": {
+    "laser-comm": ["procurement_intention", "tender", "change", "candidate", "award"],
+    "laser-weapon-rebid": ["failed", "rebid"]
+  },
+  "latest_status": {
+    "laser-comm": "awarded",
+    "laser-weapon-rebid": "open"
+  }
+}

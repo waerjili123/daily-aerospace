@@ -1,0 +1,53 @@
+{
+  "in_china": true,
+  "in_scope": true,
+  "category": "laser_communication",
+  "event_type": "tender",
+  "title": "Laser terminal tender",
+  "organization": "National Optics Institute",
+  "published_at": "2026-07-21T00:00:00+08:00",
+  "project_codes": [],
+  "amount": null,
+  "financing_round": null,
+  "investors": [],
+  "keywords": ["laser terminal"],
+  "evidence": [
+    {
+      "field": "title",
+      "quote": "Laser terminal tender",
+      "source_url": "https://official.example.cn/notices/1"
+    },
+    {
+      "field": "organization",
+      "quote": "National Optics Institute",
+      "source_url": "https://official.example.cn/notices/1"
+    },
+    {
+      "field": "published_at",
+      "quote": "2026-07-21",
+      "source_url": "https://official.example.cn/notices/1"
+    },
+    {
+      "field": "in_china",
+      "quote": "https://official.example.cn/notices/1",
+      "source_url": "https://official.example.cn/notices/1"
+    },
+    {
+      "field": "in_scope",
+      "quote": "Laser terminal tender",
+      "source_url": "https://official.example.cn/notices/1"
+    },
+    {
+      "field": "category",
+      "quote": "Laser terminal",
+      "source_url": "https://official.example.cn/notices/1"
+    },
+    {
+      "field": "event_type",
+      "quote": "tender",
+      "source_url": "https://official.example.cn/notices/1"
+    }
+  ],
+  "source_url": "https://official.example.cn/notices/1",
+  "degraded": false
+}

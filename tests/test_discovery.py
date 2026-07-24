@@ -1,0 +1,381 @@
+from __future__ import annotations
+
+from datetime import datetime
+import json
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pytest
+import yaml
+
+from laser_space_daily.discovery import (
+    DiscoveryConfigurationError,
+    DiscoveryQuotaError,
+    DiscoveryUnavailableError,
+    OfficialSeed,
+    OfficialSeedCollector,
+    QueryPlanner,
+    SearchQuery,
+    TavilyProvider,
+    dedupe_candidates,
+    normalize_url,
+)
+from laser_space_daily.models import Candidate, Category, Project, SourceGrade
+
+
+@pytest.fixture
+def fixed_now() -> datetime:
+    return datetime(2026, 7, 22, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+@pytest.fixture
+def project_factory():
+    def create() -> Project:
+        return Project(
+            project_id="P-001",
+            name="天基激光通信终端",
+            organization="某研究院",
+            category=Category.LASER_COMMUNICATION,
+            status="active",
+        )
+
+    return create
+
+
+@pytest.fixture
+def tavily_payload() -> dict[str, object]:
+    fixture_path = Path(__file__).parent / "fixtures" / "tavily_search.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def official_html() -> str:
+    return '<ul class="notices"><li><a href="/notice/1">采购公告一</a></li></ul>'
+
+
+SEEDS = [
+    OfficialSeed(
+        name="bad",
+        domain="bad.gov.cn",
+        grade=SourceGrade.A,
+        list_urls=["https://bad.gov.cn/list"],
+        link_selector="ul.notices a[href]",
+    ),
+    OfficialSeed(
+        name="good",
+        domain="good.gov.cn",
+        grade=SourceGrade.A,
+        list_urls=["https://good.gov.cn/list"],
+        link_selector="ul.notices a[href]",
+    ),
+]
+
+
+def test_planner_covers_incremental_backfill_and_overdue(project_factory, fixed_now):
+    project = project_factory()
+    project.deadlines = {
+        "bid_submission": datetime(
+            2026, 7, 21, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai")
+        )
+    }
+    project.deadline_precision = {"bid_submission": "minute"}
+    project.deadline_evidence = {"bid_submission": "投标截止：2026-07-21 17:00"}
+    queries = QueryPlanner(max_queries=40).plan(fixed_now, [project])
+
+    kinds = {query.kind for query in queries}
+    assert kinds == {
+        "incremental",
+        "project_followup",
+        "rolling_recheck",
+        "overdue_result",
+    }
+    assert any("激光通信" in query.text for query in queries)
+    assert any("激光反无人机" in query.text for query in queries)
+    assert any("光电转塔" in query.text for query in queries)
+    assert any("商业航天 融资" in query.text for query in queries)
+
+
+def test_planner_caps_queries_in_stable_priority_order(project_factory, fixed_now):
+    queries = QueryPlanner(max_queries=5).plan(fixed_now, [project_factory(), project_factory()])
+
+    assert len(queries) == 5
+    assert [query.kind for query in queries[:4]] == ["incremental"] * 4
+    assert queries[4].kind == "project_followup"
+
+
+def test_planner_scopes_every_query_to_china_and_excludes_ai_news(
+    project_factory, fixed_now
+):
+    project = project_factory()
+    project.deadlines = {
+        "bid_submission": datetime(
+            2026, 7, 21, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai")
+        )
+    }
+    project.deadline_precision = {"bid_submission": "minute"}
+    project.deadline_evidence = {"bid_submission": "投标截止：2026-07-21 17:00"}
+    queries = QueryPlanner(max_queries=40).plan(fixed_now, [project])
+
+    assert {query.kind for query in queries} == {
+        "incremental",
+        "project_followup",
+        "rolling_recheck",
+        "overdue_result",
+    }
+    for query in queries:
+        assert query.text.count("中国 境内 -人工智能新闻 -AI新闻") == 1
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [
+        None,
+        datetime(2026, 7, 23, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ],
+)
+def test_planner_only_marks_supported_past_deadlines_overdue(
+    project_factory, fixed_now, deadline
+):
+    project = project_factory()
+    if deadline is not None:
+        project.deadlines = {"bid_submission": deadline}
+
+    queries = QueryPlanner(max_queries=40).plan(fixed_now, [project])
+
+    assert "overdue_result" not in {query.kind for query in queries}
+
+
+def test_planner_keeps_date_only_deadline_open_for_entire_local_day(
+    project_factory,
+):
+    project = project_factory()
+    deadline = datetime(2026, 7, 22, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    project.deadlines = {"bid_submission": deadline}
+    project.deadline_precision = {"bid_submission": "date"}
+    project.deadline_evidence = {"bid_submission": "投标截止日期：2026-07-22"}
+
+    same_day = QueryPlanner(max_queries=40).plan(
+        datetime(2026, 7, 22, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai")), [project]
+    )
+    next_day = QueryPlanner(max_queries=40).plan(
+        datetime(2026, 7, 23, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")), [project]
+    )
+
+    assert "overdue_result" not in {query.kind for query in same_day}
+    assert "overdue_result" in {query.kind for query in next_day}
+
+
+def test_planner_exact_deadline_expires_at_its_instant(project_factory):
+    project = project_factory()
+    deadline = datetime(2026, 7, 22, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    project.deadlines = {"bid_submission": deadline}
+    project.deadline_precision = {"bid_submission": "minute"}
+    project.deadline_evidence = {"bid_submission": "投标截止：2026-07-22 10:00"}
+
+    queries = QueryPlanner(max_queries=40).plan(
+        datetime(2026, 7, 22, 10, 1, tzinfo=ZoneInfo("Asia/Shanghai")), [project]
+    )
+
+    assert "overdue_result" in {query.kind for query in queries}
+
+
+def test_tavily_keeps_tool_url(respx_mock, tavily_payload):
+    respx_mock.post("https://api.tavily.com/search").respond(200, json=tavily_payload)
+
+    rows = TavilyProvider("secret").search(SearchQuery(kind="incremental", text="测试"))
+
+    assert rows[0].url == tavily_payload["results"][0]["url"]
+
+
+def test_tavily_sends_required_discovery_request(respx_mock, tavily_payload):
+    route = respx_mock.post("https://api.tavily.com/search").respond(200, json=tavily_payload)
+
+    TavilyProvider("secret").search(SearchQuery(kind="incremental", text="精确查询"))
+
+    assert json.loads(route.calls[0].request.content) == {
+        "api_key": "secret",
+        "query": "精确查询",
+        "topic": "general",
+        "search_depth": "advanced",
+        "max_results": 10,
+        "include_answer": False,
+    }
+
+
+def test_tavily_counts_every_attempt_across_repeated_searches(
+    respx_mock, tavily_payload
+):
+    respx_mock.post("https://api.tavily.com/search").respond(
+        200, json=tavily_payload
+    )
+    provider = TavilyProvider("secret")
+
+    provider.search(SearchQuery(kind="incremental", text="first"))
+    provider.search(SearchQuery(kind="incremental", text="second"))
+
+    assert provider.usage_count == 2
+
+
+@pytest.mark.parametrize(
+    ("status_code", "exception_type"),
+    [
+        (429, DiscoveryQuotaError),
+        (503, DiscoveryUnavailableError),
+    ],
+)
+def test_tavily_maps_controlled_http_failures_and_counts_attempt(
+    respx_mock, status_code, exception_type
+):
+    respx_mock.post("https://api.tavily.com/search").respond(status_code)
+    provider = TavilyProvider("secret")
+
+    with pytest.raises(exception_type):
+        provider.search(SearchQuery(kind="incremental", text="limited"))
+
+    assert provider.usage_count == 1
+
+
+@pytest.mark.parametrize(
+    ("status_code", "exception_type"),
+    [
+        (400, DiscoveryUnavailableError),
+        (401, DiscoveryConfigurationError),
+        (403, DiscoveryConfigurationError),
+        (422, DiscoveryUnavailableError),
+    ],
+)
+def test_tavily_maps_every_non_quota_4xx_to_safe_controlled_error(
+    respx_mock, status_code, exception_type
+) -> None:
+    respx_mock.post("https://api.tavily.com/search").respond(
+        status_code, text="api_key=super-secret private provider body"
+    )
+
+    with pytest.raises(exception_type) as caught:
+        TavilyProvider("super-secret").search(
+            SearchQuery(kind="incremental", text="limited")
+        )
+
+    assert "super-secret" not in str(caught.value)
+    assert "private provider body" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "response_kwargs",
+    [
+        {"text": "{not-json", "headers": {"content-type": "application/json"}},
+        {"json": {}},
+        {"json": {"results": {}}},
+        {"json": {"results": [None]}},
+        {"json": {"results": [{"title": "A", "url": "https://x.cn/a"}]}},
+        {
+            "json": {
+                "results": [
+                    {"title": 7, "url": "https://x.cn/a", "content": "summary"}
+                ]
+            }
+        },
+    ],
+)
+def test_tavily_maps_malformed_success_payload_to_controlled_error(
+    respx_mock, response_kwargs
+) -> None:
+    respx_mock.post("https://api.tavily.com/search").respond(200, **response_kwargs)
+
+    with pytest.raises(DiscoveryUnavailableError, match="response invalid"):
+        TavilyProvider("super-secret").search(
+            SearchQuery(kind="incremental", text="malformed")
+        )
+
+
+def test_official_collector_continues_after_one_seed_fails(respx_mock, official_html):
+    respx_mock.get("https://bad.gov.cn/list").respond(503)
+    respx_mock.get("https://good.gov.cn/list").respond(200, text=official_html)
+
+    collector = OfficialSeedCollector(SEEDS)
+    rows = collector.collect()
+
+    assert [row.url for row in rows] == ["https://good.gov.cn/notice/1"]
+    assert collector.failed_domains == frozenset({"bad.gov.cn"})
+
+
+def test_official_collector_records_selector_coverage_degradation(respx_mock, official_html):
+    seed = OfficialSeed(
+        name="empty",
+        domain="empty.gov.cn",
+        grade=SourceGrade.A,
+        list_urls=["https://empty.gov.cn/list"],
+        link_selector="div.does-not-exist a[href]",
+    )
+    respx_mock.get("https://empty.gov.cn/list").respond(200, text=official_html)
+
+    collector = OfficialSeedCollector([seed])
+
+    assert collector.collect() == []
+    assert collector.failed_domains == frozenset({"empty.gov.cn"})
+
+
+def test_dedupe_normalizes_tracking_and_fragment(fixed_now):
+    rows = [
+        Candidate(
+            title="A",
+            url="https://x.gov.cn/a?utm_source=t#top",
+            discovered_at=fixed_now,
+            discovery_source="one",
+        ),
+        Candidate(
+            title="A duplicate",
+            url="https://x.gov.cn/a",
+            discovered_at=fixed_now,
+            discovery_source="two",
+        ),
+    ]
+
+    assert [row.url for row in dedupe_candidates(rows)] == ["https://x.gov.cn/a"]
+
+
+def test_normalize_url_lowercases_authority_removes_defaults_and_sorts_query():
+    assert normalize_url("HTTPS://Example.CN:443/a?z=2&source=x&a=1&utm_medium=m#part") == (
+        "https://example.cn/a?a=1&z=2"
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://x.gov.cn/a?flag#top", "https://x.gov.cn/a?flag"),
+        ("https://x.gov.cn/a?a=1&&b=%2F", "https://x.gov.cn/a?a=1&&b=%2F"),
+        ("https://x.gov.cn/a?b=2&a=1&a=0", "https://x.gov.cn/a?a=0&a=1&b=2"),
+        (
+            "https://x.gov.cn/a?x=%2F&utm%5Fsource=t&spm=s&from=f&source=n&a=1",
+            "https://x.gov.cn/a?a=1&x=%2F",
+        ),
+        ("https://x.gov.cn/a?z=%2F&a=1", "https://x.gov.cn/a?a=1&z=%2F"),
+    ],
+)
+def test_normalize_url_preserves_raw_query_semantics(url, expected):
+    assert normalize_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("seed_name", "fixture_name", "expected_url"),
+    [
+        ("中国政府采购网", "official_ccgp.html", "https://www.ccgp.gov.cn/cggg/notice/1.html"),
+        ("全军武器装备采购信息网", "official_plap.html", "https://www.plap.mil.cn/notices/1.html"),
+        ("中国招标投标公共服务平台", "official_ceb.html", "https://bulletin.cebpubservice.com/notice/1.html"),
+        ("全国公共资源交易平台", "official_ggzy.html", "https://www.ggzy.gov.cn/notice/1.html"),
+    ],
+)
+def test_configured_official_seed_selectors_match_sanitized_lists(
+    respx_mock, seed_name, fixture_name, expected_url
+):
+    root = Path(__file__).parents[1]
+    configured = yaml.safe_load((root / "config" / "official_sources.yaml").read_text(encoding="utf-8"))
+    seeds = [OfficialSeed.model_validate(item) for item in configured["official_sources"]]
+    seed = next(item for item in seeds if item.name == seed_name)
+    html = (root / "tests" / "fixtures" / fixture_name).read_text(encoding="utf-8")
+    respx_mock.get(seed.list_urls[0]).respond(200, text=html)
+
+    rows = OfficialSeedCollector([seed]).collect()
+
+    assert [row.url for row in rows] == [expected_url]
