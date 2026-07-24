@@ -1,0 +1,12 @@
+# Direct runtime, build, and test dependencies verified for the reproducible CI install.
+beautifulsoup4==4.15.0
+hatchling==1.27.0
+httpx==0.28.1
+openai==1.109.1
+pydantic==2.13.4
+pytest==8.4.2
+pytest-cov==6.2.1
+PyYAML==6.0.3
+python-dateutil==2.9.0.post0
+respx==0.23.1
+trafilatura==2.1.0

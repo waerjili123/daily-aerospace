@@ -1,0 +1,32 @@
+[
+  {
+    "id": "financing-official-a",
+    "candidate": {"title": "天穹火箭科技有限公司完成A轮融资", "url": "https://funding.space-company.example/announcements/2026/a-round", "summary": "企业融资公告", "discovery_source": "official_fixture"},
+    "page": {"status_code": 200, "title": "天穹火箭科技有限公司完成A轮融资", "text": "天穹火箭科技有限公司于2026-07-22完成A轮融资，融资金额2亿元，投资方为远航产业基金。"},
+    "analysis": {"in_china": true, "in_scope": true, "category": "commercial_space_financing", "event_type": "financing", "title": "天穹火箭科技有限公司完成A轮融资", "organization": "天穹火箭科技有限公司", "published_at": "2026-07-22T08:30:00+08:00", "project_codes": [], "amount": "2亿元", "financing_round": "A轮", "investors": ["远航产业基金"], "keywords": ["商业航天融资"], "evidence": [{"field": "organization", "quote": "天穹火箭科技有限公司于2026-07-22完成A轮融资", "source_url": "https://funding.space-company.example/announcements/2026/a-round"}, {"field": "published_at", "quote": "天穹火箭科技有限公司于2026-07-22完成A轮融资", "source_url": "https://funding.space-company.example/announcements/2026/a-round"}, {"field": "financing_round", "quote": "完成A轮融资", "source_url": "https://funding.space-company.example/announcements/2026/a-round"}, {"field": "企业公告", "quote": "融资金额2亿元", "source_url": "https://funding.space-company.example/announcements/2026/a-round"}], "source_url": "https://funding.space-company.example/announcements/2026/a-round", "degraded": false}
+  },
+  {
+    "id": "financing-two-b-primary",
+    "candidate": {"title": "星舟卫星有限公司完成B轮融资", "url": "https://finance.news-one.example/articles/2026/xingzhou-b", "summary": "融资报道", "discovery_source": "search_fixture"},
+    "page": {"status_code": 200, "title": "星舟卫星有限公司完成B轮融资", "text": "权威媒体报道：星舟卫星有限公司于2026-07-21完成B轮融资，金额8000万元，投资方为启明航天基金。"},
+    "analysis": {"in_china": true, "in_scope": true, "category": "commercial_space_financing", "event_type": "financing", "title": "星舟卫星有限公司完成B轮融资", "organization": "星舟卫星有限公司", "published_at": "2026-07-21T15:00:00+08:00", "project_codes": [], "amount": "8000万元", "financing_round": "B轮", "investors": ["启明航天基金"], "keywords": ["商业航天融资"], "evidence": [{"field": "organization", "quote": "星舟卫星有限公司于2026-07-21完成B轮融资", "source_url": "https://finance.news-one.example/articles/2026/xingzhou-b"}, {"field": "published_at", "quote": "星舟卫星有限公司于2026-07-21完成B轮融资", "source_url": "https://finance.news-one.example/articles/2026/xingzhou-b"}, {"field": "financing_round", "quote": "完成B轮融资", "source_url": "https://finance.news-one.example/articles/2026/xingzhou-b"}, {"field": "权威媒体", "quote": "金额8000万元", "source_url": "https://finance.news-one.example/articles/2026/xingzhou-b"}], "source_url": "https://finance.news-one.example/articles/2026/xingzhou-b", "degraded": false}
+  },
+  {
+    "id": "financing-two-b-corroborating",
+    "candidate": {"title": "星舟卫星有限公司B轮融资消息", "url": "https://industry.news-two.example/reports/space/xingzhou-b", "summary": "独立融资报道", "discovery_source": "search_fixture"},
+    "page": {"status_code": 200, "title": "星舟卫星有限公司B轮融资消息", "text": "独立行业媒体确认：2026-07-21，星舟卫星有限公司完成B轮融资，金额8000万元，投资方为启明航天基金。"},
+    "analysis": {"in_china": true, "in_scope": true, "category": "commercial_space_financing", "event_type": "financing", "title": "星舟卫星有限公司B轮融资消息", "organization": "星舟卫星有限公司", "published_at": "2026-07-21T15:00:00+08:00", "project_codes": [], "amount": "8000万元", "financing_round": "B轮", "investors": ["启明航天基金"], "keywords": ["商业航天融资"], "evidence": [{"field": "organization", "quote": "星舟卫星有限公司完成B轮融资", "source_url": "https://industry.news-two.example/reports/space/xingzhou-b"}, {"field": "published_at", "quote": "2026-07-21", "source_url": "https://industry.news-two.example/reports/space/xingzhou-b"}, {"field": "financing_round", "quote": "完成B轮融资", "source_url": "https://industry.news-two.example/reports/space/xingzhou-b"}, {"field": "权威媒体", "quote": "金额8000万元", "source_url": "https://industry.news-two.example/reports/space/xingzhou-b"}], "source_url": "https://industry.news-two.example/reports/space/xingzhou-b", "degraded": false}
+  },
+  {
+    "id": "financing-one-b-pending",
+    "candidate": {"title": "远望航天有限公司完成Pre-A轮融资", "url": "https://only.news-three.example/finance/yuanwang-pre-a", "summary": "单一媒体融资线索", "discovery_source": "search_fixture"},
+    "page": {"status_code": 200, "title": "远望航天有限公司完成Pre-A轮融资", "text": "媒体消息：远望航天有限公司于2026-07-22完成Pre-A轮融资，金额未披露。"},
+    "analysis": {"in_china": true, "in_scope": true, "category": "commercial_space_financing", "event_type": "financing", "title": "远望航天有限公司完成Pre-A轮融资", "organization": "远望航天有限公司", "published_at": "2026-07-22T08:40:00+08:00", "project_codes": [], "amount": null, "financing_round": "Pre-A轮", "investors": [], "keywords": ["商业航天融资"], "evidence": [{"field": "organization", "quote": "远望航天有限公司于2026-07-22完成Pre-A轮融资", "source_url": "https://only.news-three.example/finance/yuanwang-pre-a"}, {"field": "published_at", "quote": "2026-07-22", "source_url": "https://only.news-three.example/finance/yuanwang-pre-a"}, {"field": "financing_round", "quote": "完成Pre-A轮融资", "source_url": "https://only.news-three.example/finance/yuanwang-pre-a"}], "source_url": "https://only.news-three.example/finance/yuanwang-pre-a", "degraded": false}
+  },
+  {
+    "id": "bank-credit-rejected",
+    "candidate": {"title": "云轨卫星公司获得银行授信", "url": "https://finance.news-one.example/articles/2026/yungui-credit", "summary": "银行授信", "discovery_source": "search_fixture"},
+    "page": {"status_code": 200, "title": "云轨卫星公司获得银行授信", "text": "云轨卫星公司于2026-07-22获得合作银行5亿元综合授信额度，本事项不属于股权融资。"},
+    "analysis": {"in_china": true, "in_scope": false, "category": "commercial_space_financing", "event_type": "financing", "title": "云轨卫星公司获得银行授信", "organization": "云轨卫星公司", "published_at": "2026-07-22T08:50:00+08:00", "project_codes": [], "amount": "5亿元", "financing_round": null, "investors": [], "keywords": ["银行授信"], "evidence": [{"field": "organization", "quote": "云轨卫星公司于2026-07-22获得合作银行5亿元综合授信额度", "source_url": "https://finance.news-one.example/articles/2026/yungui-credit"}, {"field": "published_at", "quote": "2026-07-22", "source_url": "https://finance.news-one.example/articles/2026/yungui-credit"}, {"field": "exclusion", "quote": "本事项不属于股权融资", "source_url": "https://finance.news-one.example/articles/2026/yungui-credit"}], "source_url": "https://finance.news-one.example/articles/2026/yungui-credit", "degraded": false}
+  }
+]

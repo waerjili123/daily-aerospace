@@ -1,0 +1,33 @@
+deepseek:
+  timeout_seconds: 60
+  base_url: https://api.deepseek.com
+  flash_model: deepseek-v4-flash
+  pro_model: deepseek-v4-pro
+tavily:
+  timeout_seconds: 30
+discovery:
+  max_queries: 40
+  fetch_timeout_seconds: 15
+report:
+  max_chars: 18000
+notifier:
+  timeout_seconds: 15
+data_dir: data
+report_dir: reports
+official_sources_path: config/official_sources.yaml
+financing_sources:
+  official_company_domains:
+    landspace.com: 蓝箭航天
+    spacepioneer.cc: 天兵科技
+    cas-space.com: 中科宇航
+    galactic-energy.cn: 星河动力航天
+    orienspace.com: 东方空间
+    yinhehangtian.cn: 银河航天
+    minospace.cn: 微纳星空
+    geespace.com: 时空道宇
+  # No investor domain is promoted until an exact legal-name registry is curated.
+  official_investor_domains: {}
+  independent_media_domains:
+    - cls.cn
+    - pedaily.cn
+    - stcn.com

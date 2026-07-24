@@ -1,0 +1,15 @@
+.worktrees/
+.superpowers/
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+*.py[cod]
+*.log
+.env
+.cache/
+tmp/
+*.tmp
+data/.laser-space-daily.lock
+

@@ -1,0 +1,25 @@
+official_sources:
+  - name: 中国政府采购网
+    domain: www.ccgp.gov.cn
+    grade: A
+    list_urls:
+      - https://www.ccgp.gov.cn/cggg/
+    link_selector: ul.news-list a[href]
+  - name: 全军武器装备采购信息网
+    domain: www.plap.mil.cn
+    grade: A
+    list_urls:
+      - https://www.plap.mil.cn/freecms/site/juncai/cggg/index.html
+    link_selector: div.news-list a[href]
+  - name: 中国招标投标公共服务平台
+    domain: bulletin.cebpubservice.com
+    grade: A
+    list_urls:
+      - https://bulletin.cebpubservice.com/
+    link_selector: ul.notice-list a[href]
+  - name: 全国公共资源交易平台
+    domain: www.ggzy.gov.cn
+    grade: A
+    list_urls:
+      - https://www.ggzy.gov.cn/
+    link_selector: ul.news-list a[href]
