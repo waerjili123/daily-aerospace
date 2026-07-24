@@ -1,0 +1,45 @@
+{
+  "http_status": 200,
+  "content_type": "application/json",
+  "root_type": "object",
+  "root_keys": [
+    "code",
+    "data",
+    "log_id",
+    "msg"
+  ],
+  "business_code_type": "number",
+  "business_code": 200,
+  "data_keys": [
+    "_type",
+    "images",
+    "queryContext",
+    "videos",
+    "webPages"
+  ],
+  "web_pages_path": "data.webPages",
+  "web_pages_keys": [
+    "someResultsRemoved",
+    "totalEstimatedMatches",
+    "value",
+    "webSearchUrl"
+  ],
+  "results_type": "array",
+  "result_count": 3,
+  "first_result_keys": [
+    "cachedPageUrl",
+    "dateLastCrawled",
+    "datePublished",
+    "displayUrl",
+    "id",
+    "isFamilyFriendly",
+    "isNavigational",
+    "language",
+    "name",
+    "siteIcon",
+    "siteName",
+    "snippet",
+    "url"
+  ],
+  "json_valid": true
+}
