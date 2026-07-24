@@ -111,7 +111,7 @@ class Pipeline:
         *,
         repository: Any,
         planner: Any,
-        tavily: Any,
+        search_provider: Any,
         official_collector: Any,
         fetcher: Any,
         analyzer: Any,
@@ -122,7 +122,7 @@ class Pipeline:
     ) -> None:
         self._repository = repository
         self._planner = planner
-        self._tavily = tavily
+        self._search_provider = search_provider
         self._official_collector = official_collector
         self._fetcher = fetcher
         self._analyzer = analyzer
@@ -137,8 +137,8 @@ class Pipeline:
             "deepseek_tokens",
             "total_tokens",
         )
-        tavily_usage = _usage_snapshot(
-            (self._tavily,), "usage_count", "tavily_usage", "usage"
+        search_api_usage = _usage_snapshot(
+            (self._search_provider,), "usage_count", "search_api_usage", "usage"
         )
         state = self._repository.load()
         window_start, window_end = daily_window(now)
@@ -152,11 +152,13 @@ class Pipeline:
         for query in queries:
             metrics.search_count += 1
             try:
-                search_rows.extend(self._tavily.search(query))
+                search_rows.extend(self._search_provider.search(query))
             except (DiscoveryQuotaError, DiscoveryUnavailableError) as error:
                 metrics.search_coverage_degraded = True
-                errors.append(f"tavily:{type(error).__name__}")
-                self._safe_log("tavily_search_failed", error, None)
+                reason = getattr(error, "reason", "request_rejected")
+                metrics.search_failure_reasons.append(str(reason))
+                errors.append(f"search_api:{reason}")
+                self._safe_log("search_api_failed", error, None)
 
         official_rows = []
         try:
@@ -370,8 +372,11 @@ class Pipeline:
         metrics.deepseek_tokens = _usage_delta(
             deepseek_usage, "deepseek_tokens", "total_tokens"
         )
-        metrics.tavily_usage = _usage_delta(
-            tavily_usage, "usage_count", "tavily_usage", "usage"
+        metrics.search_api_usage = _usage_delta(
+            search_api_usage, "usage_count", "search_api_usage", "usage"
+        )
+        metrics.search_failure_reasons = list(
+            dict.fromkeys(metrics.search_failure_reasons)
         )
         metrics.failed_domains = sorted(failed_domains)
         metrics.errors = errors

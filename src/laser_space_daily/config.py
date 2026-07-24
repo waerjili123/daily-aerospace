@@ -10,7 +10,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class TavilySettings(BaseModel):
+class BochaSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     timeout_seconds: int = Field(default=30, ge=1)
@@ -125,9 +125,10 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deepseek_api_key: str
-    tavily_api_key: str
+    bocha_api_key: str
     dingtalk_webhook: str
-    tavily: TavilySettings = Field(default_factory=TavilySettings)
+    dingtalk_secret: str
+    bocha: BochaSettings = Field(default_factory=BochaSettings)
     discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
     deepseek: DeepSeekSettings = Field(default_factory=DeepSeekSettings)
     report: ReportSettings = Field(default_factory=ReportSettings)
@@ -140,8 +141,9 @@ class Settings(BaseModel):
 
 _SECRET_ENVIRONMENT_VARIABLES = (
     "DEEPSEEK_API_KEY",
-    "TAVILY_API_KEY",
+    "BOCHA_API_KEY",
     "DINGTALK_WEBHOOK",
+    "DINGTALK_SECRET",
 )
 
 

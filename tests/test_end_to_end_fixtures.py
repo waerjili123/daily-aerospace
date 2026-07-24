@@ -104,11 +104,11 @@ class FixturePlanner:
         return []
 
 
-class OfflineTavily:
+class OfflineSearchProvider:
     usage_count = 0
 
     def search(self, _query):
-        raise AssertionError("offline acceptance must not call Tavily")
+        raise AssertionError("offline acceptance must not call external search")
 
 
 class FixtureCollector:
@@ -219,7 +219,7 @@ def _make_pipeline(root: Path, records: list[dict]):
     pipeline = Pipeline(
         repository=StateRepository(root),
         planner=FixturePlanner(),
-        tavily=OfflineTavily(),
+        search_provider=OfflineSearchProvider(),
         official_collector=FixtureCollector(records),
         fetcher=FixtureFetcher(records),
         analyzer=FixtureAnalyzer(records),

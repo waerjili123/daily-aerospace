@@ -3,7 +3,7 @@ deepseek:
   base_url: https://api.deepseek.com
   flash_model: deepseek-v4-flash
   pro_model: deepseek-v4-pro
-tavily:
+bocha:
   timeout_seconds: 30
 discovery:
   max_queries: 40
