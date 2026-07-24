@@ -40,8 +40,9 @@ def test_workflow_schedule_secrets_and_dry_run():
     assert 'cron: "30 23 * * *"' in workflow
     assert "workflow_dispatch:" in workflow
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
-    assert "TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}" in workflow
+    assert "BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}" in workflow
     assert "DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}" in workflow
+    assert "DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}" in workflow
     assert "concurrency:" in workflow
     assert document["on"]["workflow_dispatch"]["inputs"]["dry_run"] == {
         "description": "Generate report without DingTalk delivery",
@@ -64,7 +65,7 @@ def test_committed_config_contains_no_secret_values():
             "flash_model": "deepseek-v4-flash",
             "pro_model": "deepseek-v4-pro",
         },
-        "tavily": {"timeout_seconds": "30"},
+        "bocha": {"timeout_seconds": "30"},
         "discovery": {"max_queries": "40", "fetch_timeout_seconds": "15"},
         "report": {"max_chars": "18000"},
         "notifier": {"timeout_seconds": "15"},
@@ -100,8 +101,9 @@ def test_committed_config_contains_no_secret_values():
     for path in ("config.yaml", "config.example.yaml"):
         contents = _repository_file(path).read_text(encoding="utf-8").lower()
         assert "deepseek_api_key" not in contents
-        assert "tavily_api_key" not in contents
+        assert "bocha_api_key" not in contents
         assert "dingtalk_webhook" not in contents
+        assert "dingtalk_secret" not in contents
         assert "oapi.dingtalk.com" not in contents
     for path in (
         "config.yaml",
@@ -238,8 +240,9 @@ def test_readme_documents_required_setup_and_dry_run():
         "--dry-run",
         "私有",
         "DEEPSEEK_API_KEY",
-        "TAVILY_API_KEY",
+        "BOCHA_API_KEY",
         "DINGTALK_WEBHOOK",
+        "DINGTALK_SECRET",
         "dry_run=true",
         "dry_run=false",
         "07:30",
@@ -267,7 +270,7 @@ def test_hatch_wheel_package_path_is_explicit():
     ]
 
 
-def test_settings_require_three_secrets(tmp_path, monkeypatch):
+def test_settings_require_four_secrets(tmp_path, monkeypatch):
     path = tmp_path / "config.yaml"
     path.write_text("report:\n  max_chars: 18000\n", encoding="utf-8")
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -328,7 +331,7 @@ def test_candidate_models_discovered_web_result_and_forbids_bidder_fields(
         title="空间激光通信终端采购公告",
         url="https://example.gov.cn/a",
         discovered_at="2026-07-22T00:00:00+08:00",
-        discovery_source="tavily",
+        discovery_source="bocha",
     )
 
     assert candidate.summary == ""
@@ -337,15 +340,16 @@ def test_candidate_models_discovered_web_result_and_forbids_bidder_fields(
             title="空间激光通信终端采购公告",
             url="https://example.gov.cn/a",
             discovered_at="2026-07-22T00:00:00+08:00",
-            discovery_source="tavily",
+            discovery_source="bocha",
             **{legacy_field: value},
         )
 
 
 def test_production_financing_registry_is_explicit_and_used_by_pipeline(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-key")
+    monkeypatch.setenv("BOCHA_API_KEY", "test-bocha-key")
     monkeypatch.setenv("DINGTALK_WEBHOOK", "https://example.invalid/test-webhook")
+    monkeypatch.setenv("DINGTALK_SECRET", "test-dingtalk-secret")
 
     settings = load_settings(_repository_file("config.yaml"))
     pipeline = build_pipeline(settings)
@@ -364,8 +368,9 @@ def test_production_financing_registry_is_explicit_and_used_by_pipeline(monkeypa
 
 def test_build_pipeline_wires_configured_official_investor_registry(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-key")
+    monkeypatch.setenv("BOCHA_API_KEY", "test-bocha-key")
     monkeypatch.setenv("DINGTALK_WEBHOOK", "https://example.invalid/test-webhook")
+    monkeypatch.setenv("DINGTALK_SECRET", "test-dingtalk-secret")
     settings = load_settings(_repository_file("config.yaml"))
     sources = settings.financing_sources.model_copy(
         update={"official_investor_domains": {"capital.example": ["远航产业基金"]}}
@@ -397,8 +402,9 @@ def test_missing_or_empty_financing_registry_fails_fast(
     tmp_path, monkeypatch, financing_sources
 ):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-key")
+    monkeypatch.setenv("BOCHA_API_KEY", "test-bocha-key")
     monkeypatch.setenv("DINGTALK_WEBHOOK", "https://example.invalid/test-webhook")
+    monkeypatch.setenv("DINGTALK_SECRET", "test-dingtalk-secret")
     payload = {
         "official_sources_path": str(_repository_file("config/official_sources.yaml")),
     }

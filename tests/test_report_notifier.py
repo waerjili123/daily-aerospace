@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime
+import hashlib
+import hmac
 import json
 import logging
 import os
 from pathlib import Path
 import re
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -22,7 +26,7 @@ from laser_space_daily.cli import (
     run_cli,
 )
 from laser_space_daily.config import Settings
-from laser_space_daily.discovery import OfficialSeedCollector, QueryPlanner, TavilyProvider
+from laser_space_daily.discovery import BochaProvider, OfficialSeedCollector, QueryPlanner
 from laser_space_daily.fetcher import PageFetcher
 from laser_space_daily.matching import ProjectMatcher
 from laser_space_daily.models import (
@@ -58,6 +62,7 @@ WINDOW_START = datetime(2026, 7, 21, 9, 30, tzinfo=BEIJING)
 WINDOW_END = datetime(2026, 7, 22, 9, 30, tzinfo=BEIJING)
 ROLLING_START = datetime(2026, 4, 22, 9, 30, tzinfo=BEIJING)
 WEBHOOK = "https://dingtalk.example/robot/send/test-token-never-log"
+DINGTALK_SECRET = "SECtest-signing-secret-never-log"
 
 
 def dt(month: int, day: int, hour: int = 8) -> datetime:
@@ -784,12 +789,20 @@ def test_degraded_coverage_names_search_ai_and_failed_domains() -> None:
         finished_at=WINDOW_END,
         search_coverage_degraded=True,
         model_coverage_degraded=True,
+        search_failure_reasons=[
+            "quota_or_rate_limit",
+            "network_or_timeout",
+            "quota_or_rate_limit",
+        ],
         failed_domains=["broken.gov.cn", "timeout.example"],
     )
     text = ReportRenderer(18000).render(make_result(metrics=metrics)).markdown
 
     assert "覆盖：降级" in text
-    assert "搜索（失败域：broken.gov.cn、timeout.example）" in text
+    assert "博查 API 配额不足或触发限流" in text
+    assert "博查 API 网络连接或请求超时" in text
+    assert text.count("博查 API 配额不足或触发限流") == 1
+    assert "官方来源访问失败：broken.gov.cn、timeout.example" in text
     assert "AI" in text
 
 
@@ -843,22 +856,24 @@ def rendered_report() -> RenderedReport:
 
 
 def test_dingtalk_requires_errcode_zero(respx_mock, rendered_report) -> None:
-    respx_mock.post(WEBHOOK).respond(
+    respx_mock.post(url__startswith=WEBHOOK).respond(
         200,
         json={"errcode": 310000, "errmsg": "keywords not in content"},
     )
 
     with pytest.raises(NotificationError, match="310000") as caught:
-        DingTalkNotifier(WEBHOOK).send(rendered_report)
+        DingTalkNotifier(WEBHOOK, DINGTALK_SECRET).send(rendered_report)
 
     assert WEBHOOK not in str(caught.value)
     assert "test-token-never-log" not in str(caught.value)
 
 
 def test_dingtalk_sends_one_markdown_payload(respx_mock, rendered_report) -> None:
-    route = respx_mock.post(WEBHOOK).respond(200, json={"errcode": 0, "errmsg": "ok"})
+    route = respx_mock.post(url__startswith=WEBHOOK).respond(
+        200, json={"errcode": 0, "errmsg": "ok"}
+    )
 
-    DingTalkNotifier(WEBHOOK).send(rendered_report)
+    DingTalkNotifier(WEBHOOK, DINGTALK_SECRET).send(rendered_report)
 
     assert route.call_count == 1
     assert json.loads(route.calls[0].request.content) == {
@@ -867,6 +882,36 @@ def test_dingtalk_sends_one_markdown_payload(respx_mock, rendered_report) -> Non
             "title": rendered_report.title,
             "text": rendered_report.markdown,
         },
+    }
+
+
+def test_dingtalk_adds_deterministic_hmac_signature_and_preserves_query(
+    respx_mock, rendered_report
+) -> None:
+    webhook = f"{WEBHOOK}?access_token=token-value&channel=daily"
+    route = respx_mock.post(url__startswith=WEBHOOK).respond(
+        200, json={"errcode": 0, "errmsg": "ok"}
+    )
+    clock = lambda: 1_721_629_800.123
+
+    DingTalkNotifier(
+        webhook,
+        DINGTALK_SECRET,
+        clock=clock,
+    ).send(rendered_report)
+
+    query = parse_qs(urlsplit(str(route.calls[0].request.url)).query)
+    timestamp = "1721629800123"
+    digest = hmac.new(
+        DINGTALK_SECRET.encode(),
+        f"{timestamp}\n{DINGTALK_SECRET}".encode(),
+        hashlib.sha256,
+    ).digest()
+    assert query == {
+        "access_token": ["token-value"],
+        "channel": ["daily"],
+        "timestamp": [timestamp],
+        "sign": [base64.b64encode(digest).decode()],
     }
 
 
@@ -881,10 +926,10 @@ def test_dingtalk_sends_one_markdown_payload(respx_mock, rendered_report) -> Non
 def test_dingtalk_rejects_malformed_response(
     respx_mock, rendered_report, response: httpx.Response
 ) -> None:
-    respx_mock.post(WEBHOOK).mock(return_value=response)
+    respx_mock.post(url__startswith=WEBHOOK).mock(return_value=response)
 
     with pytest.raises(NotificationError, match="invalid response") as caught:
-        DingTalkNotifier(WEBHOOK).send(rendered_report)
+        DingTalkNotifier(WEBHOOK, DINGTALK_SECRET).send(rendered_report)
 
     assert "test-token-never-log" not in str(caught.value)
 
@@ -892,10 +937,12 @@ def test_dingtalk_rejects_malformed_response(
 def test_dingtalk_converts_http_failure_without_url_or_payload(
     respx_mock, rendered_report
 ) -> None:
-    respx_mock.post(WEBHOOK).respond(503, text=rendered_report.markdown)
+    respx_mock.post(url__startswith=WEBHOOK).respond(
+        503, text=rendered_report.markdown
+    )
 
     with pytest.raises(NotificationError, match="HTTP request failed") as caught:
-        DingTalkNotifier(WEBHOOK).send(rendered_report)
+        DingTalkNotifier(WEBHOOK, DINGTALK_SECRET).send(rendered_report)
 
     message = str(caught.value)
     assert "test-token-never-log" not in message
@@ -909,7 +956,11 @@ def test_dingtalk_converts_timeout_without_webhook(rendered_report) -> None:
     client = httpx.Client(transport=httpx.MockTransport(timeout))
 
     with pytest.raises(NotificationError, match="request failed") as caught:
-        DingTalkNotifier(WEBHOOK, client=client).send(rendered_report)
+        DingTalkNotifier(
+            WEBHOOK,
+            DINGTALK_SECRET,
+            client=client,
+        ).send(rendered_report)
 
     assert "test-token-never-log" not in str(caught.value)
 
@@ -959,8 +1010,9 @@ def cli_deps(
     config.write_text("{}\n", encoding="utf-8")
     settings = Settings(
         deepseek_api_key="deepseek-secret-value",
-        tavily_api_key="tavily-secret-value",
+        bocha_api_key="bocha-secret-value",
         dingtalk_webhook="https://example.invalid/?token=dingtalk-secret-value",
+        dingtalk_secret="dingtalk-signing-secret-value",
         data_dir=tmp_path / "data",
         report_dir=tmp_path / "reports",
         official_sources_path=Path(__file__).parents[1] / "config" / "official_sources.yaml",
@@ -1063,8 +1115,9 @@ def test_config_failure_returns_two_without_secrets_in_output(
 ) -> None:
     secret_values = (
         "deepseek-secret-value",
-        "tavily-secret-value",
+        "bocha-secret-value",
         "dingtalk-secret-value",
+        "dingtalk-signing-secret-value",
     )
     dependencies = CliDependencies(
         settings_loader=lambda path: (_ for _ in ()).throw(
@@ -1228,7 +1281,7 @@ def test_real_notifier_never_logs_webhook_or_token_and_keeps_application_errors(
     expected_code: int,
 ) -> None:
     settings = cli_deps.settings.model_copy(update={"dingtalk_webhook": WEBHOOK})
-    route = respx_mock.post(WEBHOOK)
+    route = respx_mock.post(url__startswith=WEBHOOK)
     if outcome == "success":
         route.respond(200, json={"errcode": 0})
     elif outcome == "http_error":
@@ -1271,8 +1324,9 @@ def test_real_notifier_never_logs_webhook_or_token_and_keeps_application_errors(
 def test_build_pipeline_uses_real_adapter_types_without_external_calls(tmp_path: Path) -> None:
     settings = Settings(
         deepseek_api_key="not-a-real-key",
-        tavily_api_key="not-a-real-key",
+        bocha_api_key="not-a-real-key",
         dingtalk_webhook="https://example.invalid/robot",
+        dingtalk_secret="not-a-real-secret",
         data_dir=tmp_path / "data",
         report_dir=tmp_path / "reports",
         official_sources_path=Path(__file__).parents[1] / "config" / "official_sources.yaml",
@@ -1286,7 +1340,7 @@ def test_build_pipeline_uses_real_adapter_types_without_external_calls(tmp_path:
 
     assert isinstance(pipeline._repository, StateRepository)
     assert isinstance(pipeline._planner, QueryPlanner)
-    assert isinstance(pipeline._tavily, TavilyProvider)
+    assert isinstance(pipeline._search_provider, BochaProvider)
     assert isinstance(pipeline._official_collector, OfficialSeedCollector)
     assert isinstance(pipeline._fetcher, PageFetcher)
     assert isinstance(pipeline._analyzer, ResilientAnalyzer)
@@ -1301,8 +1355,9 @@ def test_build_pipeline_never_downgrades_official_a_domain_to_optional_b(
 ) -> None:
     settings = Settings(
         deepseek_api_key="not-a-real-key",
-        tavily_api_key="not-a-real-key",
+        bocha_api_key="not-a-real-key",
         dingtalk_webhook="https://example.invalid/robot",
+        dingtalk_secret="not-a-real-secret",
         official_sources_path=Path(__file__).parents[1] / "config" / "official_sources.yaml",
         financing_sources={
             "official_company_domains": {"company.example": "示例航天"},

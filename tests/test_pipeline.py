@@ -144,7 +144,7 @@ class FakePlanner:
         return list(self.queries)
 
 
-class FakeTavily:
+class FakeSearchProvider:
     def __init__(self) -> None:
         self.rows: list[Candidate] = []
         self.error: BaseException | None = None
@@ -271,7 +271,7 @@ def deps():
     values = SimpleNamespace(
         repository=FakeRepository(),
         planner=FakePlanner(),
-        tavily=FakeTavily(),
+        search_provider=FakeSearchProvider(),
         official_collector=FakeOfficialCollector(),
         fetcher=FakeFetcher(),
         analyzer=FakeAnalyzer(),
@@ -285,7 +285,7 @@ def deps():
         for name in (
             "repository",
             "planner",
-            "tavily",
+            "search_provider",
             "official_collector",
             "fetcher",
             "analyzer",
@@ -414,20 +414,34 @@ def test_pipeline_persists_grounded_financing_business_area(deps) -> None:
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "reason"),
     [
-        DiscoveryQuotaError("quota api-key=super-secret"),
-        DiscoveryConfigurationError("authentication rejected"),
-        DiscoveryUnavailableError("service unavailable"),
+        (
+            DiscoveryQuotaError("quota api-key=super-secret"),
+            "quota_or_rate_limit",
+        ),
+        (
+            DiscoveryConfigurationError("authentication rejected"),
+            "authentication",
+        ),
+        (
+            DiscoveryUnavailableError(
+                "service unavailable", reason="server_error"
+            ),
+            "server_error",
+        ),
     ],
 )
-def test_tavily_failure_still_runs_official_collector(deps, error) -> None:
-    deps.tavily.error = error
+def test_search_api_failure_still_runs_official_collector(
+    deps, error, reason
+) -> None:
+    deps.search_provider.error = error
 
     result = Pipeline(**deps.as_kwargs()).run(NOW)
 
     assert result.metrics.search_coverage_degraded is True
-    assert result.metrics.tavily_usage == 1
+    assert result.metrics.search_api_usage == 1
+    assert result.metrics.search_failure_reasons == [reason]
     assert result.metrics.official_candidate_count == 1
     assert deps.official_collector.calls == 1
 
@@ -830,7 +844,7 @@ def test_degraded_analysis_and_usage_metrics_are_reported(deps) -> None:
 
     assert result.metrics.model_coverage_degraded is True
     assert result.metrics.deepseek_tokens == 341
-    assert result.metrics.tavily_usage == 1
+    assert result.metrics.search_api_usage == 1
 
 
 def test_reused_pipeline_reports_provider_usage_per_run_delta(deps) -> None:
@@ -842,10 +856,10 @@ def test_reused_pipeline_reports_provider_usage_per_run_delta(deps) -> None:
     second = pipeline.run(NOW)
 
     assert first.metrics.deepseek_tokens == second.metrics.deepseek_tokens == 18
-    assert first.metrics.tavily_usage == second.metrics.tavily_usage == 1
+    assert first.metrics.search_api_usage == second.metrics.search_api_usage == 1
     assert deps.analyzer.deepseek_tokens == 22
     assert deps.trend_summarizer.deepseek_tokens == 14
-    assert deps.tavily.usage_count == 2
+    assert deps.search_provider.usage_count == 2
 
 
 def test_shared_primary_analyzer_and_trend_counter_is_not_doubled(deps) -> None:
@@ -871,7 +885,7 @@ def test_shared_primary_analyzer_and_trend_counter_is_not_doubled(deps) -> None:
 
 
 def test_candidate_dedupe_search_counts_and_official_failures(deps) -> None:
-    deps.tavily.rows = [candidate(source="tavily")]
+    deps.search_provider.rows = [candidate(source="bocha")]
     deps.official_collector.rows = [candidate()]
     deps.official_collector.failed_domains = frozenset({"failed.gov.cn"})
 
@@ -969,7 +983,7 @@ def test_programming_type_error_is_not_swallowed_or_committed(deps) -> None:
 
 
 def test_programming_runtime_error_is_not_treated_as_search_degradation(deps) -> None:
-    deps.tavily.error = RuntimeError("quota calculation bug")
+    deps.search_provider.error = RuntimeError("quota calculation bug")
 
     with pytest.raises(RuntimeError, match="quota calculation bug"):
         Pipeline(**deps.as_kwargs()).run(NOW)

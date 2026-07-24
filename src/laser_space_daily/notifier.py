@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+from collections.abc import Callable
+import hashlib
+import hmac
 import logging
+import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -25,14 +31,20 @@ class DingTalkNotifier:
     def __init__(
         self,
         webhook: str,
+        secret: str,
         client: httpx.Client | None = None,
         timeout_seconds: float = 15.0,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if not secret:
+            raise ValueError("DingTalk signing secret must not be empty")
         self._webhook = webhook
+        self._secret = secret
         self._client = client or httpx.Client()
         self._timeout_seconds = timeout_seconds
+        self._clock = clock
 
     def send(self, report: RenderedReport) -> None:
         suppress_secret_bearing_http_logs()
@@ -42,7 +54,7 @@ class DingTalkNotifier:
         }
         try:
             response = self._client.post(
-                self._webhook,
+                self._signed_webhook(),
                 json=payload,
                 timeout=self._timeout_seconds,
             )
@@ -62,3 +74,20 @@ class DingTalkNotifier:
             raise NotificationError("DingTalk returned an invalid response")
         if errcode != 0:
             raise NotificationError(f"DingTalk rejected message (errcode={errcode})")
+
+    def _signed_webhook(self) -> str:
+        timestamp = str(int(self._clock() * 1000))
+        string_to_sign = f"{timestamp}\n{self._secret}"
+        digest = hmac.new(
+            self._secret.encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            digestmod=hashlib.sha256,
+        ).digest()
+        signature = base64.b64encode(digest).decode("ascii")
+
+        parts = urlsplit(self._webhook)
+        query = parse_qsl(parts.query, keep_blank_values=True)
+        query.extend((("timestamp", timestamp), ("sign", signature)))
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+        )

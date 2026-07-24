@@ -20,7 +20,7 @@ import yaml
 
 from .analyzer import DeepSeekAnalyzer, ResilientAnalyzer, RuleFallbackAnalyzer
 from .config import Settings, load_settings
-from .discovery import OfficialSeed, OfficialSeedCollector, QueryPlanner, TavilyProvider
+from .discovery import BochaProvider, OfficialSeed, OfficialSeedCollector, QueryPlanner
 from .fetcher import PageFetcher
 from .matching import ProjectMatcher
 from .models import SourceGrade
@@ -113,7 +113,7 @@ def _load_official_seeds(path: Path) -> list[OfficialSeed]:
 def build_pipeline(settings: Settings) -> Pipeline:
     """Compose the production pipeline without performing external requests."""
     seeds = _load_official_seeds(settings.official_sources_path)
-    tavily_client = httpx.Client(timeout=settings.tavily.timeout_seconds)
+    search_client = httpx.Client(timeout=settings.bocha.timeout_seconds)
     official_client = httpx.Client(timeout=settings.discovery.fetch_timeout_seconds)
     model_client = OpenAI(
         api_key=settings.deepseek_api_key,
@@ -143,7 +143,7 @@ def build_pipeline(settings: Settings) -> Pipeline:
             max_queries=settings.discovery.max_queries,
             financing_domains=registry.financing_domains,
         ),
-        tavily=TavilyProvider(settings.tavily_api_key, client=tavily_client),
+        search_provider=BochaProvider(settings.bocha_api_key, client=search_client),
         official_collector=OfficialSeedCollector(seeds, client=official_client),
         fetcher=PageFetcher(timeout=settings.discovery.fetch_timeout_seconds),
         analyzer=analyzer,
@@ -161,6 +161,7 @@ def _build_renderer(settings: Settings) -> ReportRenderer:
 def _build_notifier(settings: Settings) -> DingTalkNotifier:
     return DingTalkNotifier(
         settings.dingtalk_webhook,
+        settings.dingtalk_secret,
         timeout_seconds=settings.notifier.timeout_seconds,
     )
 

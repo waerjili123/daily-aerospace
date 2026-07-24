@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 import yaml
 
@@ -12,11 +13,11 @@ from laser_space_daily.discovery import (
     DiscoveryConfigurationError,
     DiscoveryQuotaError,
     DiscoveryUnavailableError,
+    BochaProvider,
     OfficialSeed,
     OfficialSeedCollector,
     QueryPlanner,
     SearchQuery,
-    TavilyProvider,
     dedupe_candidates,
     normalize_url,
 )
@@ -43,8 +44,8 @@ def project_factory():
 
 
 @pytest.fixture
-def tavily_payload() -> dict[str, object]:
-    fixture_path = Path(__file__).parent / "fixtures" / "tavily_search.json"
+def bocha_payload() -> dict[str, object]:
+    fixture_path = Path(__file__).parent / "fixtures" / "bocha_search.json"
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
@@ -179,36 +180,65 @@ def test_planner_exact_deadline_expires_at_its_instant(project_factory):
     assert "overdue_result" in {query.kind for query in queries}
 
 
-def test_tavily_keeps_tool_url(respx_mock, tavily_payload):
-    respx_mock.post("https://api.tavily.com/search").respond(200, json=tavily_payload)
+def test_bocha_maps_web_result_and_keeps_source_url(respx_mock, bocha_payload):
+    respx_mock.post("https://api.bochaai.com/v1/web-search").respond(
+        200, json=bocha_payload
+    )
 
-    rows = TavilyProvider("secret").search(SearchQuery(kind="incremental", text="测试"))
+    rows = BochaProvider("secret").search(
+        SearchQuery(kind="incremental", text="测试")
+    )
 
-    assert rows[0].url == tavily_payload["results"][0]["url"]
+    expected = bocha_payload["webPages"]["value"][0]
+    assert rows[0].title == expected["name"]
+    assert rows[0].url == expected["url"]
+    assert rows[0].summary == expected["summary"]
+    assert rows[0].discovery_source == "bocha"
 
 
-def test_tavily_sends_required_discovery_request(respx_mock, tavily_payload):
-    route = respx_mock.post("https://api.tavily.com/search").respond(200, json=tavily_payload)
+def test_bocha_falls_back_to_snippet_when_summary_is_empty(
+    respx_mock, bocha_payload
+) -> None:
+    bocha_payload["webPages"]["value"][0]["summary"] = ""
+    route = respx_mock.post("https://api.bochaai.com/v1/web-search").respond(
+        200, json=bocha_payload
+    )
 
-    TavilyProvider("secret").search(SearchQuery(kind="incremental", text="精确查询"))
+    rows = BochaProvider("secret").search(
+        SearchQuery(kind="incremental", text="测试")
+    )
 
+    assert route.call_count == 1
+    assert rows[0].summary == bocha_payload["webPages"]["value"][0]["snippet"]
+
+
+def test_bocha_sends_bearer_auth_and_required_discovery_request(
+    respx_mock, bocha_payload
+) -> None:
+    route = respx_mock.post("https://api.bochaai.com/v1/web-search").respond(
+        200, json=bocha_payload
+    )
+
+    BochaProvider("secret").search(
+        SearchQuery(kind="incremental", text="精确查询")
+    )
+
+    assert route.calls[0].request.headers["Authorization"] == "Bearer secret"
     assert json.loads(route.calls[0].request.content) == {
-        "api_key": "secret",
         "query": "精确查询",
-        "topic": "general",
-        "search_depth": "advanced",
-        "max_results": 10,
-        "include_answer": False,
+        "freshness": "noLimit",
+        "summary": True,
+        "count": 10,
     }
 
 
-def test_tavily_counts_every_attempt_across_repeated_searches(
-    respx_mock, tavily_payload
+def test_bocha_counts_every_attempt_across_repeated_searches(
+    respx_mock, bocha_payload
 ):
-    respx_mock.post("https://api.tavily.com/search").respond(
-        200, json=tavily_payload
+    respx_mock.post("https://api.bochaai.com/v1/web-search").respond(
+        200, json=bocha_payload
     )
-    provider = TavilyProvider("secret")
+    provider = BochaProvider("secret")
 
     provider.search(SearchQuery(kind="incremental", text="first"))
     provider.search(SearchQuery(kind="incremental", text="second"))
@@ -217,47 +247,64 @@ def test_tavily_counts_every_attempt_across_repeated_searches(
 
 
 @pytest.mark.parametrize(
-    ("status_code", "exception_type"),
+    ("status_code", "exception_type", "reason"),
     [
-        (429, DiscoveryQuotaError),
-        (503, DiscoveryUnavailableError),
+        (429, DiscoveryQuotaError, "quota_or_rate_limit"),
+        (503, DiscoveryUnavailableError, "server_error"),
     ],
 )
-def test_tavily_maps_controlled_http_failures_and_counts_attempt(
-    respx_mock, status_code, exception_type
+def test_bocha_maps_controlled_http_failures_and_counts_attempt(
+    respx_mock, status_code, exception_type, reason
 ):
-    respx_mock.post("https://api.tavily.com/search").respond(status_code)
-    provider = TavilyProvider("secret")
+    respx_mock.post("https://api.bochaai.com/v1/web-search").respond(status_code)
+    provider = BochaProvider("secret")
 
-    with pytest.raises(exception_type):
+    with pytest.raises(exception_type) as caught:
         provider.search(SearchQuery(kind="incremental", text="limited"))
 
     assert provider.usage_count == 1
+    assert caught.value.reason == reason
 
 
 @pytest.mark.parametrize(
-    ("status_code", "exception_type"),
+    ("status_code", "exception_type", "reason"),
     [
-        (400, DiscoveryUnavailableError),
-        (401, DiscoveryConfigurationError),
-        (403, DiscoveryConfigurationError),
-        (422, DiscoveryUnavailableError),
+        (400, DiscoveryUnavailableError, "request_rejected"),
+        (401, DiscoveryConfigurationError, "authentication"),
+        (403, DiscoveryConfigurationError, "authentication"),
+        (422, DiscoveryUnavailableError, "request_rejected"),
     ],
 )
-def test_tavily_maps_every_non_quota_4xx_to_safe_controlled_error(
-    respx_mock, status_code, exception_type
+def test_bocha_maps_every_non_quota_4xx_to_safe_controlled_error(
+    respx_mock, status_code, exception_type, reason
 ) -> None:
-    respx_mock.post("https://api.tavily.com/search").respond(
+    respx_mock.post("https://api.bochaai.com/v1/web-search").respond(
         status_code, text="api_key=super-secret private provider body"
     )
 
     with pytest.raises(exception_type) as caught:
-        TavilyProvider("super-secret").search(
+        BochaProvider("super-secret").search(
             SearchQuery(kind="incremental", text="limited")
         )
 
     assert "super-secret" not in str(caught.value)
     assert "private provider body" not in str(caught.value)
+    assert caught.value.reason == reason
+
+
+def test_bocha_maps_transport_failure_without_leaking_key(respx_mock) -> None:
+    request = httpx.Request("POST", "https://api.bochaai.com/v1/web-search")
+    respx_mock.post("https://api.bochaai.com/v1/web-search").mock(
+        side_effect=httpx.ReadTimeout("timeout containing super-secret", request=request)
+    )
+
+    with pytest.raises(DiscoveryUnavailableError) as caught:
+        BochaProvider("super-secret").search(
+            SearchQuery(kind="incremental", text="limited")
+        )
+
+    assert caught.value.reason == "network_or_timeout"
+    assert "super-secret" not in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -265,27 +312,33 @@ def test_tavily_maps_every_non_quota_4xx_to_safe_controlled_error(
     [
         {"text": "{not-json", "headers": {"content-type": "application/json"}},
         {"json": {}},
-        {"json": {"results": {}}},
-        {"json": {"results": [None]}},
-        {"json": {"results": [{"title": "A", "url": "https://x.cn/a"}]}},
+        {"json": {"webPages": {}}},
+        {"json": {"webPages": {"value": {}}}},
+        {"json": {"webPages": {"value": [None]}}},
+        {"json": {"webPages": {"value": [{"name": "A"}]}}},
         {
             "json": {
-                "results": [
-                    {"title": 7, "url": "https://x.cn/a", "content": "summary"}
-                ]
+                "webPages": {
+                    "value": [
+                        {"name": 7, "url": "https://x.cn/a", "summary": "summary"}
+                    ]
+                }
             }
         },
     ],
 )
-def test_tavily_maps_malformed_success_payload_to_controlled_error(
+def test_bocha_maps_malformed_success_payload_to_controlled_error(
     respx_mock, response_kwargs
 ) -> None:
-    respx_mock.post("https://api.tavily.com/search").respond(200, **response_kwargs)
+    respx_mock.post("https://api.bochaai.com/v1/web-search").respond(
+        200, **response_kwargs
+    )
 
-    with pytest.raises(DiscoveryUnavailableError, match="response invalid"):
-        TavilyProvider("super-secret").search(
+    with pytest.raises(DiscoveryUnavailableError, match="response invalid") as caught:
+        BochaProvider("super-secret").search(
             SearchQuery(kind="incremental", text="malformed")
         )
+    assert caught.value.reason == "invalid_response"
 
 
 def test_official_collector_continues_after_one_seed_fails(respx_mock, official_html):

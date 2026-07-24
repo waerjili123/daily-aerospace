@@ -358,7 +358,7 @@ class ReportRenderer:
         report_date = _as_beijing(result.window_end).date().isoformat()
         return (
             f"时窗：北京时间 {start}—{end}；滚动池 {rolling}—{report_date}；"
-            f"覆盖：{_coverage_text(result)}"
+            f"覆盖：{_coverage_status_text(result)}"
         )
 
     @staticmethod
@@ -588,16 +588,46 @@ def _coverage_text(result: RunResult) -> str:
     metrics = result.metrics
     degraded: list[str] = []
     if metrics.search_coverage_degraded:
+        search_details = [
+            _search_failure_text(reason)
+            for reason in dict.fromkeys(metrics.search_failure_reasons)
+        ]
         if metrics.failed_domains:
             failed_domains = "、".join(
                 _safe_text(domain) for domain in sorted(set(metrics.failed_domains))
             )
-            degraded.append(f"搜索（失败域：{failed_domains}）")
-        else:
-            degraded.append("搜索")
+            search_details.append(f"官方来源访问失败：{failed_domains}")
+        degraded.append(
+            f"搜索（{'；'.join(search_details)}）" if search_details else "搜索"
+        )
     if metrics.model_coverage_degraded or result.trend_summary.degraded:
         degraded.append("AI")
     return f"降级（{'、'.join(degraded)}）" if degraded else "正常"
+
+
+def _coverage_status_text(result: RunResult) -> str:
+    metrics = result.metrics
+    degraded = (
+        metrics.search_coverage_degraded
+        or metrics.model_coverage_degraded
+        or result.trend_summary.degraded
+    )
+    return "降级" if degraded else "正常"
+
+
+_SEARCH_FAILURE_TEXT = {
+    "authentication": "博查 API 认证失败",
+    "quota_or_rate_limit": "博查 API 配额不足或触发限流",
+    "network_or_timeout": "博查 API 网络连接或请求超时",
+    "server_error": "博查 API 服务端异常",
+    "request_rejected": "博查 API 请求被拒绝",
+    "invalid_response": "博查 API 返回格式异常",
+}
+
+
+def _search_failure_text(reason: str) -> str:
+    """Render only allow-listed, secret-safe search failure categories."""
+    return _SEARCH_FAILURE_TEXT.get(reason, "博查 API 调用失败")
 
 
 def _open_project_sort_key(project: Project) -> tuple[object, ...]:

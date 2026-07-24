@@ -24,7 +24,7 @@ python -m pip install -c constraints.txt -e ".[dev]"
 
 `constraints.txt` 固定运行、构建与测试的直接依赖版本；更新依赖时应同步运行完整测试后再提交约束文件。
 
-在终端设置 `DEEPSEEK_API_KEY`、`TAVILY_API_KEY` 和 `DINGTALK_WEBHOOK` 后，先进行不发送钉钉消息的演练：
+在终端设置 `DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK` 和 `DINGTALK_SECRET` 后，先进行不发送钉钉消息的演练：
 
 ```bash
 laser-space-daily --config config.yaml --dry-run
@@ -37,8 +37,8 @@ laser-space-daily --config config.yaml --dry-run
 当前验收状态明确区分离线证据与尚未执行的外部验收：
 
 - [x] 已完成离线固定样本验收：四类内容、采购全生命周期、废标后重新招标、同名不同标段、融资 A 级来源/两个独立 B 级来源/单一 B 级待核验/银行授信排除。
-- [x] 已完成离线全量测试、核心模块逐文件覆盖率、编译和敏感信息扫描；这些测试使用注入的固定客户端，不访问真实 DeepSeek、Tavily 或钉钉。
-- [ ] 待创建私有 GitHub 远端并配置 `DEEPSEEK_API_KEY`、`TAVILY_API_KEY`、`DINGTALK_WEBHOOK` Secrets。
+- [x] 已完成离线全量测试、核心模块逐文件覆盖率、编译和敏感信息扫描；这些测试使用注入的固定客户端，不访问真实 DeepSeek、博查或钉钉。
+- [ ] 待在私有 GitHub 远端配置 `DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET` Secrets。
 - [ ] 待首次运行 `workflow_dispatch` 且保持 `dry_run=true`，下载并人工审核报告与状态 artifact。
 - [ ] 待审核通过后运行一次 `dry_run=false`，验收仅一条钉钉消息及其来源链接。
 
@@ -47,7 +47,7 @@ laser-space-daily --config config.yaml --dry-run
 ## GitHub Actions 首次启用
 
 1. 创建一个**私有** GitHub 仓库并推送本项目。
-2. 在仓库 **Settings → Secrets and variables → Actions** 中添加三个名称完全一致的 Secrets：`DEEPSEEK_API_KEY`、`TAVILY_API_KEY`、`DINGTALK_WEBHOOK`。
+2. 在仓库 **Settings → Secrets and variables → Actions** 中添加四个名称完全一致的 Secrets：`DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET`。钉钉机器人使用加签安全模式时，`DINGTALK_SECRET` 应填写以 `SEC` 开头的完整加签密钥。
 3. 在 Actions 页面手动运行工作流，保持 `dry_run=true`。下载包含 `reports/` 与 `data/` 的 artifact，核对报告、来源链接和状态。
 4. 审核通过后，手动以 `dry_run=false` 运行一次，确认钉钉投递可接受。
 

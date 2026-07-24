@@ -225,7 +225,8 @@ class RunMetrics(DomainModel):
     deduplicated_count: int = Field(default=0, ge=0)
     failed_domains: list[str] = Field(default_factory=list)
     deepseek_tokens: int = Field(default=0, ge=0)
-    tavily_usage: int = Field(default=0, ge=0)
+    search_api_usage: int = Field(default=0, ge=0)
+    search_failure_reasons: list[str] = Field(default_factory=list)
     model_coverage_degraded: bool = False
     search_coverage_degraded: bool = False
 

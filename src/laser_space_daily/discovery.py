@@ -18,14 +18,35 @@ from .timebox import beijing_now
 
 
 QueryKind = Literal["incremental", "project_followup", "rolling_recheck", "overdue_result"]
+SearchFailureReason = Literal[
+    "authentication",
+    "quota_or_rate_limit",
+    "network_or_timeout",
+    "server_error",
+    "request_rejected",
+    "invalid_response",
+]
 
 
 class DiscoveryError(RuntimeError):
     """Base class for controlled discovery-provider failures."""
 
+    default_reason: SearchFailureReason = "request_rejected"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: SearchFailureReason | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason or self.default_reason
+
 
 class DiscoveryQuotaError(DiscoveryError):
     """Raised when a discovery provider rejects an attempt for quota/rate limits."""
+
+    default_reason: SearchFailureReason = "quota_or_rate_limit"
 
 
 class DiscoveryUnavailableError(DiscoveryError):
@@ -34,6 +55,8 @@ class DiscoveryUnavailableError(DiscoveryError):
 
 class DiscoveryConfigurationError(DiscoveryUnavailableError):
     """Raised when discovery credentials or request authorization are rejected."""
+
+    default_reason: SearchFailureReason = "authentication"
 
 
 @dataclass(frozen=True)
@@ -143,10 +166,10 @@ class QueryPlanner:
         return value.astimezone(UTC)
 
 
-class TavilyProvider:
-    """Map Tavily discovery responses to unverified Candidate records."""
+class BochaProvider:
+    """Map Bocha Web Search responses to unverified Candidate records."""
 
-    _SEARCH_URL = "https://api.tavily.com/search"
+    _SEARCH_URL = "https://api.bochaai.com/v1/web-search"
 
     def __init__(self, api_key: str, client: httpx.Client | None = None) -> None:
         self.api_key = api_key
@@ -163,46 +186,68 @@ class TavilyProvider:
         try:
             response = self._client.post(
                 self._SEARCH_URL,
+                headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
-                    "api_key": self.api_key,
                     "query": query.text,
-                    "topic": "general",
-                    "search_depth": "advanced",
-                    "max_results": 10,
-                    "include_answer": False,
+                    "freshness": "noLimit",
+                    "summary": True,
+                    "count": 10,
                 },
             )
         except (httpx.TransportError, ConnectionError, TimeoutError) as error:
-            raise DiscoveryUnavailableError("tavily unavailable") from error
+            raise DiscoveryUnavailableError(
+                "bocha network unavailable",
+                reason="network_or_timeout",
+            ) from error
         if response.status_code == 429:
-            raise DiscoveryQuotaError("tavily quota exceeded")
+            raise DiscoveryQuotaError("bocha quota or rate limit exceeded")
         if response.status_code in {401, 403}:
-            raise DiscoveryConfigurationError("tavily authentication rejected")
+            raise DiscoveryConfigurationError("bocha authentication rejected")
         if 500 <= response.status_code <= 599:
-            raise DiscoveryUnavailableError("tavily unavailable")
+            raise DiscoveryUnavailableError(
+                "bocha server unavailable",
+                reason="server_error",
+            )
         if not 200 <= response.status_code <= 299:
-            raise DiscoveryUnavailableError("tavily request rejected")
+            raise DiscoveryUnavailableError(
+                "bocha request rejected",
+                reason="request_rejected",
+            )
         try:
             payload = response.json()
             if not isinstance(payload, dict):
                 raise TypeError("response root must be an object")
-            results = payload.get("results")
+            web_pages = payload.get("webPages")
+            if not isinstance(web_pages, dict):
+                raise TypeError("webPages must be an object")
+            results = web_pages.get("value")
             if not isinstance(results, list):
                 raise TypeError("results must be a list")
             parsed_results: list[tuple[str, str, str]] = []
             for result in results:
                 if not isinstance(result, dict):
                     raise TypeError("result must be an object")
-                title = result.get("title")
+                title = result.get("name")
                 url = result.get("url")
-                content = result.get("content")
-                if not all(isinstance(value, str) for value in (title, url, content)):
-                    raise TypeError("result fields must be text")
+                summary = result.get("summary")
+                snippet = result.get("snippet")
+                if not isinstance(title, str) or not isinstance(url, str):
+                    raise TypeError("result title and URL must be text")
+                if summary is not None and not isinstance(summary, str):
+                    raise TypeError("result summary must be text")
+                if snippet is not None and not isinstance(snippet, str):
+                    raise TypeError("result snippet must be text")
                 if not title.strip() or not url.strip():
                     raise ValueError("result title and URL must be non-empty")
+                content = summary.strip() if isinstance(summary, str) else ""
+                if not content and isinstance(snippet, str):
+                    content = snippet.strip()
                 parsed_results.append((title, url, content))
         except (TypeError, ValueError) as error:
-            raise DiscoveryUnavailableError("tavily response invalid") from error
+            raise DiscoveryUnavailableError(
+                "bocha response invalid",
+                reason="invalid_response",
+            ) from error
         discovered_at = beijing_now()
         return [
             Candidate(
@@ -210,7 +255,7 @@ class TavilyProvider:
                 url=url,
                 summary=content,
                 discovered_at=discovered_at,
-                discovery_source="tavily",
+                discovery_source="bocha",
             )
             for title, url, content in parsed_results
         ]
