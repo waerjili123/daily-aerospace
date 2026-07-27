@@ -204,6 +204,7 @@ class Financing(DomainModel):
 class PendingItem(DomainModel):
     item_id: str
     title: str
+    summary: str = ""
     reason: str
     source_url: str
     discovered_at: datetime

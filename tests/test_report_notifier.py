@@ -341,6 +341,7 @@ def run_result() -> RunResult:
             PendingItem(
                 item_id="suspected-1",
                 title="疑似同项目公告",
+                summary="搜索结果摘要，仅供人工复核。",
                 reason="suspected_project_match",
                 source_url="https://pending.example/item",
                 discovered_at=WINDOW_END,

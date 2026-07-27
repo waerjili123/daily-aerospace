@@ -78,6 +78,16 @@ _STATUS_LABELS = {
     "completed": "已完结",
     "closed": "已关闭",
 }
+_PENDING_REASON_LABELS = {
+    "fetch_failed": "正文抓取失败",
+    "network_failed": "网络或证书校验失败",
+    "analysis_failed": "AI 分析失败",
+    "validation_failed": "结构校验失败",
+    "source_unavailable": "来源暂不可用",
+    "verified_payload_invalid": "核验字段不完整",
+    "suspected_project_match": "疑似项目匹配",
+    "missing_matched_project": "匹配项目缺失",
+}
 
 _COMPLETED_STATUSES = frozenset(
     {"awarded", "terminated", "failed", "completed", "closed"}
@@ -557,6 +567,34 @@ def _followup_lines(
         item.reason == "suspected_project_match" for item in result.state.pending
     )
     lines.append(f"- 评估中项目：{evaluating}；疑似匹配待核实：{suspected}")
+    current_pending = sorted(
+        (
+            item
+            for item in result.state.pending
+            if result.window_start
+            <= _as_beijing(item.discovered_at)
+            <= result.window_end
+        ),
+        key=lambda item: (_datetime_key(item.discovered_at), item.item_id),
+    )
+    for item in current_pending[:10]:
+        reason = _PENDING_REASON_LABELS.get(item.reason, _safe_text(item.reason))
+        lines.append(
+            "｜".join(
+                (
+                    "- 待核实候选",
+                    _safe_text(item.title),
+                    f"原因：{reason}",
+                    _link("查看原始来源", item.source_url),
+                )
+            )
+        )
+        if item.summary.strip():
+            lines.append(
+                f"  - 搜索摘要（未核实）：{_safe_text(item.summary[:240])}"
+            )
+    if len(current_pending) > 10:
+        lines.append(f"- 另有 {len(current_pending) - 10} 条待核实候选未展开")
     return tuple(lines)
 
 
@@ -576,7 +614,8 @@ def _trend_lines(result: RunResult) -> tuple[str, ...]:
         f"- {_safe_text(result.trend_summary.summary)}",
         f"- 分类计数：{count_text}",
         (
-            f"- 数据完整性：已核实 {metrics.verified_count}；"
+            f"- 数据完整性：候选 {metrics.candidate_count}；"
+            f"已核实 {metrics.verified_count}；"
             f"待核实 {metrics.pending_count}；已去重 {metrics.deduplicated_count}；"
             f"失败域 {len(metrics.failed_domains)}"
         ),

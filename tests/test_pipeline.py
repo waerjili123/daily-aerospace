@@ -46,10 +46,12 @@ def candidate(
     *,
     source: str = "official:official.example.cn",
     discovered_at: datetime = NOW,
+    summary: str = "",
 ) -> Candidate:
     return Candidate(
         title="Laser terminal award",
         url=url,
+        summary=summary,
         discovered_at=discovered_at,
         discovery_source=source,
     )
@@ -307,7 +309,7 @@ def pending_decision(reason: str = "source_unavailable") -> VerificationDecision
 
 
 def test_pipeline_routes_verified_and_pending(deps) -> None:
-    unreachable = candidate(SECOND_URL)
+    unreachable = candidate(SECOND_URL, summary="Search-provider fallback summary")
     deps.official_collector.rows = [candidate(), unreachable]
     deps.verifier.decisions[SECOND_URL] = pending_decision()
 
@@ -317,6 +319,7 @@ def test_pipeline_routes_verified_and_pending(deps) -> None:
     assert result.metrics.pending_count == 1
     assert len(result.state.events) == 1
     assert result.state.pending[0].reason == "source_unavailable"
+    assert result.state.pending[0].summary == "Search-provider fallback summary"
 
 
 def test_pipeline_analyzes_each_corroborating_source_before_verification(deps) -> None:

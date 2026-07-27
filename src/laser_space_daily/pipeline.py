@@ -406,6 +406,7 @@ class Pipeline:
         pending[item_id] = PendingItem(
             item_id=item_id,
             title=item.title,
+            summary=str(getattr(item, "summary", "") or ""),
             reason=reason,
             source_url=normalized_url,
             discovered_at=now,
