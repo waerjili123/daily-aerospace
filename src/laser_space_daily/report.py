@@ -609,6 +609,50 @@ def _followup_lines(
             )
     if len(current_pending) > 10:
         lines.append(f"- 另有 {len(current_pending) - 10} 条待核实候选未展开")
+    surfaced_urls = {
+        item.source_url for item in result.state.pending
+    } | {
+        item.source_url for item in result.state.events
+    } | {
+        url
+        for item in result.state.financings
+        for url in (item.source_urls or [item.source_url])
+    }
+    discovery_candidates = [
+        item
+        for item in result.discovery_candidates
+        if item.url not in surfaced_urls
+    ]
+    for item in discovery_candidates[:10]:
+        category = (
+            _CATEGORY_LABELS.get(item.category_hint, "板块未确定")
+            if item.category_hint is not None
+            else "板块未确定"
+        )
+        source_date = (
+            _format_date(item.source_published_at)
+            if item.source_published_at is not None
+            else "发布日期未知"
+        )
+        time_label = _pending_time_label(item.source_published_at, result.window_end)
+        lines.append(
+            "｜".join(
+                (
+                    "- 搜索候选（未核实）",
+                    category,
+                    source_date,
+                    time_label,
+                    _safe_text(item.title),
+                    _link("查看原始来源", item.url),
+                )
+            )
+        )
+        if item.summary.strip():
+            lines.append(
+                f"  - 搜索摘要（未核实）：{_safe_text(item.summary[:240])}"
+            )
+    if len(discovery_candidates) > 10:
+        lines.append(f"- 另有 {len(discovery_candidates) - 10} 条搜索候选未展开")
     return tuple(lines)
 
 

@@ -31,6 +31,7 @@ from laser_space_daily.fetcher import PageFetcher
 from laser_space_daily.matching import ProjectMatcher
 from laser_space_daily.models import (
     AnalysisResult,
+    Candidate,
     Category,
     Event,
     EventType,
@@ -165,6 +166,28 @@ def test_date_only_deadline_remains_actionable_and_in_followup_until_local_day_e
     assert any("当日截止项目" in line for line in _followup_lines(result, {}))
 
 
+def test_followup_surfaces_selected_search_candidate_rejected_downstream():
+    item = Candidate(
+        title="星间激光通信终端采购公告",
+        url="https://search.example.cn/laser-terminal",
+        summary="某研究院发布空间激光通信终端采购信息",
+        discovered_at=WINDOW_END,
+        discovery_source="bocha",
+        category_hint=Category.LASER_COMMUNICATION,
+        source_published_at=dt(7, 21),
+    )
+    result = make_result(discovery_candidates=[item])
+
+    followup = "\n".join(_followup_lines(result, {}))
+
+    assert "搜索候选（未核实）" in followup
+    assert "激光通信" in followup
+    assert "2026-07-21" in followup
+    assert item.title in followup
+    assert item.summary in followup
+    assert item.url in followup
+
+
 def financing(
     financing_id: str = "f-new",
     *,
@@ -214,6 +237,7 @@ def make_result(
     changed_project_ids: list[str] | None = None,
     changed_financing_ids: list[str] | None = None,
     metrics: RunMetrics | None = None,
+    discovery_candidates: list[Candidate] | None = None,
 ) -> RunResult:
     report_state = state or StateBundle()
     return RunResult(
@@ -249,6 +273,7 @@ def make_result(
         changed_event_ids=changed_event_ids or [],
         changed_project_ids=changed_project_ids or [],
         changed_financing_ids=changed_financing_ids or [],
+        discovery_candidates=discovery_candidates or [],
     )
 
 

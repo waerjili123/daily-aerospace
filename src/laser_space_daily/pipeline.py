@@ -31,6 +31,7 @@ from .matching import (
 )
 from .models import (
     AnalysisResult,
+    Candidate,
     Category,
     DomainModel,
     Event,
@@ -56,6 +57,7 @@ class RunResult(DomainModel):
     changed_event_ids: list[str] = Field(default_factory=list)
     changed_project_ids: list[str] = Field(default_factory=list)
     changed_financing_ids: list[str] = Field(default_factory=list)
+    discovery_candidates: list[Candidate] = Field(default_factory=list)
 
 
 _OFFICIAL_COLLECTION_ERRORS = (
@@ -407,6 +409,7 @@ class Pipeline:
             changed_event_ids=changed_event_ids,
             changed_project_ids=changed_project_ids,
             changed_financing_ids=changed_financing_ids,
+            discovery_candidates=selected_search_rows,
         )
 
     @staticmethod

@@ -953,6 +953,9 @@ def test_pipeline_filters_search_noise_before_fetch_and_marks_information_availa
     assert result.metrics.relevance_pass_count == 20
     assert result.metrics.final_candidate_count == 5
     assert result.metrics.information_available is True
+    assert [item.url for item in result.discovery_candidates] == [
+        f"https://search.example.cn/relevant/{index}" for index in range(5)
+    ]
     assert len(deps.fetcher.calls) == 5
     assert all("noise" not in url for url in deps.fetcher.calls)
 
