@@ -44,18 +44,16 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Guard one-time DingTalk branch
-        run: test "${GITHUB_REF}" = "refs/heads/codex/dingtalk-test-20260727"
-
       - name: Run daily pipeline
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          DINGTALK_WEBHOOK: https://example.invalid/manual-dry-run
+          DINGTALK_SECRET: unused-manual-dry-run-secret
         run: >-
           laser-space-daily
           --config config.yaml
+          --dry-run
           --max-queries "${{ inputs.max_queries }}"
 
       - name: Upload generated report

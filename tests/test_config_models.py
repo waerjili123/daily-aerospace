@@ -32,7 +32,7 @@ def _workflow_step(steps: list[dict], name: str) -> dict:
     return next(step for step in steps if step.get("name") == name)
 
 
-def test_workflow_is_manual_bounded_one_time_dingtalk_send():
+def test_workflow_is_manual_bounded_dry_run_without_dingtalk_secrets():
     workflow_path = ".github/workflows/daily-intelligence.yml"
     workflow = _repository_file(workflow_path).read_text(encoding="utf-8")
     document = _base_yaml(workflow_path)
@@ -40,8 +40,8 @@ def test_workflow_is_manual_bounded_one_time_dingtalk_send():
     assert set(document["on"]) == {"workflow_dispatch"}
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert "BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}" in workflow
-    assert "DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}" in workflow
-    assert "DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}" in workflow
+    assert "secrets.DINGTALK_WEBHOOK" not in workflow
+    assert "secrets.DINGTALK_SECRET" not in workflow
     assert "concurrency:" in workflow
     assert document["on"]["workflow_dispatch"]["inputs"]["max_queries"] == {
         "description": "Bocha query count for manual collection validation",
@@ -56,15 +56,8 @@ def test_workflow_is_manual_bounded_one_time_dingtalk_send():
     pipeline_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Run daily pipeline"
     )
-    assert "--dry-run" not in pipeline_step["run"]
+    assert "--dry-run" in pipeline_step["run"]
     assert '--max-queries "${{ inputs.max_queries }}"' in pipeline_step["run"]
-    guard_step = _workflow_step(
-        document["jobs"]["run"]["steps"], "Guard one-time DingTalk branch"
-    )
-    assert (
-        guard_step["run"]
-        == 'test "${GITHUB_REF}" = "refs/heads/codex/dingtalk-test-20260727"'
-    )
 
 
 def test_committed_config_contains_no_secret_values():
@@ -213,7 +206,7 @@ def test_readme_documents_schema_migration_and_single_writer_lock() -> None:
         assert required in readme
 
 
-def test_one_time_workflow_cannot_schedule_or_commit() -> None:
+def test_workflow_cannot_schedule_notify_or_commit() -> None:
     document = _base_yaml(".github/workflows/daily-intelligence.yml")
     workflow = _repository_file(
         ".github/workflows/daily-intelligence.yml"
@@ -221,9 +214,8 @@ def test_one_time_workflow_cannot_schedule_or_commit() -> None:
     steps = document["jobs"]["run"]["steps"]
 
     assert set(document["on"]) == {"workflow_dispatch"}
-    assert "--dry-run" not in _workflow_step(steps, "Run daily pipeline")["run"]
-    assert "secrets.DINGTALK_WEBHOOK" in workflow
-    assert "secrets.DINGTALK_SECRET" in workflow
+    assert "--dry-run" in _workflow_step(steps, "Run daily pipeline")["run"]
+    assert "secrets.DINGTALK" not in workflow
     assert all(step.get("name") != "Commit state and report" for step in steps)
 
 
