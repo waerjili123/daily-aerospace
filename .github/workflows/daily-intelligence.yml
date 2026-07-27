@@ -1,21 +1,24 @@
 name: Daily Laser and Space Intelligence
 
 on:
-  schedule:
-    - cron: "30 23 * * *"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Generate report without DingTalk delivery"
-        type: boolean
-        default: true
+      max_queries:
+        description: "Bocha query count for manual collection validation"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+        default: "4"
 
 concurrency:
   group: laser-space-daily
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   run:
@@ -45,14 +48,13 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-        run: |
-          command=(laser-space-daily --config config.yaml)
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
-            command+=(--dry-run)
-          fi
-          "${command[@]}"
+          DINGTALK_WEBHOOK: https://example.invalid/manual-dry-run
+          DINGTALK_SECRET: unused-manual-dry-run-secret
+        run: >-
+          laser-space-daily
+          --config config.yaml
+          --dry-run
+          --max-queries "${{ inputs.max_queries }}"
 
       - name: Upload generated report
         if: always()
@@ -63,17 +65,3 @@ jobs:
             reports/
             data/
           if-no-files-found: warn
-
-      - name: Commit state and report
-        if: ${{ success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != true)) }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data reports
-          if git diff --cached --quiet; then
-            exit 0
-          fi
-          git commit -m "data: update daily intelligence state"
-          git fetch origin "${GITHUB_REF_NAME}"
-          git rebase origin/"${GITHUB_REF_NAME}"
-          git push origin HEAD:"${GITHUB_REF_NAME}"

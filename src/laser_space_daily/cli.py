@@ -180,6 +180,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="laser-space-daily")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--max-queries", type=_non_negative_int)
     parser.add_argument("--now")
     parser.add_argument(
         "--log-level",
@@ -187,6 +188,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default="INFO",
     )
     return parser
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
 
 
 def _parse_now(value: str | None) -> datetime:
@@ -281,6 +292,14 @@ def run_cli(
     try:
         now = _parse_now(arguments.now)
         settings = selected.settings_loader(Path(arguments.config))
+        if arguments.max_queries is not None:
+            settings = settings.model_copy(
+                update={
+                    "discovery": settings.discovery.model_copy(
+                        update={"max_queries": arguments.max_queries}
+                    )
+                }
+            )
     except Exception as error:
         _log_failure("configuration", error)
         return 2
