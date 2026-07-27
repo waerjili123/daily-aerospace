@@ -53,6 +53,8 @@ class Candidate(DomainModel):
     summary: str = ""
     discovered_at: datetime
     discovery_source: str
+    category_hint: Category | None = None
+    source_published_at: datetime | None = None
 
 
 class Evidence(DomainModel):
@@ -208,6 +210,8 @@ class PendingItem(DomainModel):
     reason: str
     source_url: str
     discovered_at: datetime
+    category_hint: Category | None = None
+    source_published_at: datetime | None = None
 
 
 class RunMetrics(DomainModel):
@@ -218,6 +222,15 @@ class RunMetrics(DomainModel):
     errors: list[str] = Field(default_factory=list)
     search_count: int = Field(default=0, ge=0)
     candidate_count: int = Field(default=0, ge=0)
+    raw_search_count: int = Field(default=0, ge=0)
+    valid_shape_count: int = Field(default=0, ge=0)
+    relevance_pass_count: int = Field(default=0, ge=0)
+    recent_7d_count: int = Field(default=0, ge=0)
+    fallback_8_30d_count: int = Field(default=0, ge=0)
+    unknown_date_count: int = Field(default=0, ge=0)
+    final_candidate_count: int = Field(default=0, ge=0)
+    fetch_failure_count: int = Field(default=0, ge=0)
+    information_available: bool = False
     official_candidate_count: int = Field(default=0, ge=0)
     verified_count: int = Field(default=0, ge=0)
     pending_count: int = Field(default=0, ge=0)

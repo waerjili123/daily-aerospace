@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Iterable, Literal
 from urllib.parse import unquote_plus, urljoin, urlsplit, urlunsplit
 
@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup, FeatureNotFound
 from pydantic import BaseModel, ConfigDict
 from soupsieve import SelectorSyntaxError
 
-from .models import Candidate, Project, SourceGrade
+from .models import Candidate, Category, Project, SourceGrade
 from .deadlines import deadline_is_expired
 from .timebox import beijing_now
 
@@ -63,6 +63,20 @@ class DiscoveryConfigurationError(DiscoveryUnavailableError):
 class SearchQuery:
     kind: QueryKind
     text: str
+    category: Category | None = None
+
+
+@dataclass(frozen=True)
+class CandidateSelection:
+    """A bounded, deterministic set of usable search candidates and funnel counts."""
+
+    candidates: tuple[Candidate, ...]
+    raw_search_count: int
+    valid_shape_count: int
+    relevance_pass_count: int
+    recent_7d_count: int
+    fallback_8_30d_count: int
+    unknown_date_count: int
 
 
 class OfficialSeed(BaseModel):
@@ -82,10 +96,26 @@ class QueryPlanner:
 
     _DISCOVERY_SCOPE = "中国 境内 -人工智能新闻 -AI新闻"
     _INCREMENTAL_QUERIES = (
-        "激光通信 采购公告 招标 中标 结果 变更 延期 终止",
-        "激光反无人机 采购公告 招标 中标 结果 变更 延期 终止",
-        "光电转塔 采购公告 招标 中标 结果 变更 延期 终止",
-        "商业航天 融资 采购公告 招标 中标 结果 变更 延期 终止",
+        (
+            Category.LASER_COMMUNICATION,
+            "激光通信 空间激光通信 星间激光通信 激光通信终端 "
+            "采购 招标 中标 结果 变更 延期 终止",
+        ),
+        (
+            Category.LASER_WEAPON,
+            "激光武器 高能激光 定向能激光 激光反无人机 激光反制 "
+            "采购 招标 中标 结果 变更 延期 终止",
+        ),
+        (
+            Category.EO_TURRET,
+            "光电转塔 光电吊舱 机载光电 舰载光电 无人机光电载荷 "
+            "采购 招标 中标 结果 变更 延期 终止",
+        ),
+        (
+            Category.COMMERCIAL_SPACE_FINANCING,
+            "商业航天 融资 运载火箭 卫星公司 卫星制造 卫星运营 "
+            "股权投资 战略投资 增资 天使轮 种子轮 Pre-A轮 A轮 B轮",
+        ),
     )
     _INACTIVE_STATUSES = frozenset({"completed", "closed", "cancelled", "terminated"})
 
@@ -104,12 +134,14 @@ class QueryPlanner:
         if not isinstance(now, datetime):
             raise TypeError("planner now must be a datetime")
         queries = [
-            SearchQuery(kind="incremental", text=text) for text in self._INCREMENTAL_QUERIES
+            SearchQuery(kind="incremental", text=text, category=category)
+            for category, text in self._INCREMENTAL_QUERIES
         ]
         queries.extend(
             SearchQuery(
                 kind="incremental",
                 text=f"site:{domain} 商业航天 融资 投资 增资",
+                category=Category.COMMERCIAL_SPACE_FINANCING,
             )
             for domain in self.financing_domains
         )
@@ -124,10 +156,12 @@ class QueryPlanner:
                     SearchQuery(
                         kind="project_followup",
                         text=f"{project_identity} 采购 招标 中标",
+                        category=project.category,
                     ),
                     SearchQuery(
                         kind="rolling_recheck",
                         text=f"{project_identity} 变更 延期 终止",
+                        category=project.category,
                     ),
                 )
             )
@@ -136,10 +170,15 @@ class QueryPlanner:
                     SearchQuery(
                         kind="overdue_result",
                         text=f"{project_identity} 中标 结果 流标 重新招标",
+                        category=project.category,
                     )
                 )
         return [
-            SearchQuery(kind=query.kind, text=f"{query.text} {self._DISCOVERY_SCOPE}")
+            SearchQuery(
+                kind=query.kind,
+                text=f"{query.text} {self._DISCOVERY_SCOPE}",
+                category=query.category,
+            )
             for query in queries[: self.max_queries]
         ]
 
@@ -189,7 +228,7 @@ class BochaProvider:
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
                     "query": query.text,
-                    "freshness": "noLimit",
+                    "freshness": "oneMonth",
                     "summary": True,
                     "count": 10,
                 },
@@ -227,26 +266,35 @@ class BochaProvider:
             results = web_pages.get("value")
             if not isinstance(results, list):
                 raise TypeError("results must be a list")
-            parsed_results: list[tuple[str, str, str]] = []
+            parsed_results: list[tuple[str, str, str, datetime | None]] = []
             for result in results:
                 if not isinstance(result, dict):
-                    raise TypeError("result must be an object")
+                    continue
                 title = result.get("name")
                 url = result.get("url")
                 summary = result.get("summary")
                 snippet = result.get("snippet")
                 if not isinstance(title, str) or not isinstance(url, str):
-                    raise TypeError("result title and URL must be text")
+                    continue
                 if summary is not None and not isinstance(summary, str):
-                    raise TypeError("result summary must be text")
+                    summary = None
                 if snippet is not None and not isinstance(snippet, str):
-                    raise TypeError("result snippet must be text")
+                    snippet = None
                 if not title.strip() or not url.strip():
-                    raise ValueError("result title and URL must be non-empty")
+                    continue
                 content = summary.strip() if isinstance(summary, str) else ""
                 if not content and isinstance(snippet, str):
                     content = snippet.strip()
-                parsed_results.append((title, url, content))
+                parsed_results.append(
+                    (
+                        title.strip(),
+                        url.strip(),
+                        content,
+                        _parse_source_published_at(result.get("datePublished")),
+                    )
+                )
+            if results and not parsed_results:
+                raise TypeError("response contains no valid result objects")
         except (TypeError, ValueError) as error:
             raise DiscoveryUnavailableError(
                 "bocha response invalid",
@@ -260,8 +308,10 @@ class BochaProvider:
                 summary=content,
                 discovered_at=discovered_at,
                 discovery_source="bocha",
+                category_hint=query.category,
+                source_published_at=source_published_at,
             )
-            for title, url, content in parsed_results
+            for title, url, content, source_published_at in parsed_results
         ]
 
     @staticmethod
@@ -354,6 +404,231 @@ class OfficialSeedCollector:
                         )
                     )
         return rows
+
+
+_CATEGORY_TERMS: dict[Category, tuple[str, ...]] = {
+    Category.LASER_COMMUNICATION: (
+        "激光通信",
+        "空间激光通信",
+        "星间激光通信",
+        "激光通信终端",
+        "光通信终端",
+        "laser communication",
+        "laser terminal",
+    ),
+    Category.LASER_WEAPON: (
+        "激光武器",
+        "高能激光",
+        "定向能激光",
+        "激光反无人机",
+        "激光反制",
+        "laser weapon",
+        "directed energy laser",
+    ),
+    Category.EO_TURRET: (
+        "光电转塔",
+        "光电吊舱",
+        "机载光电",
+        "舰载光电",
+        "无人机光电载荷",
+        "eo turret",
+        "electro-optical turret",
+    ),
+}
+_FINANCING_SUBJECT_TERMS = (
+    "商业航天",
+    "运载火箭",
+    "火箭公司",
+    "卫星公司",
+    "卫星制造",
+    "卫星运营",
+    "commercial space",
+)
+_FINANCING_EVENT_TERMS = (
+    "融资",
+    "股权投资",
+    "战略投资",
+    "增资",
+    "天使轮",
+    "种子轮",
+    "pre-a轮",
+    "a轮",
+    "b轮",
+    "c轮",
+    "d轮",
+)
+_EXCLUDED_NOISE_TERMS = (
+    "激光打印机",
+    "打印耗材",
+    "硒鼓",
+    "墨盒",
+    "激光雕刻",
+    "激光切割",
+    "激光打标机",
+    "激光美容",
+    "激光脱毛",
+    "激光祛斑",
+    "医美",
+    "医疗器械",
+    "医用防护",
+    "美容防护眼镜",
+    "人工智能算法采购",
+    "ai算法采购",
+    "算力采购",
+    "大模型采购",
+    "软件采购",
+)
+
+
+def select_search_candidates(
+    rows: Iterable[Candidate],
+    now: datetime,
+    *,
+    minimum: int = 5,
+    maximum: int = 10,
+) -> CandidateSelection:
+    """Apply the approved shape, relevance and date gates to web-search rows."""
+    if now.tzinfo is None:
+        raise ValueError("selection time must include a timezone")
+    if minimum < 0 or maximum < minimum:
+        raise ValueError("candidate bounds must satisfy 0 <= minimum <= maximum")
+
+    input_rows = list(rows)
+    valid: list[Candidate] = []
+    relevant: list[tuple[Candidate, int]] = []
+    for row in input_rows:
+        if not _has_usable_search_shape(row):
+            continue
+        valid.append(row)
+        assessed = _assess_relevance(row)
+        if assessed is not None:
+            relevant.append(assessed)
+
+    deduplicated: list[tuple[Candidate, int]] = []
+    seen: set[str] = set()
+    for row, score in relevant:
+        normalized_url = normalize_url(row.url)
+        if normalized_url in seen:
+            continue
+        seen.add(normalized_url)
+        deduplicated.append((row.model_copy(update={"url": normalized_url}), score))
+
+    recent: list[tuple[Candidate, int]] = []
+    fallback: list[tuple[Candidate, int]] = []
+    unknown: list[tuple[Candidate, int]] = []
+    now_utc = now.astimezone(UTC)
+    for row, score in deduplicated:
+        published_at = row.source_published_at
+        if published_at is None:
+            unknown.append((row, score))
+            continue
+        published_utc = published_at.astimezone(UTC)
+        if published_utc > now_utc + timedelta(hours=24):
+            continue
+        age = max(timedelta(0), now_utc - published_utc)
+        if age <= timedelta(days=7):
+            recent.append((row, score))
+        elif age <= timedelta(days=30):
+            fallback.append((row, score))
+
+    recent.sort(key=_candidate_rank)
+    fallback.sort(key=_candidate_rank)
+    unknown.sort(key=_candidate_rank)
+
+    selected = recent[:maximum]
+    fallback_used: list[tuple[Candidate, int]] = []
+    unknown_used: list[tuple[Candidate, int]] = []
+    if len(selected) < minimum:
+        fallback_used = fallback[: min(minimum - len(selected), maximum - len(selected))]
+        selected.extend(fallback_used)
+    if len(selected) < minimum:
+        unknown_used = unknown[
+            : min(2, minimum - len(selected), maximum - len(selected))
+        ]
+        selected.extend(unknown_used)
+
+    return CandidateSelection(
+        candidates=tuple(row for row, _score in selected),
+        raw_search_count=len(input_rows),
+        valid_shape_count=len(valid),
+        relevance_pass_count=len(relevant),
+        recent_7d_count=min(len(recent), maximum),
+        fallback_8_30d_count=len(fallback_used),
+        unknown_date_count=len(unknown_used),
+    )
+
+
+def _parse_source_published_at(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def _has_usable_search_shape(row: Candidate) -> bool:
+    if not row.title.strip() or not row.summary.strip():
+        return False
+    parts = urlsplit(row.url)
+    return parts.scheme.lower() in {"http", "https"} and bool(parts.hostname)
+
+
+def _assess_relevance(row: Candidate) -> tuple[Candidate, int] | None:
+    text = _normalized_candidate_text(row)
+    if any(term in text for term in _EXCLUDED_NOISE_TERMS):
+        return None
+
+    category = row.category_hint
+    if category is Category.COMMERCIAL_SPACE_FINANCING:
+        subject_hits = _term_hits(text, _FINANCING_SUBJECT_TERMS)
+        event_hits = _term_hits(text, _FINANCING_EVENT_TERMS)
+        if not subject_hits or not event_hits:
+            return None
+        return row, subject_hits + event_hits
+
+    if category in _CATEGORY_TERMS:
+        hits = _term_hits(text, _CATEGORY_TERMS[category])
+        return (row, hits) if hits else None
+
+    financing_subject_hits = _term_hits(text, _FINANCING_SUBJECT_TERMS)
+    financing_event_hits = _term_hits(text, _FINANCING_EVENT_TERMS)
+    if financing_subject_hits and financing_event_hits:
+        return (
+            row.model_copy(
+                update={"category_hint": Category.COMMERCIAL_SPACE_FINANCING}
+            ),
+            financing_subject_hits + financing_event_hits,
+        )
+    for inferred_category, terms in _CATEGORY_TERMS.items():
+        hits = _term_hits(text, terms)
+        if hits:
+            return row.model_copy(update={"category_hint": inferred_category}), hits
+    return None
+
+
+def _normalized_candidate_text(row: Candidate) -> str:
+    return " ".join(f"{row.title} {row.summary}".casefold().split())
+
+
+def _term_hits(text: str, terms: Iterable[str]) -> int:
+    return sum(1 for term in terms if term.casefold() in text)
+
+
+def _candidate_rank(item: tuple[Candidate, int]) -> tuple[object, ...]:
+    row, relevance_score = item
+    published_at = row.source_published_at
+    published_rank = (
+        -published_at.astimezone(UTC).timestamp() if published_at is not None else 0
+    )
+    official_rank = 0 if row.discovery_source.startswith("official:") else 1
+    return (published_rank, official_rank, -relevance_score, row.url)
 
 
 _TRACKING_KEYS = frozenset({"spm", "from", "source"})
