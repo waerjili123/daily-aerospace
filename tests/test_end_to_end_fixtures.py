@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 from zoneinfo import ZoneInfo
 
+from laser_space_daily.discovery import select_search_candidates
 from laser_space_daily.fetcher import FetchedPage
 from laser_space_daily.matching import ProjectMatcher
 from laser_space_daily.models import (
@@ -97,6 +98,31 @@ def _fixture_records() -> list[dict]:
             )
         )
     return records
+
+
+def test_information_availability_fixture_filters_noise_old_and_duplicate_rows() -> None:
+    fixture = _load_json("information_availability_cases.json")
+    now = datetime.fromisoformat(fixture["now"])
+    rows = [
+        Candidate.model_validate(
+            {
+                **record,
+                "discovered_at": now,
+                "discovery_source": "bocha",
+            }
+        )
+        for record in fixture["candidates"]
+    ]
+
+    selection = select_search_candidates(rows, now)
+
+    assert [item.url for item in selection.candidates] == fixture["expected_urls"]
+    assert selection.raw_search_count == 21
+    assert selection.valid_shape_count == 21
+    assert selection.relevance_pass_count == 16
+    assert selection.recent_7d_count == 6
+    assert selection.fallback_8_30d_count == 0
+    assert selection.unknown_date_count == 0
 
 
 class FixturePlanner:

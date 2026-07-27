@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,6 +20,7 @@ from laser_space_daily.discovery import (
     SearchQuery,
     dedupe_candidates,
     normalize_url,
+    select_search_candidates,
 )
 from laser_space_daily.models import Candidate, Category, Project, SourceGrade
 
@@ -101,6 +102,14 @@ def test_planner_caps_queries_in_stable_priority_order(project_factory, fixed_no
 
     assert len(queries) == 5
     assert [query.kind for query in queries[:4]] == ["incremental"] * 4
+    assert [query.category for query in queries[:4]] == [
+        Category.LASER_COMMUNICATION,
+        Category.LASER_WEAPON,
+        Category.EO_TURRET,
+        Category.COMMERCIAL_SPACE_FINANCING,
+    ]
+    assert "采购" not in queries[3].text
+    assert "招标" not in queries[3].text
     assert queries[4].kind == "project_followup"
 
 
@@ -186,7 +195,11 @@ def test_bocha_maps_web_result_and_keeps_source_url(respx_mock, bocha_payload):
     )
 
     rows = BochaProvider("secret").search(
-        SearchQuery(kind="incremental", text="测试")
+        SearchQuery(
+            kind="incremental",
+            text="测试",
+            category=Category.LASER_COMMUNICATION,
+        )
     )
 
     expected = bocha_payload["webPages"]["value"][0]
@@ -194,6 +207,8 @@ def test_bocha_maps_web_result_and_keeps_source_url(respx_mock, bocha_payload):
     assert rows[0].url == expected["url"]
     assert rows[0].summary == expected["summary"]
     assert rows[0].discovery_source == "bocha"
+    assert rows[0].category_hint is Category.LASER_COMMUNICATION
+    assert rows[0].source_published_at.isoformat() == expected["datePublished"]
 
 
 def test_bocha_maps_web_result_from_data_wrapped_response(
@@ -249,7 +264,7 @@ def test_bocha_sends_bearer_auth_and_required_discovery_request(
     assert route.calls[0].request.headers["Authorization"] == "Bearer secret"
     assert json.loads(route.calls[0].request.content) == {
         "query": "精确查询",
-        "freshness": "noLimit",
+        "freshness": "oneMonth",
         "summary": True,
         "count": 10,
     }
@@ -267,6 +282,158 @@ def test_bocha_counts_every_attempt_across_repeated_searches(
     provider.search(SearchQuery(kind="incremental", text="second"))
 
     assert provider.usage_count == 2
+
+
+def _search_candidate(
+    *,
+    title: str,
+    summary: str,
+    url: str,
+    category: Category,
+    published_at: datetime | None,
+) -> Candidate:
+    return Candidate(
+        title=title,
+        url=url,
+        summary=summary,
+        discovered_at=datetime(2026, 7, 22, 9, tzinfo=ZoneInfo("Asia/Shanghai")),
+        discovery_source="bocha",
+        category_hint=category,
+        source_published_at=published_at,
+    )
+
+
+def test_search_selection_prefers_recent_then_uses_8_to_30_day_fallback(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title=f"星间激光通信终端采购公告 {index}",
+            summary="空间激光通信终端采购项目",
+            url=f"https://example.cn/recent/{index}",
+            category=Category.LASER_COMMUNICATION,
+            published_at=fixed_now - timedelta(days=index),
+        )
+        for index in (1, 2, 3)
+    ]
+    rows.extend(
+        _search_candidate(
+            title=f"高能激光反无人机系统招标 {index}",
+            summary="激光反无人机装备采购",
+            url=f"https://example.cn/fallback/{index}",
+            category=Category.LASER_WEAPON,
+            published_at=fixed_now - timedelta(days=index),
+        )
+        for index in (8, 20, 25)
+    )
+    rows.extend(
+        (
+            _search_candidate(
+                title="空间激光通信激光打印机采购",
+                summary="激光打印机和硒鼓",
+                url="https://example.cn/noise",
+                category=Category.LASER_COMMUNICATION,
+                published_at=fixed_now - timedelta(days=1),
+            ),
+            _search_candidate(
+                title="星间激光通信旧闻",
+                summary="空间激光通信历史信息",
+                url="https://example.cn/old",
+                category=Category.LASER_COMMUNICATION,
+                published_at=fixed_now - timedelta(days=31),
+            ),
+            _search_candidate(
+                title="卫星公司发布消息",
+                summary="商业航天企业动态但没有投资事件",
+                url="https://example.cn/not-financing",
+                category=Category.COMMERCIAL_SPACE_FINANCING,
+                published_at=fixed_now - timedelta(days=1),
+            ),
+            _search_candidate(
+                title="重复的星间激光通信终端采购公告",
+                summary="空间激光通信终端采购项目",
+                url="https://example.cn/recent/1?utm_source=duplicate",
+                category=Category.LASER_COMMUNICATION,
+                published_at=fixed_now - timedelta(days=1),
+            ),
+        )
+    )
+
+    selection = select_search_candidates(rows, fixed_now)
+
+    assert len(selection.candidates) == 5
+    assert selection.raw_search_count == 10
+    assert selection.valid_shape_count == 10
+    assert selection.relevance_pass_count == 8
+    assert selection.recent_7d_count == 3
+    assert selection.fallback_8_30d_count == 2
+    assert selection.unknown_date_count == 0
+    assert all("noise" not in item.url for item in selection.candidates)
+    assert all("old" not in item.url for item in selection.candidates)
+
+
+def test_search_selection_limits_unknown_dates_and_rejects_future_rows(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title=f"商业航天卫星公司完成A轮融资 {index}",
+            summary="卫星公司宣布完成股权融资",
+            url=f"https://example.cn/unknown/{index}",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=None,
+        )
+        for index in range(4)
+    ]
+    rows.extend(
+        (
+            _search_candidate(
+                title="光电吊舱采购",
+                summary="无人机光电载荷招标",
+                url="https://example.cn/recent",
+                category=Category.EO_TURRET,
+                published_at=fixed_now - timedelta(days=1),
+            ),
+            _search_candidate(
+                title="激光武器采购",
+                summary="高能激光武器招标",
+                url="https://example.cn/future",
+                category=Category.LASER_WEAPON,
+                published_at=fixed_now + timedelta(hours=25),
+            ),
+        )
+    )
+
+    selection = select_search_candidates(rows, fixed_now)
+
+    assert len(selection.candidates) == 3
+    assert selection.recent_7d_count == 1
+    assert selection.unknown_date_count == 2
+    assert all("future" not in item.url for item in selection.candidates)
+
+
+def test_search_selection_requires_summary_and_valid_http_url(fixed_now) -> None:
+    rows = [
+        _search_candidate(
+            title="激光反无人机",
+            summary="",
+            url="https://example.cn/no-summary",
+            category=Category.LASER_WEAPON,
+            published_at=fixed_now,
+        ),
+        _search_candidate(
+            title="激光反无人机",
+            summary="高能激光反制",
+            url="file:///tmp/result",
+            category=Category.LASER_WEAPON,
+            published_at=fixed_now,
+        ),
+    ]
+
+    selection = select_search_candidates(rows, fixed_now)
+
+    assert selection.valid_shape_count == 0
+    assert selection.candidates == ()
 
 
 @pytest.mark.parametrize(

@@ -225,6 +225,12 @@ def make_result(
             verified_count=5,
             pending_count=len(report_state.pending),
             deduplicated_count=2,
+            raw_search_count=10,
+            valid_shape_count=9,
+            relevance_pass_count=7,
+            recent_7d_count=5,
+            final_candidate_count=5,
+            information_available=True,
         ),
         trend_summary=TrendSummary(
             window_start=dt(4, 22),
@@ -345,6 +351,8 @@ def run_result() -> RunResult:
                 reason="suspected_project_match",
                 source_url="https://pending.example/item",
                 discovered_at=WINDOW_END,
+                category_hint=Category.LASER_COMMUNICATION,
+                source_published_at=dt(7, 22, 8),
             )
         ],
     )
@@ -782,6 +790,28 @@ def test_empty_sections_keep_all_headings_and_explicit_empty_notice() -> None:
         "## 商业航天融资",
     ):
         assert heading in text
+
+
+def test_report_marks_information_shortage_and_renders_collection_funnel() -> None:
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        finished_at=WINDOW_END,
+        raw_search_count=12,
+        valid_shape_count=10,
+        relevance_pass_count=4,
+        recent_7d_count=3,
+        fallback_8_30d_count=1,
+        final_candidate_count=4,
+        fetch_failure_count=2,
+        information_available=False,
+    )
+
+    text = ReportRenderer(18000).render(make_result(metrics=metrics)).markdown
+
+    assert "信息不足：最终候选 4 条，未达到 5 条验收门槛" in text
+    assert "博查原始 12" in text
+    assert "主题相关 4" in text
+    assert "正文抓取失败 2" in text
 
 
 def test_degraded_coverage_names_search_ai_and_failed_domains() -> None:

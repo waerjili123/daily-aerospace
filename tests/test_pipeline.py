@@ -47,13 +47,18 @@ def candidate(
     source: str = "official:official.example.cn",
     discovered_at: datetime = NOW,
     summary: str = "",
+    title: str = "Laser terminal award",
+    category_hint: Category | None = None,
+    source_published_at: datetime | None = None,
 ) -> Candidate:
     return Candidate(
-        title="Laser terminal award",
+        title=title,
         url=url,
         summary=summary,
         discovered_at=discovered_at,
         discovery_source=source,
+        category_hint=category_hint,
+        source_published_at=source_published_at,
     )
 
 
@@ -176,8 +181,10 @@ class FakeFetcher:
     def __init__(self) -> None:
         self.errors: dict[str, BaseException] = {}
         self.pages: dict[str, FetchedPage] = {}
+        self.calls: list[str] = []
 
     def fetch(self, item: Candidate) -> FetchedPage:
+        self.calls.append(item.url)
         error = self.errors.get(item.url)
         if error:
             raise error
@@ -888,7 +895,15 @@ def test_shared_primary_analyzer_and_trend_counter_is_not_doubled(deps) -> None:
 
 
 def test_candidate_dedupe_search_counts_and_official_failures(deps) -> None:
-    deps.search_provider.rows = [candidate(source="bocha")]
+    deps.search_provider.rows = [
+        candidate(
+            source="bocha",
+            title="Laser communication terminal award",
+            summary="Laser communication terminal procurement",
+            category_hint=Category.LASER_COMMUNICATION,
+            source_published_at=NOW,
+        )
+    ]
     deps.official_collector.rows = [candidate()]
     deps.official_collector.failed_domains = frozenset({"failed.gov.cn"})
 
@@ -899,6 +914,76 @@ def test_candidate_dedupe_search_counts_and_official_failures(deps) -> None:
     assert result.metrics.official_candidate_count == 1
     assert result.metrics.deduplicated_count == 1
     assert result.metrics.failed_domains == ["failed.gov.cn"]
+
+
+def test_pipeline_filters_search_noise_before_fetch_and_marks_information_available(
+    deps,
+) -> None:
+    deps.planner.queries = [
+        SimpleNamespace(kind="incremental", text=f"query-{index}")
+        for index in range(4)
+    ]
+    deps.official_collector.rows = []
+    deps.search_provider.rows = [
+        candidate(
+            f"https://search.example.cn/relevant/{index}",
+            source="bocha",
+            title=f"星间激光通信终端采购公告 {index}",
+            summary="空间激光通信终端采购项目",
+            category_hint=Category.LASER_COMMUNICATION,
+            source_published_at=NOW,
+        )
+        for index in range(5)
+    ]
+    deps.search_provider.rows.append(
+        candidate(
+            "https://search.example.cn/noise",
+            source="bocha",
+            title="空间激光通信激光打印机采购",
+            summary="激光打印机和硒鼓采购项目",
+            category_hint=Category.LASER_COMMUNICATION,
+            source_published_at=NOW,
+        )
+    )
+
+    result = Pipeline(**deps.as_kwargs()).run(NOW)
+
+    assert result.metrics.search_count == 4
+    assert result.metrics.raw_search_count == 24
+    assert result.metrics.relevance_pass_count == 20
+    assert result.metrics.final_candidate_count == 5
+    assert result.metrics.information_available is True
+    assert len(deps.fetcher.calls) == 5
+    assert all("noise" not in url for url in deps.fetcher.calls)
+
+
+def test_pipeline_preserves_search_metadata_when_fetch_fails(deps) -> None:
+    deps.planner.queries = [
+        SimpleNamespace(kind="incremental", text=f"query-{index}")
+        for index in range(4)
+    ]
+    deps.official_collector.rows = []
+    source_date = datetime(2026, 7, 21, 8, tzinfo=BEIJING)
+    item = candidate(
+        "https://search.example.cn/unreachable",
+        source="bocha",
+        title="高能激光反无人机系统招标",
+        summary="激光反无人机装备采购",
+        category_hint=Category.LASER_WEAPON,
+        source_published_at=source_date,
+    )
+    deps.search_provider.rows = [item]
+    deps.fetcher.errors[item.url] = FetchError("TLS validation failed")
+
+    result = Pipeline(**deps.as_kwargs()).run(NOW)
+
+    assert result.metrics.fetch_failure_count == 1
+    assert result.metrics.information_available is False
+    assert len(result.state.pending) == 1
+    pending = result.state.pending[0]
+    assert pending.category_hint is Category.LASER_WEAPON
+    assert pending.source_published_at == source_date
+    assert pending.summary == item.summary
 
 
 def test_trend_failure_uses_deterministic_degraded_fallback(deps) -> None:

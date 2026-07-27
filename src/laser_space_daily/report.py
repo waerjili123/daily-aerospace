@@ -575,14 +575,28 @@ def _followup_lines(
             <= _as_beijing(item.discovered_at)
             <= result.window_end
         ),
-        key=lambda item: (_datetime_key(item.discovered_at), item.item_id),
+        key=lambda item: _pending_sort_key(item, result.window_end),
     )
     for item in current_pending[:10]:
         reason = _PENDING_REASON_LABELS.get(item.reason, _safe_text(item.reason))
+        category = (
+            _CATEGORY_LABELS.get(item.category_hint, "板块未确定")
+            if item.category_hint is not None
+            else "板块未确定"
+        )
+        source_date = (
+            _format_date(item.source_published_at)
+            if item.source_published_at is not None
+            else "发布日期未知"
+        )
+        time_label = _pending_time_label(item.source_published_at, result.window_end)
         lines.append(
             "｜".join(
                 (
                     "- 待核实候选",
+                    category,
+                    source_date,
+                    time_label,
                     _safe_text(item.title),
                     f"原因：{reason}",
                     _link("查看原始来源", item.source_url),
@@ -610,9 +624,28 @@ def _trend_lines(result: RunResult) -> tuple[str, ...]:
         )
     )
     metrics = result.metrics
+    availability = (
+        f"- 信息可用：最终候选 {metrics.final_candidate_count} 条"
+        if metrics.information_available
+        else (
+            f"- 信息不足：最终候选 {metrics.final_candidate_count} 条，"
+            "未达到 5 条验收门槛"
+        )
+    )
     return (
         f"- {_safe_text(result.trend_summary.summary)}",
         f"- 分类计数：{count_text}",
+        (
+            f"- 采集漏斗：博查原始 {metrics.raw_search_count}；"
+            f"结构有效 {metrics.valid_shape_count}；"
+            f"主题相关 {metrics.relevance_pass_count}；"
+            f"近 7 天 {metrics.recent_7d_count}；"
+            f"8–30 天补充 {metrics.fallback_8_30d_count}；"
+            f"日期未知补充 {metrics.unknown_date_count}；"
+            f"最终候选 {metrics.final_candidate_count}；"
+            f"正文抓取失败 {metrics.fetch_failure_count}"
+        ),
+        availability,
         (
             f"- 数据完整性：候选 {metrics.candidate_count}；"
             f"已核实 {metrics.verified_count}；"
@@ -621,6 +654,31 @@ def _trend_lines(result: RunResult) -> tuple[str, ...]:
         ),
         f"- 覆盖：{_coverage_text(result)}",
     )
+
+
+def _pending_time_label(
+    source_published_at: datetime | None, window_end: datetime
+) -> str:
+    if source_published_at is None:
+        return "日期未知"
+    age = _as_beijing(window_end) - _as_beijing(source_published_at)
+    if age.days <= 7:
+        return "近 7 天"
+    if age.days <= 30:
+        return "8–30 天补充"
+    return "时间范围外"
+
+
+def _pending_sort_key(item: object, window_end: datetime) -> tuple[object, ...]:
+    source_published_at = getattr(item, "source_published_at", None)
+    label = _pending_time_label(source_published_at, window_end)
+    bucket = {"近 7 天": 0, "8–30 天补充": 1, "日期未知": 2}.get(label, 3)
+    published_rank = (
+        -_as_beijing(source_published_at).timestamp()
+        if source_published_at is not None
+        else 0
+    )
+    return (bucket, published_rank, getattr(item, "item_id", ""))
 
 
 def _coverage_text(result: RunResult) -> str:

@@ -18,6 +18,7 @@ from .discovery import (
     DiscoveryUnavailableError,
     dedupe_candidates,
     normalize_url,
+    select_search_candidates,
 )
 from .fetcher import FetchError
 from .matching import (
@@ -176,9 +177,22 @@ class Pipeline:
         if collector_failures:
             metrics.search_coverage_degraded = True
 
-        all_rows = [*search_rows, *official_rows]
+        selection = select_search_candidates(search_rows, now)
+        metrics.raw_search_count = selection.raw_search_count
+        metrics.valid_shape_count = selection.valid_shape_count
+        metrics.relevance_pass_count = selection.relevance_pass_count
+        metrics.recent_7d_count = selection.recent_7d_count
+        metrics.fallback_8_30d_count = selection.fallback_8_30d_count
+        metrics.unknown_date_count = selection.unknown_date_count
+        metrics.final_candidate_count = len(selection.candidates)
+        metrics.information_available = (
+            metrics.search_count >= 4 and metrics.final_candidate_count >= 5
+        )
+
+        selected_search_rows = list(selection.candidates)
+        all_rows = [*selected_search_rows, *official_rows]
         candidates = dedupe_candidates(all_rows)
-        metrics.candidate_count = len(all_rows)
+        metrics.candidate_count = len(search_rows) + len(official_rows)
         metrics.official_candidate_count = len(official_rows)
         metrics.deduplicated_count = len(all_rows) - len(candidates)
         metrics.sources_checked = len(candidates)
@@ -197,6 +211,7 @@ class Pipeline:
                 fetched_by_url[item.url] = self._fetcher.fetch(item)
             except _CANDIDATE_ERRORS as error:
                 fetched_by_url[item.url] = error
+                metrics.fetch_failure_count += 1
 
         analyzed_by_url: dict[str, Any] = {}
         for item in candidates:
@@ -410,6 +425,8 @@ class Pipeline:
             reason=reason,
             source_url=normalized_url,
             discovered_at=now,
+            category_hint=getattr(item, "category_hint", None),
+            source_published_at=getattr(item, "source_published_at", None),
         )
 
     def _safe_log(
