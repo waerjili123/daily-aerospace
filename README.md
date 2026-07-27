@@ -2,9 +2,11 @@
 
 这是一个面向激光通信与商业航天产业的日度情报管道：收集公开线索、核验来源、关联历史项目，并生成可追溯的 Markdown 报告。它只处理本项目范围内的产业与采购情报，**独立于 AI日报**，不包含任何 AI 新闻内容。
 
+> 当前线上验收尚未通过：PR #3 的博查响应修复仍未合并，定时任务曾生成空日报，仓库实际可见性也与原定私有仓库不一致。继续操作前请先阅读 [交接文档](docs/HANDOFF-2026-07-27.md) 和 [项目进度](docs/PROGRESS.md)。
+
 ## 架构与目录
 
-命令行程序负责按北京时间窗口运行发现、抓取、分析、核验、匹配和报告渲染。`config.yaml` 只保存可提交的运行参数；三个密钥只从环境变量读取。主要目录如下：
+命令行程序负责按北京时间窗口运行发现、抓取、分析、核验、匹配和报告渲染。`config.yaml` 只保存可提交的运行参数；四个密钥只从环境变量读取。主要目录如下：
 
 - `src/laser_space_daily/`：CLI、管道和领域逻辑。
 - `config/official_sources.yaml`：官方来源及分级规则。
@@ -38,11 +40,12 @@ laser-space-daily --config config.yaml --dry-run
 
 - [x] 已完成离线固定样本验收：四类内容、采购全生命周期、废标后重新招标、同名不同标段、融资 A 级来源/两个独立 B 级来源/单一 B 级待核验/银行授信排除。
 - [x] 已完成离线全量测试、核心模块逐文件覆盖率、编译和敏感信息扫描；这些测试使用注入的固定客户端，不访问真实 DeepSeek、博查或钉钉。
-- [ ] 待在私有 GitHub 远端配置 `DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET` Secrets。
-- [ ] 待首次运行 `workflow_dispatch` 且保持 `dry_run=true`，下载并人工审核报告与状态 artifact。
-- [ ] 待审核通过后运行一次 `dry_run=false`，验收仅一条钉钉消息及其来源链接。
+- [x] 已在 GitHub 远端配置 `DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET` Secrets。
+- [x] 已首次运行 `workflow_dispatch` 且保持 `dry_run=true`，并下载检查报告与状态 artifact；该次运行因博查响应包装层未兼容而没有采集到业务数据，不能算业务验收通过。
+- [ ] 待合并 PR #3 后重新执行 `dry_run=true`，确认真实候选、DeepSeek 处理、来源链接和项目状态。
+- [ ] 待新的 dry-run 人工审核通过后，再运行一次 `dry_run=false`，验收仅一条钉钉消息及其来源链接。
 
-本地离线验收环境为 Python 3.12；项目要求的 Python 3.13 以 GitHub Actions 工作流为权威兼容性门禁。在上述三个外部步骤实际完成前，不代表 GitHub 定时运行或钉钉实发已经成功。
+本地离线验收环境为 Python 3.12；项目要求的 Python 3.13 以 GitHub Actions 工作流为权威兼容性门禁。虽然定时工作流已经自动运行过，但生成的是空日报，不能据此认定真实采集、定时调度或钉钉内容验收成功。
 
 ## GitHub Actions 首次启用
 
