@@ -412,7 +412,9 @@ def test_sanitized_fixture_corpus_runs_real_components_end_to_end(tmp_path) -> N
         assert f"]({record_by_id[record_id]['candidate']['url']})" in markdown
     assert "2026-04-21" in first_daily
     assert "机载光电转塔伺服稳像核心组件招标公告" in first_daily
-    assert record_by_id["financing-one-b-pending"]["candidate"]["url"] not in markdown
+    followup = _section(markdown, "今日重点跟进", "三个月趋势与数据完整性")
+    assert record_by_id["financing-one-b-pending"]["candidate"]["url"] in followup
+    assert record_by_id["financing-one-b-pending"]["candidate"]["url"] not in first_daily
     assert record_by_id["bank-credit-rejected"]["candidate"]["url"] not in markdown
     eo_rolling = _section(markdown, "光电转塔/吊舱", "商业航天融资")
     assert record_by_id["eo-turret-core"]["candidate"]["url"] not in eo_rolling
