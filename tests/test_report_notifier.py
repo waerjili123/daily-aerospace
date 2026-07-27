@@ -1257,9 +1257,50 @@ def test_cli_parser_exposes_exact_public_arguments() -> None:
         "help": {"-h", "--help"},
         "config": {"--config"},
         "dry_run": {"--dry-run"},
+        "max_queries": {"--max-queries"},
         "now": {"--now"},
         "log_level": {"--log-level"},
     }
+
+
+def test_cli_max_queries_overrides_loaded_settings(cli_deps) -> None:
+    observed: list[int] = []
+
+    def pipeline_factory(settings: Settings):
+        observed.append(settings.discovery.max_queries)
+        return cli_deps.pipeline
+
+    dependencies = CliDependencies(
+        settings_loader=cli_deps.dependencies.settings_loader,
+        pipeline_factory=pipeline_factory,
+        renderer_factory=cli_deps.dependencies.renderer_factory,
+        notifier_factory=cli_deps.dependencies.notifier_factory,
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--dry-run",
+            "--max-queries",
+            "4",
+        ],
+        dependencies=dependencies,
+    )
+
+    assert code == 0
+    assert observed == [4]
+
+
+@pytest.mark.parametrize("value", ["-1", "not-a-number"])
+def test_cli_rejects_invalid_max_queries(cli_deps, value: str) -> None:
+    assert (
+        run_cli(
+            ["--max-queries", value],
+            dependencies=cli_deps.dependencies,
+        )
+        == 2
+    )
 
 
 def test_cli_rejects_unknown_argument_with_exit_two(cli_deps) -> None:

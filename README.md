@@ -2,15 +2,17 @@
 
 这是一个面向激光通信与商业航天产业的日度情报管道：收集公开线索、核验来源、关联历史项目，并生成可追溯的 Markdown 报告。它只处理本项目范围内的产业与采购情报，**独立于 AI日报**，不包含任何 AI 新闻内容。
 
+> 当前处于采集链路恢复阶段。自动 workflow 已暂停；工作流暂时只允许手动、小规模 `dry_run=true` 验收，不发送钉钉、不提交状态，也不包含定时入口。
+
 ## 架构与目录
 
-命令行程序负责按北京时间窗口运行发现、抓取、分析、核验、匹配和报告渲染。`config.yaml` 只保存可提交的运行参数；三个密钥只从环境变量读取。主要目录如下：
+命令行程序负责按北京时间窗口运行发现、抓取、分析、核验、匹配和报告渲染。`config.yaml` 只保存可提交的运行参数；四个密钥只从环境变量读取。主要目录如下：
 
 - `src/laser_space_daily/`：CLI、管道和领域逻辑。
 - `config/official_sources.yaml`：官方来源及分级规则。
-- `data/`：项目、融资、事件与待核验状态；状态 JSON/JSONL 会由定时任务自动提交。
+- `data/`：项目、融资、事件与待核验状态。
 - `reports/`：每日 Markdown 报告；GitHub Actions 会上传为 artifact。
-- `.github/workflows/daily-intelligence.yml`：每日运行、测试、报告归档和状态提交。
+- `.github/workflows/daily-intelligence.yml`：当前仅用于手动、小规模采集验收。
 
 来源按 A/B/C 分级；`pending` 表示线索尚待核验，不能被当作已确认的正式记录。
 
@@ -38,20 +40,21 @@ laser-space-daily --config config.yaml --dry-run
 
 - [x] 已完成离线固定样本验收：四类内容、采购全生命周期、废标后重新招标、同名不同标段、融资 A 级来源/两个独立 B 级来源/单一 B 级待核验/银行授信排除。
 - [x] 已完成离线全量测试、核心模块逐文件覆盖率、编译和敏感信息扫描；这些测试使用注入的固定客户端，不访问真实 DeepSeek、博查或钉钉。
-- [ ] 待在私有 GitHub 远端配置 `DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET` Secrets。
-- [ ] 待首次运行 `workflow_dispatch` 且保持 `dry_run=true`，下载并人工审核报告与状态 artifact。
+- [x] 已配置 `DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET` Secrets；仓库当前实际为 public，与原定私有要求不一致。
+- [x] 已定位博查真实响应位于 `data.webPages.value`。
+- [ ] 待运行仅手动、小规模 `workflow_dispatch`，固定保持 `dry_run=true`，下载并人工审核报告与状态 artifact。
 - [ ] 待审核通过后运行一次 `dry_run=false`，验收仅一条钉钉消息及其来源链接。
 
-本地离线验收环境为 Python 3.12；项目要求的 Python 3.13 以 GitHub Actions 工作流为权威兼容性门禁。在上述三个外部步骤实际完成前，不代表 GitHub 定时运行或钉钉实发已经成功。
+本地离线验收环境为 Python 3.12；项目要求的 Python 3.13 以 GitHub Actions 工作流为权威兼容性门禁。Actions 成功只表示程序没有失败，不代表采集到真实信息。
 
-## GitHub Actions 首次启用
+## GitHub Actions 采集恢复验收
 
-1. 创建一个**私有** GitHub 仓库并推送本项目。
-2. 在仓库 **Settings → Secrets and variables → Actions** 中添加四个名称完全一致的 Secrets：`DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET`。钉钉机器人使用加签安全模式时，`DINGTALK_SECRET` 应填写以 `SEC` 开头的完整加签密钥。
-3. 在 Actions 页面手动运行工作流，保持 `dry_run=true`。下载包含 `reports/` 与 `data/` 的 artifact，核对报告、来源链接和状态。
-4. 审核通过后，手动以 `dry_run=false` 运行一次，确认钉钉投递可接受。
+1. 保持自动 workflow 暂停，先合并 `data.webPages.value` 解析修复。
+2. 重新启用不含 `schedule` 的仅手动工作流。
+3. 首次选择 4 次核心查询运行；命令固定包含 `--dry-run`，无法从页面关闭。
+4. 下载包含 `reports/` 与 `data/` 的 artifact，确认候选数大于 0、原始链接存在，并区分抓取、分析和核验失败。
 
-工作流随后每天在 07:30（北京时间；UTC `30 23 * * *`）运行。计划任务会先跑完整测试，成功后生成报告、提交变更的 `data/` 与 `reports/`，并安全地 rebase 后推送。手动 `dry_run=true` 仅生成报告和状态，不发送通知。
+自动运行和 `dry_run=false` 均不在本阶段启用。只有真实信息采集验收通过后，才修复并验证北京时间 07:30 调度；日报人工审核通过后，才进行一次正式钉钉验收。
 
 同一个 `data_dir` 必须遵守**单写入者**约束。Actions 的 `concurrency` 组负责串行化云端任务；CLI 同时持有 `data/.laser-space-daily.lock` 操作系统锁，本地第二个进程会直接以退出码 4 结束。锁文件可以保留，进程退出或崩溃时操作系统会释放锁；不要用不同工作目录绕过同一份状态的串行要求。
 

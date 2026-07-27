@@ -32,29 +32,32 @@ def _workflow_step(steps: list[dict], name: str) -> dict:
     return next(step for step in steps if step.get("name") == name)
 
 
-def test_workflow_schedule_secrets_and_dry_run():
+def test_workflow_is_manual_bounded_dry_run_without_dingtalk_secrets():
     workflow_path = ".github/workflows/daily-intelligence.yml"
     workflow = _repository_file(workflow_path).read_text(encoding="utf-8")
     document = _base_yaml(workflow_path)
 
-    assert 'cron: "30 23 * * *"' in workflow
-    assert "workflow_dispatch:" in workflow
+    assert set(document["on"]) == {"workflow_dispatch"}
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert "BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}" in workflow
-    assert "DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}" in workflow
-    assert "DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}" in workflow
+    assert "secrets.DINGTALK_WEBHOOK" not in workflow
+    assert "secrets.DINGTALK_SECRET" not in workflow
     assert "concurrency:" in workflow
-    assert document["on"]["workflow_dispatch"]["inputs"]["dry_run"] == {
-        "description": "Generate report without DingTalk delivery",
-        "type": "boolean",
-        "default": "true",
+    assert document["on"]["workflow_dispatch"]["inputs"]["max_queries"] == {
+        "description": "Bocha query count for manual collection validation",
+        "type": "choice",
+        "options": ["1", "2", "3", "4"],
+        "default": "4",
     }
     assert document["concurrency"] == {
         "group": "laser-space-daily",
         "cancel-in-progress": "false",
     }
-    assert '[[ "${{ github.event_name }}" == "workflow_dispatch"' in workflow
-    assert '"${{ inputs.dry_run }}" == "true"' in workflow
+    pipeline_step = _workflow_step(
+        document["jobs"]["run"]["steps"], "Run daily pipeline"
+    )
+    assert "--dry-run" in pipeline_step["run"]
+    assert '--max-queries "${{ inputs.max_queries }}"' in pipeline_step["run"]
 
 
 def test_committed_config_contains_no_secret_values():
@@ -124,14 +127,14 @@ def test_committed_config_contains_no_secret_values():
     assert ".worktrees/" in ignored
 
 
-def test_workflow_uses_python_313_tests_artifact_and_state_commit():
+def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
     workflow_path = ".github/workflows/daily-intelligence.yml"
     workflow = _repository_file(workflow_path).read_text(encoding="utf-8")
     document = _base_yaml(workflow_path)
     job = document["jobs"]["run"]
     steps = job["steps"]
 
-    assert document["permissions"] == {"contents": "write"}
+    assert document["permissions"] == {"contents": "read"}
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == "45"
     assert any(
@@ -160,15 +163,9 @@ def test_workflow_uses_python_313_tests_artifact_and_state_commit():
     )
     assert artifact_step["if"] == "always()"
     assert artifact_step["with"]["path"].splitlines() == ["reports/", "data/"]
-    commit_step = _workflow_step(steps, "Commit state and report")
-    assert commit_step["if"] == (
-        "${{ success() && (github.event_name == 'schedule' || "
-        "(github.event_name == 'workflow_dispatch' && inputs.dry_run != true)) }}"
-    )
-    assert "git add data reports" in workflow
-    assert "git diff --cached --quiet" in workflow
-    assert "git rebase origin" in workflow
-    assert "git push origin HEAD" in workflow
+    assert all(step.get("name") != "Commit state and report" for step in steps)
+    assert "git add data reports" not in workflow
+    assert "git push origin" not in workflow
     assert "set -x" not in workflow
     assert "https://oapi.dingtalk.com/robot/send" not in workflow
 
@@ -209,26 +206,17 @@ def test_readme_documents_schema_migration_and_single_writer_lock() -> None:
         assert required in readme
 
 
-@pytest.mark.parametrize(
-    ("event_name", "dry_run", "expected_commit"),
-    [
-        ("schedule", None, True),
-        ("workflow_dispatch", False, True),
-        ("workflow_dispatch", True, False),
-    ],
-)
-def test_workflow_commit_condition_covers_schedule_and_manual_modes(
-    event_name: str, dry_run: bool | None, expected_commit: bool
-) -> None:
+def test_workflow_cannot_schedule_notify_or_commit() -> None:
     document = _base_yaml(".github/workflows/daily-intelligence.yml")
-    condition = _workflow_step(
-        document["jobs"]["run"]["steps"], "Commit state and report"
-    )["if"]
+    workflow = _repository_file(
+        ".github/workflows/daily-intelligence.yml"
+    ).read_text(encoding="utf-8")
+    steps = document["jobs"]["run"]["steps"]
 
-    assert (event_name == "schedule" or (event_name == "workflow_dispatch" and not dry_run)) is expected_commit
-    assert "github.event_name == 'schedule'" in condition
-    assert "github.event_name == 'workflow_dispatch'" in condition
-    assert "inputs.dry_run != true" in condition
+    assert set(document["on"]) == {"workflow_dispatch"}
+    assert "--dry-run" in _workflow_step(steps, "Run daily pipeline")["run"]
+    assert "secrets.DINGTALK" not in workflow
+    assert all(step.get("name") != "Commit state and report" for step in steps)
 
 
 def test_readme_documents_required_setup_and_dry_run():
