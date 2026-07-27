@@ -46,6 +46,16 @@ jobs:
           --dry-run
           --max-queries 4
 
+      - name: Print collection evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== reports ==="
+          find reports -maxdepth 2 -type f -print -exec sed -n '1,240p' {} \; 2>/dev/null || true
+          echo "=== data ==="
+          find data -maxdepth 2 -type f -print -exec sed -n '1,160p' {} \; 2>/dev/null || true
+
       - name: Upload validation artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
