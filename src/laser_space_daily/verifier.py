@@ -220,15 +220,26 @@ class RuleVerifier:
 
         if not analysis.in_china or not analysis.in_scope:
             return self._decision(VerificationStatus.REJECTED, "out_of_scope", grade)
-        if (
-            not analysis.title.strip()
-            or not analysis.organization
-            or not analysis.organization.strip()
-            or analysis.published_at is None
-            or analysis.category is None
-            or analysis.event_type is None
-        ):
-            return self._decision(VerificationStatus.PENDING, "missing_required_fields", grade)
+        missing_fields = [
+            name
+            for name, missing in (
+                ("title", not analysis.title.strip()),
+                (
+                    "organization",
+                    not analysis.organization or not analysis.organization.strip(),
+                ),
+                ("published_at", analysis.published_at is None),
+                ("category", analysis.category is None),
+                ("event_type", analysis.event_type is None),
+            )
+            if missing
+        ]
+        if missing_fields:
+            return self._decision(
+                VerificationStatus.PENDING,
+                f"missing_required_fields:{','.join(missing_fields)}",
+                grade,
+            )
         if analysis.source_url != page.final_url:
             return self._decision(VerificationStatus.PENDING, "source_url_mismatch", grade)
         if any(

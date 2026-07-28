@@ -587,7 +587,7 @@ def _followup_lines(
         key=lambda item: _pending_sort_key(item, result.window_end),
     )
     for item in current_pending[:10]:
-        reason = _PENDING_REASON_LABELS.get(item.reason, _safe_text(item.reason))
+        reason = _pending_reason_text(item.reason)
         category = (
             _CATEGORY_LABELS.get(item.category_hint, "板块未确定")
             if item.category_hint is not None
@@ -812,6 +812,27 @@ _SEARCH_FAILURE_TEXT = {
 def _search_failure_text(reason: str) -> str:
     """Render only allow-listed, secret-safe search failure categories."""
     return _SEARCH_FAILURE_TEXT.get(reason, "博查 API 调用失败")
+
+
+_MISSING_FIELD_LABELS = {
+    "title": "标题",
+    "organization": "主体",
+    "published_at": "发布日期",
+    "category": "分类",
+    "event_type": "事件类型",
+}
+
+
+def _pending_reason_text(reason: str) -> str:
+    prefix = "missing_required_fields:"
+    if reason.startswith(prefix):
+        fields = [
+            _MISSING_FIELD_LABELS.get(name, _safe_text(name))
+            for name in reason[len(prefix) :].split(",")
+            if name
+        ]
+        return f"核验字段缺失（{'、'.join(fields)}）"
+    return _PENDING_REASON_LABELS.get(reason, _safe_text(reason))
 
 
 def _open_project_sort_key(project: Project) -> tuple[object, ...]:

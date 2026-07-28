@@ -623,7 +623,7 @@ def test_missing_fields_take_precedence_over_unavailable_source(official_page, a
 
     decision = RuleVerifier(REGISTRY).verify(analysis, official_page)
 
-    assert decision.reason == "missing_required_fields"
+    assert decision.reason == "missing_required_fields:organization"
 
 
 @pytest.mark.parametrize("field", ["title", "organization", "published_at"])

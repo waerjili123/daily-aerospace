@@ -272,6 +272,14 @@ codex/verification-promotion-20260728
 - [ ] 已核实事件仍为 0。
 - [ ] `pending` 3 条均因 `missing_required_fields` 未升级。
 
+第 13 次 Actions 日常真实 dry-run（提交 `3d2939d`）：
+
+- [x] Actions 成功，耗时 3 分 17 秒，未发送钉钉。
+- [x] 最终候选 5 条，正文抓取失败 0。
+- [x] `pending` 从 3 条降为 2 条，证明保守字段补全已进入真实流水线。
+- [ ] 微光启航、谱星航天仍显示笼统的 `missing_required_fields`。
+- [x] 后续报告将直接列明缺失的是标题、主体、发布日期、分类或事件类型，避免继续盲查。
+
 已确认的新根因：
 
 - DeepSeek 可能返回通过结构和证据校验、但主体、日期、金额或轮次为空的结果。
