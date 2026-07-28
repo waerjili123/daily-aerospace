@@ -50,8 +50,8 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Guard one-time backfill branch
-        run: test "${GITHUB_REF}" = "refs/heads/codex/agentic-backfill-dry-run-20260728"
+      - name: Guard one-time daily dry-run branch
+        run: test "${GITHUB_REF}" = "refs/heads/codex/agentic-daily-dry-run-20260728"
 
       - name: Run daily pipeline
         env:
@@ -63,8 +63,8 @@ jobs:
           laser-space-daily
           --config config.yaml
           --dry-run
-          --discovery-mode backfill
-          --max-queries 40
+          --discovery-mode daily
+          --max-queries 12
 
       - name: Upload generated report
         if: always()

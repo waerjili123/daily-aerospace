@@ -63,14 +63,14 @@ def test_workflow_is_manual_bounded_dry_run_without_dingtalk_secrets():
         document["jobs"]["run"]["steps"], "Run daily pipeline"
     )
     assert "--dry-run" in pipeline_step["run"]
-    assert "--discovery-mode backfill" in pipeline_step["run"]
-    assert "--max-queries 40" in pipeline_step["run"]
+    assert "--discovery-mode daily" in pipeline_step["run"]
+    assert "--max-queries 12" in pipeline_step["run"]
     guard_step = _workflow_step(
-        document["jobs"]["run"]["steps"], "Guard one-time backfill branch"
+        document["jobs"]["run"]["steps"], "Guard one-time daily dry-run branch"
     )
     assert guard_step["run"] == (
         'test "${GITHUB_REF}" = '
-        '"refs/heads/codex/agentic-backfill-dry-run-20260728"'
+        '"refs/heads/codex/agentic-daily-dry-run-20260728"'
     )
 
 
