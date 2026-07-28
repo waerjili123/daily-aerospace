@@ -50,8 +50,8 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Guard restored DingTalk test branch
-        run: test "${GITHUB_REF}" = "refs/heads/codex/agentic-dingtalk-test-20260728"
+      - name: Guard verification dry-run branch
+        run: test "${GITHUB_REF}" = "refs/heads/codex/verification-promotion-20260728"
 
       - name: Run daily pipeline
         env:

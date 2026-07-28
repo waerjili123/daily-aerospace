@@ -67,11 +67,11 @@ def test_workflow_is_restored_to_manual_bounded_dry_run():
     assert "--discovery-mode daily" in pipeline_step["run"]
     assert "--max-queries 12" in pipeline_step["run"]
     guard_step = _workflow_step(
-        document["jobs"]["run"]["steps"], "Guard restored DingTalk test branch"
+        document["jobs"]["run"]["steps"], "Guard verification dry-run branch"
     )
     assert guard_step["run"] == (
         'test "${GITHUB_REF}" = '
-        '"refs/heads/codex/agentic-dingtalk-test-20260728"'
+        '"refs/heads/codex/verification-promotion-20260728"'
     )
 
 
