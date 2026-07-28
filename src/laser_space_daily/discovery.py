@@ -776,9 +776,32 @@ _COMPANY_PREFIXES = (
     "商业航天企业",
     "商业航天卫星公司",
     "商业航天公司",
+    "火箭新锐公司",
+    "航天新锐公司",
     "卫星公司",
     "航天企业",
     "企业",
+)
+_COMPANY_LEGAL_SUFFIXES = (
+    "股份有限公司",
+    "有限责任公司",
+    "科技有限公司",
+    "有限公司",
+)
+_COMPANY_LOCATION_PREFIXES = (
+    "北京",
+    "上海",
+    "深圳",
+    "广州",
+    "天津",
+    "重庆",
+    "合肥",
+    "西安",
+    "成都",
+    "武汉",
+    "南京",
+    "杭州",
+    "苏州",
 )
 _FINANCING_ROUND = re.compile(
     r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
@@ -829,6 +852,14 @@ def _normalize_company(value: str) -> str:
             normalized = normalized[len(prefix) :]
             break
     normalized = re.sub(r"(?:近日|再次|连续)$", "", normalized)
+    for suffix in _COMPANY_LEGAL_SUFFIXES:
+        if normalized.endswith(suffix.casefold()):
+            normalized = normalized[: -len(suffix)]
+            break
+    for prefix in _COMPANY_LOCATION_PREFIXES:
+        if normalized.startswith(prefix.casefold()):
+            normalized = normalized[len(prefix) :]
+            break
     return re.sub(r"[\s，,：:丨|]+", "", normalized)
 
 

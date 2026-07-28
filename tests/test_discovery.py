@@ -530,6 +530,39 @@ def test_search_selection_merges_combined_round_announcement_with_overlapping_so
     assert selection.event_duplicate_count == 2
 
 
+def test_search_selection_normalizes_financing_company_prefix_and_legal_name(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title="商业航天动态|火箭新锐公司微光启航完成亿元级天使++轮融资",
+            summary="资金用于液氧甲烷火箭发动机研发。",
+            url="https://media-a.example/weiguang",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now,
+        ),
+        _search_candidate(
+            title="微光启航完成亿元级人民币天使++轮融资",
+            summary="这家航天企业正在研制液体火箭。",
+            url="https://media-b.example/weiguang",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=1),
+        ),
+        _search_candidate(
+            title="北京微光启航科技有限公司完成天使++轮融资",
+            summary="融资用于卫星与火箭相关产品研发。",
+            url="https://media-c.example/weiguang",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=2),
+        ),
+    ]
+
+    selection = select_search_candidates(rows, fixed_now, minimum=0)
+
+    assert len(selection.candidates) == 1
+    assert selection.event_duplicate_count == 2
+
+
 def test_search_selection_requires_procurement_event_intent_for_laser_categories(
     fixed_now,
 ) -> None:
