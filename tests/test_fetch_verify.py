@@ -296,6 +296,54 @@ def test_fetcher_falls_back_to_beautifulsoup_when_trafilatura_raises(monkeypatch
     assert "Body text" in fetched.text
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        '<meta property="article:published_time" content="2026-07-21T14:02:00+08:00">',
+        '<meta itemprop="datePublished" content="2026-07-21">',
+        (
+            '<script type="application/ld+json">'
+            '{"@type":"NewsArticle","datePublished":"2026-07-21T14:02:00+08:00"}'
+            "</script>"
+        ),
+    ],
+)
+def test_fetcher_preserves_page_published_metadata_for_grounding(metadata):
+    html = (
+        f"<html><head><title>融资新闻</title>{metadata}</head>"
+        "<body><main>光邮星空完成Pre-A轮融资。</main></body></html>"
+    )
+
+    fetched = PageFetcher(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, text=html)
+        ),
+        resolver=public_resolver,
+    ).fetch(PUBLIC_CANDIDATE)
+
+    assert "光邮星空完成Pre-A轮融资" in fetched.text
+    assert "页面发布时间：2026-07-21" in fetched.text
+
+
+def test_fetcher_does_not_promote_modified_or_invalid_metadata_as_publication_date():
+    html = (
+        "<html><head><title>融资新闻</title>"
+        '<meta property="article:modified_time" content="2026-07-22">'
+        '<meta property="article:published_time" content="not-a-date">'
+        "</head><body><main>正文无发布日期。</main></body></html>"
+    )
+
+    fetched = PageFetcher(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, text=html)
+        ),
+        resolver=public_resolver,
+    ).fetch(PUBLIC_CANDIDATE)
+
+    assert "页面发布时间" not in fetched.text
+    assert "2026-07-22" not in fetched.text
+
+
 def test_source_registry_uses_longest_registered_domain():
     registry = SourceRegistry(
         {"example.cn": SourceGrade.B, "official.example.cn": SourceGrade.A}

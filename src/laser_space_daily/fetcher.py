@@ -6,6 +6,8 @@ from collections.abc import Callable, Iterable
 from datetime import datetime
 import hashlib
 import ipaddress
+import json
+import re
 import socket
 from typing import Any
 from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
@@ -226,6 +228,7 @@ class PageFetcher:
 
         soup = BeautifulSoup(html, "html.parser")
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        published_metadata = _extract_published_metadata(soup)
         try:
             extracted = trafilatura.extract(html)
         except Exception:
@@ -235,6 +238,8 @@ class PageFetcher:
                 element.decompose()
             extracted = soup.get_text("\n", strip=True)
         text = extracted.strip()
+        if published_metadata and published_metadata not in text:
+            text = f"{text}\n页面发布时间：{published_metadata}".strip()
 
         return FetchedPage(
             requested_url=requested_url,
@@ -245,3 +250,58 @@ class PageFetcher:
             fetched_at=datetime.now(BEIJING),
             content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
+
+
+_PUBLISHED_DATE_VALUE = re.compile(
+    r"20\d{2}(?:-|/|\.)\d{1,2}(?:-|/|\.)\d{1,2}"
+    r"|20\d{2}年\d{1,2}月\d{1,2}日"
+)
+
+
+def _extract_published_metadata(soup: BeautifulSoup) -> str | None:
+    selectors_and_attributes = (
+        ('meta[property="article:published_time"]', "content"),
+        ('meta[property="og:published_time"]', "content"),
+        ('meta[name="datePublished"]', "content"),
+        ('meta[name="publishdate"]', "content"),
+        ('meta[name="pubdate"]', "content"),
+        ('meta[itemprop="datePublished"]', "content"),
+        ('time[itemprop="datePublished"]', "datetime"),
+    )
+    for selector, attribute in selectors_and_attributes:
+        element = soup.select_one(selector)
+        if element is not None:
+            value = str(element.get(attribute) or "").strip()
+            if _is_published_date_value(value):
+                return value
+
+    for element in soup.select('script[type="application/ld+json"]'):
+        try:
+            payload = json.loads(element.string or element.get_text())
+        except (TypeError, ValueError):
+            continue
+        value = _find_json_date_published(payload)
+        if value is not None and _is_published_date_value(value):
+            return value
+    return None
+
+
+def _find_json_date_published(value: Any) -> str | None:
+    if isinstance(value, dict):
+        published = value.get("datePublished")
+        if isinstance(published, str):
+            return published.strip()
+        for nested in value.values():
+            found = _find_json_date_published(nested)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_json_date_published(nested)
+            if found is not None:
+                return found
+    return None
+
+
+def _is_published_date_value(value: str) -> bool:
+    return 0 < len(value) <= 100 and _PUBLISHED_DATE_VALUE.search(value) is not None
