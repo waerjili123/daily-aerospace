@@ -574,7 +574,7 @@ class RuleFallbackAnalyzer:
 
 
 class ResilientAnalyzer:
-    """Use deterministic fallback only after controlled primary exhaustion."""
+    """Use deterministic analysis after exhaustion and to fill safe omissions."""
 
     def __init__(self, primary: Any, fallback: RuleFallbackAnalyzer) -> None:
         self._primary = primary
@@ -582,9 +582,82 @@ class ResilientAnalyzer:
 
     def analyze(self, page: FetchedPage) -> AnalysisResult:
         try:
-            return self._primary.analyze(page)
+            primary = self._primary.analyze(page)
         except AnalysisExhausted:
             return self._fallback.analyze(page)
+        return self._enrich_missing_fields(primary, self._fallback.analyze(page))
+
+    @staticmethod
+    def _enrich_missing_fields(
+        primary: AnalysisResult,
+        fallback: AnalysisResult,
+    ) -> AnalysisResult:
+        if not primary.in_china or not primary.in_scope or not fallback.in_scope:
+            return primary
+        if (
+            primary.category is not None
+            and fallback.category is not None
+            and primary.category is not fallback.category
+        ):
+            return primary
+        if (
+            primary.event_type is not None
+            and fallback.event_type is not None
+            and primary.event_type is not fallback.event_type
+        ):
+            return primary
+
+        updates: dict[str, Any] = {}
+        filled_evidence_fields: set[str] = set()
+        simple_fields = (
+            "category",
+            "event_type",
+            "organization",
+            "published_at",
+            "financing_round",
+            "financing_subtype",
+            "registration_deadline",
+            "bid_submission_deadline",
+            "opening_deadline",
+        )
+        for field_name in simple_fields:
+            if getattr(primary, field_name) is None:
+                fallback_value = getattr(fallback, field_name)
+                if fallback_value is not None:
+                    updates[field_name] = fallback_value
+                    filled_evidence_fields.add(field_name)
+
+        if primary.amount is None and primary.amount_disclosed is None:
+            if fallback.amount is not None or fallback.amount_disclosed is not None:
+                updates["amount"] = fallback.amount
+                updates["amount_disclosed"] = fallback.amount_disclosed
+                filled_evidence_fields.add("amount")
+
+        deadline_precision = dict(primary.deadline_precision)
+        for name, precision in fallback.deadline_precision.items():
+            if name not in deadline_precision:
+                deadline_precision[name] = precision
+        if deadline_precision != primary.deadline_precision:
+            updates["deadline_precision"] = deadline_precision
+
+        if not updates:
+            return primary
+
+        evidence = list(primary.evidence)
+        existing = {
+            (item.field, item.quote, item.source_url)
+            for item in evidence
+        }
+        for item in fallback.evidence:
+            if (
+                item.field in filled_evidence_fields
+                and (item.field, item.quote, item.source_url) not in existing
+            ):
+                evidence.append(item)
+                existing.add((item.field, item.quote, item.source_url))
+        updates["evidence"] = evidence
+        updates["degraded"] = True
+        return primary.model_copy(update=updates)
 
     @property
     def deepseek_tokens(self) -> int:
@@ -787,8 +860,11 @@ def _extract_organization(text: str) -> tuple[str | None, str | None]:
 
 
 _FINANCING_COMPANY_ACTION = re.compile(
-    r"(?P<company>[\u4e00-\u9fffA-Za-z0-9·]{2,40}?)"
-    r"(?:再|已|正式)?(?:获|获得|完成).{0,20}?(?:融资|投资)",
+    r"(?P<company>[\u4e00-\u9fffA-Za-z0-9·]{2,60}?)"
+    r"(?:（[^）\r\n]{0,40}）|\([^)\r\n]{0,40}\))?"
+    r"[\s，,：:]*"
+    r"(?:已于近日|于近日|于近期|近日|日前|连续|再度|再|已|正式|宣布)?"
+    r"(?:获|获得|完成).{0,20}?(?:融资|投资)",
     flags=re.IGNORECASE,
 )
 _FINANCING_COMPANY_PREFIXES = (
@@ -820,6 +896,26 @@ _DOMESTIC_LOCATION_PREFIXES = (
     "苏州",
     "无锡",
 )
+_FINANCING_COMPANY_LEADING_CONTEXT = re.compile(
+    r"^(?:"
+    r"\d{4}年\d{1,2}月\d{1,2}日"
+    r"|\d{1,2}月\d{1,2}日"
+    r"|据[^，,。]{1,20}(?:消息|报道)"
+    r")[，,、：:\s]*"
+)
+_FINANCING_COMPANY_TRAILING_MODIFIERS = (
+    "已于近日",
+    "于近日",
+    "于近期",
+    "近日",
+    "日前",
+    "连续",
+    "再度",
+    "宣布",
+    "正式",
+    "再",
+    "已",
+)
 _FINANCING_ROUND_PATTERN = re.compile(
     r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
     r"天使\+{0,2}|种子|战略投资|战略)\s*轮"
@@ -843,6 +939,7 @@ def _extract_financing_organization(text: str) -> tuple[str | None, str | None]:
         if not matched:
             continue
         company = matched.group("company").strip(" ，,：:丨|")
+        company = _FINANCING_COMPANY_LEADING_CONTEXT.sub("", company)
         for prefix in _FINANCING_COMPANY_PREFIXES:
             if company.startswith(prefix):
                 company = company[len(prefix) :]
@@ -854,6 +951,10 @@ def _extract_financing_organization(text: str) -> tuple[str | None, str | None]:
         for prefix in _DOMESTIC_LOCATION_PREFIXES:
             if company.startswith(prefix):
                 company = company[len(prefix) :]
+                break
+        for modifier in _FINANCING_COMPANY_TRAILING_MODIFIERS:
+            if company.endswith(modifier):
+                company = company[: -len(modifier)]
                 break
         company = company.strip(" ，,：:丨|")
         if 2 <= len(company) <= 40:

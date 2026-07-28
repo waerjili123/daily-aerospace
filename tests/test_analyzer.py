@@ -388,6 +388,120 @@ def test_resilient_analyzer_does_not_hide_programmer_type_errors(official_page):
         ResilientAnalyzer(BrokenAnalyzer(), RuleFallbackAnalyzer()).analyze(official_page)
 
 
+def test_resilient_analyzer_enriches_valid_but_incomplete_financing_result():
+    page = make_page(
+        "2026年7月7日，北京微光启航科技有限公司（简称“微光启航”）"
+        "已于近日完成亿元级人民币天使++轮融资。\n"
+        "公司面向商业航天领域研制液体运载火箭。",
+        title="微光启航完成亿元级人民币天使++轮融资",
+        url="https://www.chinaventure.com.cn/news/financing.html",
+    )
+    primary_result = AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        event_type=EventType.FINANCING,
+        title=page.title,
+        source_url=page.final_url,
+    )
+
+    class Primary:
+        def analyze(self, _page):
+            return primary_result
+
+    result = ResilientAnalyzer(Primary(), RuleFallbackAnalyzer()).analyze(page)
+
+    assert result.organization == "微光启航"
+    assert result.published_at == datetime(
+        2026, 7, 7, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
+    assert result.financing_round == "天使++轮"
+    assert result.amount == "亿元级人民币"
+    assert result.amount_disclosed is True
+    assert result.degraded is True
+    assert {
+        "organization",
+        "published_at",
+        "financing_round",
+        "amount",
+    }.issubset({item.field for item in result.evidence})
+
+
+def test_resilient_analyzer_does_not_override_conflicting_primary_classification():
+    page = make_page(
+        "2026年7月7日，谱星航天连续完成数千万元Pre-A轮融资。"
+        "公司聚焦商业航天卫星制造。",
+        title="谱星航天完成融资",
+        url="https://news.pedaily.cn/financing.html",
+    )
+    primary_result = AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.LASER_COMMUNICATION,
+        event_type=EventType.TENDER,
+        title=page.title,
+        organization="模型已有主体",
+        source_url=page.final_url,
+    )
+
+    class Primary:
+        def analyze(self, _page):
+            return primary_result
+
+    result = ResilientAnalyzer(Primary(), RuleFallbackAnalyzer()).analyze(page)
+
+    assert result == primary_result
+
+
+def test_resilient_analyzer_preserves_primary_out_of_scope_decision():
+    page = make_page(
+        "2026年7月7日，谱星航天连续完成数千万元Pre-A轮融资。"
+        "公司聚焦商业航天卫星制造。",
+        title="谱星航天完成融资",
+        url="https://news.pedaily.cn/financing.html",
+    )
+    primary_result = AnalysisResult(
+        in_china=True,
+        in_scope=False,
+        title=page.title,
+        source_url=page.final_url,
+    )
+
+    class Primary:
+        def analyze(self, _page):
+            return primary_result
+
+    result = ResilientAnalyzer(Primary(), RuleFallbackAnalyzer()).analyze(page)
+
+    assert result == primary_result
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "2026年7月7日，北京微光启航科技有限公司（简称“微光启航”）"
+            "已于近日完成亿元级天使++轮融资。",
+            "微光启航",
+        ),
+        ("谱星航天连续完成数千万元Pre-A轮融资。", "谱星航天"),
+        ("光邮星空于近期完成Pre-A轮融资，具体融资金额未披露。", "光邮星空"),
+    ],
+)
+def test_rule_fallback_extracts_financing_company_across_article_phrasings(
+    text, expected
+):
+    result = RuleFallbackAnalyzer().analyze(
+        make_page(
+            f"{text}\n该中国商业航天企业聚焦卫星业务。",
+            title=text,
+            url="https://news.pedaily.cn/financing.html",
+        )
+    )
+
+    assert result.organization == expected
+
+
 def test_pro_model_suggestion_cannot_auto_merge(fake_client, event, projects):
     fake_client.reply_json(
         {"relation": "same_project", "confidence": 0.84, "reason": "标题相似"}
