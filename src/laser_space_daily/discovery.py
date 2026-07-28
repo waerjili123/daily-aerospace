@@ -471,6 +471,13 @@ _FINANCING_EVENT_TERMS = (
     "c轮",
     "d轮",
 )
+_FINANCING_SPECIFIC_SUBJECT_TERMS = (
+    "航天",
+    "火箭",
+    "卫星",
+    "太空",
+    "空间科技",
+)
 _PROCUREMENT_EVENT_TERMS = (
     "采购意向",
     "采购公告",
@@ -691,9 +698,14 @@ def _assess_relevance(row: Candidate) -> tuple[Candidate, int] | None:
     if category is Category.COMMERCIAL_SPACE_FINANCING:
         subject_hits = _term_hits(text, _FINANCING_SUBJECT_TERMS)
         event_hits = _term_hits(text, _FINANCING_EVENT_TERMS)
-        if not subject_hits or not event_hits:
+        specific_event = _has_specific_financing_event(row)
+        if (
+            not event_hits
+            or not _title_has_financing_action(row)
+            or (not subject_hits and not specific_event)
+        ):
             return None
-        return row, subject_hits + event_hits
+        return row, subject_hits + event_hits + (2 if specific_event else 0)
 
     if category in _CATEGORY_TERMS:
         subject_hits = _term_hits(text, _CATEGORY_TERMS[category])
@@ -755,6 +767,10 @@ _QUOTED_COMPANY = re.compile(r"[「『“\"]([^」』”\"]{2,40})[」』”\"]"
 _COMPANY_BEFORE_COMPLETED = re.compile(
     r"([\u4e00-\u9fffA-Za-z0-9·]{2,40}?)(?:宣布|正式|已)?完成"
 )
+_COMPANY_BEFORE_FINANCING = re.compile(
+    r"([\u4e00-\u9fffA-Za-z0-9·]{2,40}?)(?:宣布|正式|已)?"
+    r"(?:完成|获得|获)"
+)
 _COMPANY_PREFIXES = (
     "中国商业航天企业",
     "商业航天企业",
@@ -765,7 +781,8 @@ _COMPANY_PREFIXES = (
     "企业",
 )
 _FINANCING_ROUND = re.compile(
-    r"(?i)(pre[\s-]?[a-d]|[a-d]|天使\+?|种子|战略投资|战略|新一)\s*轮"
+    r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
+    r"天使\+{0,2}|种子|战略投资|战略|新一)\s*轮"
 )
 
 
@@ -794,6 +811,9 @@ def _financing_company(row: Candidate) -> str | None:
         completed = _COMPANY_BEFORE_COMPLETED.search(text)
         if completed:
             return _normalize_company(completed.group(1))
+        financing = _COMPANY_BEFORE_FINANCING.search(text)
+        if financing:
+            return _normalize_company(financing.group(1))
     return None
 
 
@@ -811,6 +831,18 @@ def _financing_round(row: Candidate) -> str | None:
     if matched is None:
         return None
     return re.sub(r"[\s-]+", "", matched.group(1).casefold())
+
+
+def _title_has_financing_action(row: Candidate) -> bool:
+    title = row.title.casefold()
+    return any(term in title for term in ("融资", "投资", "增资"))
+
+
+def _has_specific_financing_event(row: Candidate) -> bool:
+    if _financing_company(row) is None:
+        return False
+    text = _normalized_candidate_text(row)
+    return any(term in text for term in _FINANCING_SPECIFIC_SUBJECT_TERMS)
 
 
 def _is_research_report_noise(row: Candidate, text: str) -> bool:

@@ -393,6 +393,14 @@ def test_search_selection_prefers_recent_then_uses_8_to_30_day_fallback(
             "本周商业航天与量子信息成为热点，多家公司完成股权融资。",
         ),
         (
+            "2026-07-21 新闻晚报_行业资讯_资讯_航天新域",
+            "微光启航完成亿元级融资，云幕智造完成Pre-A轮融资。",
+        ),
+        (
+            "广州商业航天再添两总部，加速构建千亿级全产业链生态",
+            "广州开发区控股集团战略投资云遥宇航，推动卫星产业发展。",
+        ),
+        (
             "火箭成功回收，商业航天拉涨，能否成为高切低方向",
             "A股商业航天概念股上涨，建议关注低位布局机会。",
         ),
@@ -417,6 +425,26 @@ def test_search_selection_rejects_reports_and_market_commentary(
 
     assert selection.candidates == ()
     assert selection.filter_rejected_count == 1
+
+
+def test_search_selection_accepts_specific_space_company_financing_without_generic_subject():
+    row = _search_candidate(
+        title="微光启航完成亿元级天使++轮融资",
+        summary="资金将用于液氧甲烷火箭发动机量产研发。",
+        url="https://media.example/weiguang",
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        published_at=datetime(
+            2026, 7, 21, 9, tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+    )
+
+    selection = select_search_candidates(
+        [row],
+        datetime(2026, 7, 22, 9, tzinfo=ZoneInfo("Asia/Shanghai")),
+        minimum=0,
+    )
+
+    assert len(selection.candidates) == 1
 
 
 def test_search_selection_merges_same_company_and_round_across_media(
