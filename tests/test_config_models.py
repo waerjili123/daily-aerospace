@@ -63,8 +63,15 @@ def test_workflow_is_manual_bounded_dry_run_without_dingtalk_secrets():
         document["jobs"]["run"]["steps"], "Run daily pipeline"
     )
     assert "--dry-run" in pipeline_step["run"]
-    assert '--discovery-mode "${{ inputs.discovery_mode }}"' in pipeline_step["run"]
-    assert '--max-queries "${{ inputs.max_queries }}"' in pipeline_step["run"]
+    assert "--discovery-mode backfill" in pipeline_step["run"]
+    assert "--max-queries 40" in pipeline_step["run"]
+    guard_step = _workflow_step(
+        document["jobs"]["run"]["steps"], "Guard one-time backfill branch"
+    )
+    assert guard_step["run"] == (
+        'test "${GITHUB_REF}" = '
+        '"refs/heads/codex/agentic-backfill-dry-run-20260728"'
+    )
 
 
 def test_committed_config_contains_no_secret_values():

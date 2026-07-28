@@ -50,6 +50,9 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+      - name: Guard one-time backfill branch
+        run: test "${GITHUB_REF}" = "refs/heads/codex/agentic-backfill-dry-run-20260728"
+
       - name: Run daily pipeline
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -60,8 +63,8 @@ jobs:
           laser-space-daily
           --config config.yaml
           --dry-run
-          --discovery-mode "${{ inputs.discovery_mode }}"
-          --max-queries "${{ inputs.max_queries }}"
+          --discovery-mode backfill
+          --max-queries 40
 
       - name: Upload generated report
         if: always()
