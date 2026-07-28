@@ -1,9 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from laser_space_daily.agentic_discovery import AgenticSearchOrchestrator
+from laser_space_daily.agentic_discovery import (
+    AgenticSearchOrchestrator,
+    _compact_search_results,
+    _research_context,
+)
 from laser_space_daily.discovery import QueryPlanner
 from laser_space_daily.models import Candidate, Category
 
@@ -196,9 +200,37 @@ def test_query_scope_and_backfill_freshness_are_enforced_locally():
     result = subject.discover(NOW, [])
 
     assert all("中国 境内" in call[0].text for call in provider.calls)
+    assert all(
+        "2026年04月29日至2026年07月28日" in call[0].text
+        for call in provider.calls
+    )
     assert all(call[1] == "oneYear" for call in provider.calls)
     assert all(call[2] == 7 for call in provider.calls)
     assert result.mode == "backfill"
+
+
+def test_backfill_context_only_exposes_results_inside_90_day_window():
+    recent = candidate(
+        "https://search.example/recent",
+        Category.COMMERCIAL_SPACE_FINANCING,
+    )
+    old = recent.model_copy(
+        update={
+            "url": "https://search.example/old",
+            "source_published_at": NOW - timedelta(days=91),
+        }
+    )
+
+    context = json.loads(_research_context(NOW, "backfill", [old, recent], []))
+    tool_payload = _compact_search_results(
+        [old, recent], "ok", NOW, "backfill"
+    )
+
+    assert context["window_start"].startswith("2026-04-29")
+    assert context["window_end"] == NOW.isoformat()
+    assert [item["url"] for item in context["seed_results"]] == [recent.url]
+    assert [item["url"] for item in tool_payload["results"]] == [recent.url]
+    assert tool_payload["outside_window_count"] == 1
 
 
 def test_multiple_tool_calls_cannot_exceed_remaining_budget():

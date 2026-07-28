@@ -88,7 +88,7 @@ def test_committed_config_contains_no_secret_values():
             "max_queries": "12",
             "daily_search_budget": "12",
             "backfill_search_budget": "40",
-            "max_agent_rounds": "4",
+            "max_agent_rounds": "8",
             "max_results_per_call": "10",
             "stop_after_no_new_rounds": "2",
             "fetch_timeout_seconds": "15",

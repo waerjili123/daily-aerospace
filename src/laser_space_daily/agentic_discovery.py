@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import re
 from typing import Any, Literal
@@ -137,6 +137,8 @@ class AgenticSearchOrchestrator:
                 query.category,
                 "seed",
                 kind=query.kind,
+                now=now,
+                mode=self._mode,
             )
             normalized_query = _normalize_query(scoped.text)
             seen_queries.add(normalized_query)
@@ -246,7 +248,13 @@ class AgenticSearchOrchestrator:
                     continue
                 query, category, intent = parsed
                 try:
-                    scoped = _validated_query(query, category, intent)
+                    scoped = _validated_query(
+                        query,
+                        category,
+                        intent,
+                        now=now,
+                        mode=self._mode,
+                    )
                 except ValueError:
                     messages.append(
                         _tool_message(call, {"error": "query_validation_failed"})
@@ -276,7 +284,15 @@ class AgenticSearchOrchestrator:
                     )
                 )
                 messages.append(
-                    _tool_message(call, _compact_search_results(rows, outcome))
+                    _tool_message(
+                        call,
+                        _compact_search_results(
+                            rows,
+                            outcome,
+                            now,
+                            self._mode,
+                        ),
+                    )
                 )
 
             if budget_used >= self._search_budget:
@@ -356,6 +372,8 @@ def _validated_query(
     intent: str,
     *,
     kind: str | None = None,
+    now: datetime | None = None,
+    mode: DiscoveryMode | None = None,
 ) -> SearchQuery:
     cleaned = " ".join(str(query).split())
     if not cleaned or len(cleaned) > 300:
@@ -366,6 +384,13 @@ def _validated_query(
         raise ValueError("agent search query targets a known out-of-scope topic")
     if intent != "seed" and intent not in _ALLOWED_INTENTS:
         raise ValueError("agent search intent is unsupported")
+    if now is not None and mode is not None:
+        window_start = _discovery_window_start(now, mode)
+        period_scope = (
+            f"{window_start:%Y年%m月%d日}至{now:%Y年%m月%d日}"
+        )
+        if period_scope not in cleaned:
+            cleaned = f"{cleaned} {period_scope}"
     if _DISCOVERY_SCOPE not in cleaned:
         cleaned = f"{cleaned} {_DISCOVERY_SCOPE}"
     selected_kind = kind or _INTENT_TO_KIND[intent]
@@ -428,10 +453,16 @@ def _research_context(
     candidates: list[Candidate],
     projects: Iterable[Project],
 ) -> str:
+    window_start = _discovery_window_start(now, mode)
     payload = {
-        "task": "根据种子结果提出高价值后续搜索；不要重复已有查询。",
+        "task": (
+            "只根据时间窗口内的种子结果提出高价值后续搜索；"
+            "每个查询必须限定当前时间窗口，不要追查窗口外旧事件，不要重复已有查询。"
+        ),
         "now": now.isoformat(),
         "mode": mode,
+        "window_start": window_start.isoformat(),
+        "window_end": now.isoformat(),
         "known_projects": [
             {
                 "name": item.name,
@@ -440,7 +471,9 @@ def _research_context(
             }
             for item in list(projects)[:20]
         ],
-        "seed_results": _compact_candidates(candidates),
+        "seed_results": _compact_candidates(
+            _candidates_in_window(candidates, now, mode)
+        ),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -463,9 +496,36 @@ def _compact_candidates(candidates: Iterable[Candidate]) -> list[dict[str, Any]]
 
 
 def _compact_search_results(
-    rows: list[Candidate], outcome: str
+    rows: list[Candidate],
+    outcome: str,
+    now: datetime,
+    mode: DiscoveryMode,
 ) -> dict[str, Any]:
-    return {"outcome": outcome, "results": _compact_candidates(rows)}
+    visible_rows = _candidates_in_window(rows, now, mode)
+    return {
+        "outcome": outcome,
+        "results": _compact_candidates(visible_rows),
+        "outside_window_count": len(rows) - len(visible_rows),
+    }
+
+
+def _discovery_window_start(now: datetime, mode: DiscoveryMode) -> datetime:
+    return now - timedelta(days=30 if mode == "daily" else 90)
+
+
+def _candidates_in_window(
+    candidates: Iterable[Candidate],
+    now: datetime,
+    mode: DiscoveryMode,
+) -> list[Candidate]:
+    window_start = _discovery_window_start(now, mode)
+    future_limit = now + timedelta(hours=24)
+    return [
+        item
+        for item in candidates
+        if item.source_published_at is None
+        or window_start <= item.source_published_at <= future_limit
+    ]
 
 
 def _assistant_message(message: Any, tool_calls: list[Any]) -> dict[str, Any]:
