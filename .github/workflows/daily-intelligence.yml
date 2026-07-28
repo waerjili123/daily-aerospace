@@ -3,15 +3,21 @@ name: Daily Laser and Space Intelligence
 on:
   workflow_dispatch:
     inputs:
-      max_queries:
-        description: "Bocha query count for manual collection validation"
+      discovery_mode:
+        description: "Daily incremental or one-time 90-day backfill"
         type: choice
         options:
-          - "1"
-          - "2"
-          - "3"
+          - "daily"
+          - "backfill"
+        default: "daily"
+      max_queries:
+        description: "Bocha hard query budget (daily <=12, backfill <=40)"
+        type: choice
+        options:
           - "4"
-        default: "4"
+          - "12"
+          - "40"
+        default: "12"
 
 concurrency:
   group: laser-space-daily
@@ -54,6 +60,7 @@ jobs:
           laser-space-daily
           --config config.yaml
           --dry-run
+          --discovery-mode "${{ inputs.discovery_mode }}"
           --max-queries "${{ inputs.max_queries }}"
 
       - name: Upload generated report

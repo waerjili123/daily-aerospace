@@ -44,10 +44,16 @@ def test_workflow_is_manual_bounded_dry_run_without_dingtalk_secrets():
     assert "secrets.DINGTALK_SECRET" not in workflow
     assert "concurrency:" in workflow
     assert document["on"]["workflow_dispatch"]["inputs"]["max_queries"] == {
-        "description": "Bocha query count for manual collection validation",
+        "description": "Bocha hard query budget (daily <=12, backfill <=40)",
         "type": "choice",
-        "options": ["1", "2", "3", "4"],
-        "default": "4",
+        "options": ["4", "12", "40"],
+        "default": "12",
+    }
+    assert document["on"]["workflow_dispatch"]["inputs"]["discovery_mode"] == {
+        "description": "Daily incremental or one-time 90-day backfill",
+        "type": "choice",
+        "options": ["daily", "backfill"],
+        "default": "daily",
     }
     assert document["concurrency"] == {
         "group": "laser-space-daily",
@@ -57,6 +63,7 @@ def test_workflow_is_manual_bounded_dry_run_without_dingtalk_secrets():
         document["jobs"]["run"]["steps"], "Run daily pipeline"
     )
     assert "--dry-run" in pipeline_step["run"]
+    assert '--discovery-mode "${{ inputs.discovery_mode }}"' in pipeline_step["run"]
     assert '--max-queries "${{ inputs.max_queries }}"' in pipeline_step["run"]
 
 
@@ -69,7 +76,16 @@ def test_committed_config_contains_no_secret_values():
             "pro_model": "deepseek-v4-pro",
         },
         "bocha": {"timeout_seconds": "30"},
-        "discovery": {"max_queries": "40", "fetch_timeout_seconds": "15"},
+        "discovery": {
+            "mode": "daily",
+            "max_queries": "12",
+            "daily_search_budget": "12",
+            "backfill_search_budget": "40",
+            "max_agent_rounds": "4",
+            "max_results_per_call": "10",
+            "stop_after_no_new_rounds": "2",
+            "fetch_timeout_seconds": "15",
+        },
         "report": {"max_chars": "18000"},
         "notifier": {"timeout_seconds": "15"},
         "data_dir": "data",

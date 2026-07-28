@@ -277,6 +277,10 @@ class ReportRenderer:
                     compact=entry.project.project_id in compact_project_ids,
                 )
             )
+            candidate_lines = _category_candidate_lines(result, category)
+            if candidate_lines and not lines:
+                lines = ("- 暂无已核实信息",)
+            lines = (*lines, *candidate_lines)
             sections.append(
                 _Section(
                     heading=_CATEGORY_LABELS[category],
@@ -308,7 +312,12 @@ class ReportRenderer:
         sections.append(
             _Section(
                 heading="商业航天融资",
-                lines=tuple(_format_financing(item) for item in rolling_financings),
+                lines=_formal_and_candidate_lines(
+                    tuple(_format_financing(item) for item in rolling_financings),
+                    _category_candidate_lines(
+                        result, Category.COMMERCIAL_SPACE_FINANCING
+                    ),
+                ),
                 protected=True,
             )
         )
@@ -589,7 +598,11 @@ def _followup_lines(
             if item.source_published_at is not None
             else "发布日期未知"
         )
-        time_label = _pending_time_label(item.source_published_at, result.window_end)
+        time_label = _pending_time_label(
+            item.source_published_at,
+            result.window_end,
+            result.metrics.fallback_window_days,
+        )
         lines.append(
             "｜".join(
                 (
@@ -609,6 +622,20 @@ def _followup_lines(
             )
     if len(current_pending) > 10:
         lines.append(f"- 另有 {len(current_pending) - 10} 条待核实候选未展开")
+    return tuple(lines)
+
+
+def _formal_and_candidate_lines(
+    formal_lines: tuple[str, ...], candidate_lines: tuple[str, ...]
+) -> tuple[str, ...]:
+    if candidate_lines and not formal_lines:
+        return ("- 暂无已核实信息", *candidate_lines)
+    return (*formal_lines, *candidate_lines)
+
+
+def _category_candidate_lines(
+    result: RunResult, category: Category
+) -> tuple[str, ...]:
     surfaced_urls = {
         item.source_url for item in result.state.pending
     } | {
@@ -618,17 +645,13 @@ def _followup_lines(
         for item in result.state.financings
         for url in (item.source_urls or [item.source_url])
     }
-    discovery_candidates = [
+    candidates = [
         item
         for item in result.discovery_candidates
-        if item.url not in surfaced_urls
+        if item.category_hint is category and item.url not in surfaced_urls
     ]
-    for item in discovery_candidates[:10]:
-        category = (
-            _CATEGORY_LABELS.get(item.category_hint, "板块未确定")
-            if item.category_hint is not None
-            else "板块未确定"
-        )
+    lines: list[str] = []
+    for item in candidates[:10]:
         source_date = (
             _format_date(item.source_published_at)
             if item.source_published_at is not None
@@ -638,8 +661,7 @@ def _followup_lines(
         lines.append(
             "｜".join(
                 (
-                    "- 搜索候选（未核实）",
-                    category,
+                    "- 候选线索（未核实）",
                     source_date,
                     time_label,
                     _safe_text(item.title),
@@ -651,8 +673,8 @@ def _followup_lines(
             lines.append(
                 f"  - 搜索摘要（未核实）：{_safe_text(item.summary[:240])}"
             )
-    if len(discovery_candidates) > 10:
-        lines.append(f"- 另有 {len(discovery_candidates) - 10} 条搜索候选未展开")
+    if len(candidates) > 10:
+        lines.append(f"- 另有 {len(candidates) - 10} 条候选线索未展开")
     return tuple(lines)
 
 
@@ -676,7 +698,18 @@ def _trend_lines(result: RunResult) -> tuple[str, ...]:
             "未达到 5 条验收门槛"
         )
     )
-    return (
+    agent_line = (
+        f"- 智能检索：预算 {metrics.search_budget}；"
+        f"实际调用 {metrics.search_budget_used}；"
+        f"模型轮次 {metrics.agent_round_count}；"
+        f"重复查询拦截 {metrics.duplicate_query_count}；"
+        f"事件过滤淘汰 {metrics.event_filter_rejected_count}；"
+        f"事件级合并 {metrics.event_duplicate_count}；"
+        f"停止原因 {_safe_text(metrics.agent_stop_reason or '未记录')}"
+        if metrics.search_budget
+        else None
+    )
+    lines = [
         f"- {_safe_text(result.trend_summary.summary)}",
         f"- 分类计数：{count_text}",
         (
@@ -684,7 +717,8 @@ def _trend_lines(result: RunResult) -> tuple[str, ...]:
             f"结构有效 {metrics.valid_shape_count}；"
             f"主题相关 {metrics.relevance_pass_count}；"
             f"近 7 天 {metrics.recent_7d_count}；"
-            f"8–30 天补充 {metrics.fallback_8_30d_count}；"
+            f"8–{metrics.fallback_window_days} 天补充 "
+            f"{metrics.fallback_8_30d_count}；"
             f"日期未知补充 {metrics.unknown_date_count}；"
             f"最终候选 {metrics.final_candidate_count}；"
             f"正文抓取失败 {metrics.fetch_failure_count}"
@@ -697,19 +731,24 @@ def _trend_lines(result: RunResult) -> tuple[str, ...]:
             f"失败域 {len(metrics.failed_domains)}"
         ),
         f"- 覆盖：{_coverage_text(result)}",
-    )
+    ]
+    if agent_line is not None:
+        lines.insert(3, agent_line)
+    return tuple(lines)
 
 
 def _pending_time_label(
-    source_published_at: datetime | None, window_end: datetime
+    source_published_at: datetime | None,
+    window_end: datetime,
+    fallback_window_days: int = 30,
 ) -> str:
     if source_published_at is None:
         return "日期未知"
     age = _as_beijing(window_end) - _as_beijing(source_published_at)
     if age.days <= 7:
         return "近 7 天"
-    if age.days <= 30:
-        return "8–30 天补充"
+    if age.days <= fallback_window_days:
+        return f"8–{fallback_window_days} 天补充"
     return "时间范围外"
 
 

@@ -58,6 +58,7 @@ class RunResult(DomainModel):
     changed_project_ids: list[str] = Field(default_factory=list)
     changed_financing_ids: list[str] = Field(default_factory=list)
     discovery_candidates: list[Candidate] = Field(default_factory=list)
+    research_trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
 _OFFICIAL_COLLECTION_ERRORS = (
@@ -122,6 +123,7 @@ class Pipeline:
         matcher: Any,
         trend_summarizer: Any,
         logger: Any,
+        researcher: Any | None = None,
     ) -> None:
         self._repository = repository
         self._planner = planner
@@ -133,10 +135,11 @@ class Pipeline:
         self._matcher = matcher
         self._trend_summarizer = trend_summarizer
         self._logger = logger
+        self._researcher = researcher
 
     def run(self, now: datetime) -> RunResult:
         deepseek_usage = _usage_snapshot(
-            (self._analyzer, self._trend_summarizer),
+            (self._analyzer, self._trend_summarizer, self._researcher),
             "deepseek_tokens",
             "total_tokens",
         )
@@ -150,18 +153,47 @@ class Pipeline:
         failed_domains: set[str] = set()
         errors: list[str] = []
 
-        queries = self._planner.plan(now, state.projects)
-        search_rows = []
-        for query in queries:
-            metrics.search_count += 1
-            try:
-                search_rows.extend(self._search_provider.search(query))
-            except (DiscoveryQuotaError, DiscoveryUnavailableError) as error:
-                metrics.search_coverage_degraded = True
-                reason = getattr(error, "reason", "request_rejected")
-                metrics.search_failure_reasons.append(str(reason))
-                errors.append(f"search_api:{reason}")
-                self._safe_log("search_api_failed", error, None)
+        research_trace: list[dict[str, Any]] = []
+        if self._researcher is not None:
+            research = self._researcher.discover(now, state.projects)
+            search_rows = list(research.candidates)
+            metrics.search_count = research.search_count
+            metrics.search_budget = research.budget
+            metrics.search_budget_used = research.budget_used
+            metrics.agent_round_count = research.agent_round_count
+            metrics.duplicate_query_count = research.duplicate_query_count
+            metrics.agent_search_degraded = research.degraded
+            metrics.agent_stop_reason = research.stop_reason
+            if research.stop_reason == "model_error":
+                metrics.model_coverage_degraded = True
+            for reason in research.error_reasons:
+                errors.append(f"agentic_discovery:{reason}")
+            research_trace = [
+                {
+                    "round_index": item.round_index,
+                    "query": item.query,
+                    "category": item.category.value,
+                    "intent": item.intent,
+                    "result_count": item.result_count,
+                    "new_candidate_count": item.new_candidate_count,
+                    "budget_remaining": item.budget_remaining,
+                    "outcome": item.outcome,
+                }
+                for item in research.trace
+            ]
+        else:
+            queries = self._planner.plan(now, state.projects)
+            search_rows = []
+            for query in queries:
+                metrics.search_count += 1
+                try:
+                    search_rows.extend(self._search_provider.search(query))
+                except (DiscoveryQuotaError, DiscoveryUnavailableError) as error:
+                    metrics.search_coverage_degraded = True
+                    reason = getattr(error, "reason", "request_rejected")
+                    metrics.search_failure_reasons.append(str(reason))
+                    errors.append(f"search_api:{reason}")
+                    self._safe_log("search_api_failed", error, None)
 
         official_rows = []
         try:
@@ -179,13 +211,26 @@ class Pipeline:
         if collector_failures:
             metrics.search_coverage_degraded = True
 
-        selection = select_search_candidates(search_rows, now)
+        is_backfill = (
+            self._researcher is not None
+            and getattr(research, "mode", "daily") == "backfill"
+        )
+        selection = select_search_candidates(
+            search_rows,
+            now,
+            minimum=40 if is_backfill else 5,
+            maximum=40 if is_backfill else 10,
+            fallback_max_days=90 if is_backfill else 30,
+        )
         metrics.raw_search_count = selection.raw_search_count
         metrics.valid_shape_count = selection.valid_shape_count
         metrics.relevance_pass_count = selection.relevance_pass_count
         metrics.recent_7d_count = selection.recent_7d_count
         metrics.fallback_8_30d_count = selection.fallback_8_30d_count
+        metrics.fallback_window_days = 90 if is_backfill else 30
         metrics.unknown_date_count = selection.unknown_date_count
+        metrics.event_filter_rejected_count = selection.filter_rejected_count
+        metrics.event_duplicate_count = selection.event_duplicate_count
         metrics.final_candidate_count = len(selection.candidates)
         metrics.information_available = (
             metrics.search_count >= 4 and metrics.final_candidate_count >= 5
@@ -410,6 +455,7 @@ class Pipeline:
             changed_project_ids=changed_project_ids,
             changed_financing_ids=changed_financing_ids,
             discovery_candidates=selected_search_rows,
+            research_trace=research_trace,
         )
 
     @staticmethod

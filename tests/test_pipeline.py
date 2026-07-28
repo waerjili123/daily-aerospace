@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -8,6 +8,10 @@ import pytest
 
 from laser_space_daily.fetcher import FetchError, FetchedPage
 from laser_space_daily.analyzer import AnalyzerError, ResilientAnalyzer
+from laser_space_daily.agentic_discovery import (
+    AgenticDiscoveryResult,
+    ResearchTraceItem,
+)
 from laser_space_daily.discovery import (
     DiscoveryConfigurationError,
     DiscoveryQuotaError,
@@ -914,6 +918,105 @@ def test_candidate_dedupe_search_counts_and_official_failures(deps) -> None:
     assert result.metrics.official_candidate_count == 1
     assert result.metrics.deduplicated_count == 1
     assert result.metrics.failed_domains == ["failed.gov.cn"]
+
+
+def test_pipeline_uses_agentic_research_result_and_exposes_trace(deps) -> None:
+    item = candidate(
+        "https://search.example.cn/agent-result",
+        source="bocha",
+        title="星间激光通信终端采购公告",
+        summary="某研究院发布空间激光通信终端采购项目。",
+        category_hint=Category.LASER_COMMUNICATION,
+        source_published_at=NOW,
+    )
+    trace = ResearchTraceItem(
+        round_index=1,
+        query="星间激光通信终端采购公告 中国 境内",
+        category=Category.LASER_COMMUNICATION,
+        intent="project_followup",
+        result_count=1,
+        new_candidate_count=1,
+        budget_remaining=7,
+        outcome="ok",
+    )
+
+    class FakeResearcher:
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(item,),
+                trace=(trace,),
+                budget=12,
+                budget_used=5,
+                search_count=5,
+                agent_round_count=1,
+                duplicate_query_count=2,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="model_completed",
+            )
+
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    deps.official_collector.rows = []
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert deps.search_provider.calls == 0
+    assert result.metrics.search_count == 5
+    assert result.metrics.search_budget == 12
+    assert result.metrics.search_budget_used == 5
+    assert result.metrics.agent_round_count == 1
+    assert result.metrics.duplicate_query_count == 2
+    assert result.metrics.agent_stop_reason == "model_completed"
+    assert result.research_trace == [
+        {
+            "round_index": 1,
+            "query": trace.query,
+            "category": Category.LASER_COMMUNICATION.value,
+            "intent": "project_followup",
+            "result_count": 1,
+            "new_candidate_count": 1,
+            "budget_remaining": 7,
+            "outcome": "ok",
+        }
+    ]
+
+
+def test_pipeline_backfill_keeps_relevant_candidates_up_to_90_days(deps) -> None:
+    item = candidate(
+        "https://search.example.cn/backfill-result",
+        source="bocha",
+        title="高能激光反无人机系统招标公告",
+        summary="某单位发布高能激光反无人机装备采购项目。",
+        category_hint=Category.LASER_WEAPON,
+        source_published_at=NOW - timedelta(days=60),
+    )
+
+    class FakeBackfillResearcher:
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(item,),
+                trace=(),
+                budget=40,
+                budget_used=4,
+                search_count=4,
+                agent_round_count=0,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="model_completed",
+                mode="backfill",
+            )
+
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeBackfillResearcher()
+    deps.official_collector.rows = []
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert [row.url for row in result.discovery_candidates] == [item.url]
+    assert result.metrics.fallback_window_days == 90
+    assert result.metrics.fallback_8_30d_count == 1
 
 
 def test_pipeline_filters_search_noise_before_fetch_and_marks_information_available(

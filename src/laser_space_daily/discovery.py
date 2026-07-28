@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import re
 from typing import Iterable, Literal
+import unicodedata
 from urllib.parse import unquote_plus, urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -77,6 +79,8 @@ class CandidateSelection:
     recent_7d_count: int
     fallback_8_30d_count: int
     unknown_date_count: int
+    filter_rejected_count: int = 0
+    event_duplicate_count: int = 0
 
 
 class OfficialSeed(BaseModel):
@@ -220,7 +224,17 @@ class BochaProvider:
         """Return lifetime attempted searches, including controlled failures."""
         return self._usage_count
 
-    def search(self, query: SearchQuery) -> list[Candidate]:
+    def search(
+        self,
+        query: SearchQuery,
+        *,
+        freshness: str = "oneMonth",
+        count: int = 10,
+    ) -> list[Candidate]:
+        if freshness not in {"oneDay", "oneWeek", "oneMonth", "oneYear", "noLimit"}:
+            raise ValueError("unsupported Bocha freshness")
+        if not 1 <= count <= 50:
+            raise ValueError("Bocha result count must be between 1 and 50")
         self._usage_count += 1
         try:
             response = self._client.post(
@@ -228,9 +242,9 @@ class BochaProvider:
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
                     "query": query.text,
-                    "freshness": "oneMonth",
+                    "freshness": freshness,
                     "summary": True,
-                    "count": 10,
+                    "count": count,
                 },
             )
         except (httpx.TransportError, ConnectionError, TimeoutError) as error:
@@ -457,6 +471,58 @@ _FINANCING_EVENT_TERMS = (
     "c轮",
     "d轮",
 )
+_PROCUREMENT_EVENT_TERMS = (
+    "采购意向",
+    "采购公告",
+    "采购项目",
+    "采购",
+    "招标",
+    "询价",
+    "比选",
+    "竞争性谈判",
+    "竞争性磋商",
+    "候选人",
+    "中标",
+    "成交",
+    "结果公告",
+    "变更公告",
+    "延期",
+    "终止",
+    "废标",
+    "重新招标",
+    "交付",
+    "procurement",
+    "tender",
+    "request for proposal",
+    "contract award",
+)
+_RESEARCH_REPORT_NOISE_TERMS = (
+    "行业研究报告",
+    "深度研究及发展前景",
+    "市场调研报告",
+    "报告目录",
+    "中国行业研究网",
+)
+_MARKET_COMMENTARY_NOISE_TERMS = (
+    "a股",
+    "概念股",
+    "板块拉涨",
+    "板块上涨",
+    "涨停",
+    "高切低",
+    "行情",
+    "投资建议",
+    "建议关注",
+    "低位布局",
+)
+_NEGATED_EVENT_TERMS = (
+    "没有具体采购事件",
+    "无具体采购事件",
+    "没有采购事件",
+    "无采购事件",
+    "没有具体融资事件",
+    "无具体融资事件",
+)
 _EXCLUDED_NOISE_TERMS = (
     "激光打印机",
     "打印耗材",
@@ -486,12 +552,15 @@ def select_search_candidates(
     *,
     minimum: int = 5,
     maximum: int = 10,
+    fallback_max_days: int = 30,
 ) -> CandidateSelection:
     """Apply the approved shape, relevance and date gates to web-search rows."""
     if now.tzinfo is None:
         raise ValueError("selection time must include a timezone")
     if minimum < 0 or maximum < minimum:
         raise ValueError("candidate bounds must satisfy 0 <= minimum <= maximum")
+    if fallback_max_days < 8 or fallback_max_days > 90:
+        raise ValueError("fallback_max_days must be between 8 and 90")
 
     input_rows = list(rows)
     valid: list[Candidate] = []
@@ -506,12 +575,20 @@ def select_search_candidates(
 
     deduplicated: list[tuple[Candidate, int]] = []
     seen: set[str] = set()
+    event_duplicate_count = 0
     for row, score in relevant:
         normalized_url = normalize_url(row.url)
         if normalized_url in seen:
             continue
         seen.add(normalized_url)
-        deduplicated.append((row.model_copy(update={"url": normalized_url}), score))
+        normalized_row = row.model_copy(update={"url": normalized_url})
+        if any(
+            _same_search_event(normalized_row, existing)
+            for existing, _ in deduplicated
+        ):
+            event_duplicate_count += 1
+            continue
+        deduplicated.append((normalized_row, score))
 
     recent: list[tuple[Candidate, int]] = []
     fallback: list[tuple[Candidate, int]] = []
@@ -528,7 +605,7 @@ def select_search_candidates(
         age = max(timedelta(0), now_utc - published_utc)
         if age <= timedelta(days=7):
             recent.append((row, score))
-        elif age <= timedelta(days=30):
+        elif age <= timedelta(days=fallback_max_days):
             fallback.append((row, score))
 
     recent.sort(key=_candidate_rank)
@@ -555,6 +632,8 @@ def select_search_candidates(
         recent_7d_count=min(len(recent), maximum),
         fallback_8_30d_count=len(fallback_used),
         unknown_date_count=len(unknown_used),
+        filter_rejected_count=len(valid) - len(relevant),
+        event_duplicate_count=event_duplicate_count,
     )
 
 
@@ -582,7 +661,12 @@ def _has_usable_search_shape(row: Candidate) -> bool:
 
 def _assess_relevance(row: Candidate) -> tuple[Candidate, int] | None:
     text = _normalized_candidate_text(row)
-    if any(term in text for term in _EXCLUDED_NOISE_TERMS):
+    if (
+        any(term in text for term in _EXCLUDED_NOISE_TERMS)
+        or any(term in text for term in _RESEARCH_REPORT_NOISE_TERMS)
+        or any(term in text for term in _MARKET_COMMENTARY_NOISE_TERMS)
+        or any(term in text for term in _NEGATED_EVENT_TERMS)
+    ):
         return None
 
     category = row.category_hint
@@ -594,8 +678,13 @@ def _assess_relevance(row: Candidate) -> tuple[Candidate, int] | None:
         return row, subject_hits + event_hits
 
     if category in _CATEGORY_TERMS:
-        hits = _term_hits(text, _CATEGORY_TERMS[category])
-        return (row, hits) if hits else None
+        subject_hits = _term_hits(text, _CATEGORY_TERMS[category])
+        event_hits = _term_hits(text, _PROCUREMENT_EVENT_TERMS)
+        return (
+            (row, subject_hits + event_hits)
+            if subject_hits and event_hits
+            else None
+        )
 
     financing_subject_hits = _term_hits(text, _FINANCING_SUBJECT_TERMS)
     financing_event_hits = _term_hits(text, _FINANCING_EVENT_TERMS)
@@ -607,10 +696,67 @@ def _assess_relevance(row: Candidate) -> tuple[Candidate, int] | None:
             financing_subject_hits + financing_event_hits,
         )
     for inferred_category, terms in _CATEGORY_TERMS.items():
-        hits = _term_hits(text, terms)
-        if hits:
-            return row.model_copy(update={"category_hint": inferred_category}), hits
+        subject_hits = _term_hits(text, terms)
+        event_hits = _term_hits(text, _PROCUREMENT_EVENT_TERMS)
+        if subject_hits and event_hits:
+            return (
+                row.model_copy(update={"category_hint": inferred_category}),
+                subject_hits + event_hits,
+            )
     return None
+
+
+_ANNOUNCEMENT_CODE = re.compile(
+    r"(?:项目|采购|招标|公告)?编号[：:\s]*([A-Za-z0-9][A-Za-z0-9._\-/]{4,})",
+    re.IGNORECASE,
+)
+
+
+def _same_search_event(left: Candidate, right: Candidate) -> bool:
+    if left.category_hint is not right.category_hint:
+        return False
+    left_code = _announcement_code(left)
+    right_code = _announcement_code(right)
+    if left_code and right_code:
+        return left_code == right_code
+    if _event_stage(left) != _event_stage(right):
+        return False
+    return _canonical_title(left.title) == _canonical_title(right.title)
+
+
+def _announcement_code(row: Candidate) -> str | None:
+    matched = _ANNOUNCEMENT_CODE.search(f"{row.title} {row.summary}")
+    return matched.group(1).casefold() if matched else None
+
+
+def _event_stage(row: Candidate) -> str:
+    text = _normalized_candidate_text(row)
+    stages = (
+        ("termination", ("终止", "废标")),
+        ("change", ("变更", "延期")),
+        ("award", ("中标", "成交", "结果公告")),
+        ("candidate", ("候选人",)),
+        ("tender", ("招标", "采购公告", "询价", "比选")),
+        ("intention", ("采购意向",)),
+        ("delivery", ("交付",)),
+        ("financing", _FINANCING_EVENT_TERMS),
+    )
+    return next(
+        (stage for stage, terms in stages if any(term in text for term in terms)),
+        "unknown",
+    )
+
+
+def _canonical_title(title: str) -> str:
+    normalized = unicodedata.normalize("NFKC", title).casefold()
+    normalized = re.sub(r"[\s*｜|_\-—:：·•]+", "", normalized)
+    normalized = normalized.replace("打印版", "")
+    return re.sub(
+        r"(?:中国行业研究网|腾讯新闻|新浪财经|搜狐网|网易新闻|"
+        r"www\.[a-z0-9.-]+)$",
+        "",
+        normalized,
+    )
 
 
 def _normalized_candidate_text(row: Candidate) -> str:

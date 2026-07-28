@@ -22,6 +22,7 @@ from laser_space_daily.cli import (
     RunAlreadyActive,
     _LocalRunLock,
     _build_parser,
+    _mark_test_report,
     build_pipeline,
     run_cli,
 )
@@ -52,6 +53,7 @@ from laser_space_daily.report import (
     ReportRenderer,
     ReportTooLong,
     _actionable_deadline,
+    _category_candidate_lines,
     _followup_lines,
 )
 from laser_space_daily.repository import StateRepository
@@ -166,7 +168,7 @@ def test_date_only_deadline_remains_actionable_and_in_followup_until_local_day_e
     assert any("当日截止项目" in line for line in _followup_lines(result, {}))
 
 
-def test_followup_surfaces_selected_search_candidate_rejected_downstream():
+def test_category_section_surfaces_selected_search_candidate_rejected_downstream():
     item = Candidate(
         title="星间激光通信终端采购公告",
         url="https://search.example.cn/laser-terminal",
@@ -178,14 +180,51 @@ def test_followup_surfaces_selected_search_candidate_rejected_downstream():
     )
     result = make_result(discovery_candidates=[item])
 
+    candidate_lines = "\n".join(
+        _category_candidate_lines(result, Category.LASER_COMMUNICATION)
+    )
     followup = "\n".join(_followup_lines(result, {}))
 
-    assert "搜索候选（未核实）" in followup
-    assert "激光通信" in followup
-    assert "2026-07-21" in followup
-    assert item.title in followup
-    assert item.summary in followup
-    assert item.url in followup
+    assert "候选线索（未核实）" in candidate_lines
+    assert "2026-07-21" in candidate_lines
+    assert item.title in candidate_lines
+    assert item.summary in candidate_lines
+    assert item.url in candidate_lines
+    assert item.title not in followup
+
+
+def test_report_exposes_agentic_budget_and_stop_reason():
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        search_budget=12,
+        search_budget_used=9,
+        agent_round_count=3,
+        duplicate_query_count=2,
+        event_filter_rejected_count=7,
+        event_duplicate_count=1,
+        agent_stop_reason="no_new_candidates",
+    )
+
+    markdown = ReportRenderer().render(make_result(metrics=metrics)).markdown
+
+    assert "智能检索：预算 12；实际调用 9；模型轮次 3" in markdown
+    assert "重复查询拦截 2" in markdown
+    assert "事件过滤淘汰 7" in markdown
+    assert "事件级合并 1" in markdown
+    assert "停止原因 no\\_new\\_candidates" in markdown
+
+
+def test_test_label_marks_title_and_markdown():
+    report = RenderedReport(
+        title="# 中国激光与商业航天情报日报｜2026-07-28",
+        markdown="# 中国激光与商业航天情报日报｜2026-07-28\n\n正文\n",
+    )
+
+    marked = _mark_test_report(report)
+
+    assert marked.title.startswith("# 【测试】")
+    assert marked.markdown.startswith("# 【测试】")
+    assert marked.markdown.count("【测试】") == 1
 
 
 def financing(
@@ -1313,6 +1352,8 @@ def test_cli_parser_exposes_exact_public_arguments() -> None:
         "help": {"-h", "--help"},
         "config": {"--config"},
         "dry_run": {"--dry-run"},
+        "test_label": {"--test-label"},
+        "discovery_mode": {"--discovery-mode"},
         "max_queries": {"--max-queries"},
         "now": {"--now"},
         "log_level": {"--log-level"},
@@ -1346,6 +1387,56 @@ def test_cli_max_queries_overrides_loaded_settings(cli_deps) -> None:
 
     assert code == 0
     assert observed == [4]
+
+
+def test_cli_backfill_mode_allows_40_query_budget(cli_deps) -> None:
+    observed: list[tuple[str, int]] = []
+
+    def pipeline_factory(settings: Settings):
+        observed.append(
+            (settings.discovery.mode, settings.discovery.max_queries)
+        )
+        return cli_deps.pipeline
+
+    dependencies = CliDependencies(
+        settings_loader=cli_deps.dependencies.settings_loader,
+        pipeline_factory=pipeline_factory,
+        renderer_factory=cli_deps.dependencies.renderer_factory,
+        notifier_factory=cli_deps.dependencies.notifier_factory,
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--dry-run",
+            "--discovery-mode",
+            "backfill",
+            "--max-queries",
+            "40",
+        ],
+        dependencies=dependencies,
+    )
+
+    assert code == 0
+    assert observed == [("backfill", 40)]
+
+
+def test_cli_daily_mode_rejects_budget_over_12(cli_deps) -> None:
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--dry-run",
+            "--discovery-mode",
+            "daily",
+            "--max-queries",
+            "13",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    assert code == 2
 
 
 @pytest.mark.parametrize("value", ["-1", "not-a-number"])

@@ -364,12 +364,113 @@ def test_search_selection_prefers_recent_then_uses_8_to_30_day_fallback(
     assert len(selection.candidates) == 5
     assert selection.raw_search_count == 10
     assert selection.valid_shape_count == 10
-    assert selection.relevance_pass_count == 8
+    assert selection.relevance_pass_count == 7
+    assert selection.filter_rejected_count == 3
     assert selection.recent_7d_count == 3
     assert selection.fallback_8_30d_count == 2
     assert selection.unknown_date_count == 0
     assert all("noise" not in item.url for item in selection.candidates)
     assert all("old" not in item.url for item in selection.candidates)
+
+
+@pytest.mark.parametrize(
+    ("title", "summary"),
+    [
+        (
+            "2026-2030年中国星间激光通信行业深度研究报告 打印版",
+            "中国行业研究网提供报告目录和市场发展前景。",
+        ),
+        (
+            "火箭成功回收，商业航天拉涨，能否成为高切低方向",
+            "A股商业航天概念股上涨，建议关注低位布局机会。",
+        ),
+        (
+            "中金：激光通信产业发展有望加速",
+            "券商投资建议，建议关注核心零部件供应商。",
+        ),
+    ],
+)
+def test_search_selection_rejects_reports_and_market_commentary(
+    fixed_now, title, summary
+) -> None:
+    row = _search_candidate(
+        title=title,
+        summary=summary,
+        url="https://noise.example/item",
+        category=Category.LASER_COMMUNICATION,
+        published_at=fixed_now,
+    )
+
+    selection = select_search_candidates([row], fixed_now)
+
+    assert selection.candidates == ()
+    assert selection.filter_rejected_count == 1
+
+
+def test_search_selection_requires_procurement_event_intent_for_laser_categories(
+    fixed_now,
+) -> None:
+    row = _search_candidate(
+        title="星间激光通信技术发展趋势",
+        summary="介绍空间激光通信原理和产业前景，没有具体采购事件。",
+        url="https://commentary.example/item",
+        category=Category.LASER_COMMUNICATION,
+        published_at=fixed_now,
+    )
+
+    selection = select_search_candidates([row], fixed_now)
+
+    assert selection.candidates == ()
+
+
+def test_search_selection_merges_print_and_regular_pages_for_same_event(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title="星间激光通信终端采购公告",
+            summary="某研究院发布星间激光通信终端采购公告。",
+            url="https://example.cn/notice",
+            category=Category.LASER_COMMUNICATION,
+            published_at=fixed_now,
+        ),
+        _search_candidate(
+            title="星间激光通信终端采购公告 打印版",
+            summary="某研究院发布星间激光通信终端采购公告。",
+            url="https://example.cn/notice/print",
+            category=Category.LASER_COMMUNICATION,
+            published_at=fixed_now,
+        ),
+    ]
+
+    selection = select_search_candidates(rows, fixed_now, minimum=0)
+
+    assert len(selection.candidates) == 1
+    assert selection.event_duplicate_count == 1
+
+
+def test_search_selection_keeps_distinct_lifecycle_events(fixed_now) -> None:
+    rows = [
+        _search_candidate(
+            title="星间激光通信终端项目招标公告",
+            summary="某研究院发布星间激光通信终端招标公告。",
+            url="https://example.cn/tender",
+            category=Category.LASER_COMMUNICATION,
+            published_at=fixed_now,
+        ),
+        _search_candidate(
+            title="星间激光通信终端项目中标公告",
+            summary="某研究院发布星间激光通信终端中标结果。",
+            url="https://example.cn/award",
+            category=Category.LASER_COMMUNICATION,
+            published_at=fixed_now,
+        ),
+    ]
+
+    selection = select_search_candidates(rows, fixed_now, minimum=0)
+
+    assert len(selection.candidates) == 2
+    assert selection.event_duplicate_count == 0
 
 
 def test_search_selection_limits_unknown_dates_and_rejects_future_rows(

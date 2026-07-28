@@ -119,7 +119,8 @@ def test_information_availability_fixture_filters_noise_old_and_duplicate_rows()
     assert [item.url for item in selection.candidates] == fixture["expected_urls"]
     assert selection.raw_search_count == 21
     assert selection.valid_shape_count == 21
-    assert selection.relevance_pass_count == 16
+    assert selection.relevance_pass_count == 13
+    assert selection.filter_rejected_count == 8
     assert selection.recent_7d_count == 6
     assert selection.fallback_8_30d_count == 0
     assert selection.unknown_date_count == 0

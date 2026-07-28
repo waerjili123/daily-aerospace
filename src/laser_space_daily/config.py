@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -19,8 +19,27 @@ class BochaSettings(BaseModel):
 class DiscoverySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_queries: int = Field(default=40, ge=0)
+    mode: Literal["daily", "backfill"] = "daily"
+    max_queries: int = Field(default=12, ge=0, le=40)
+    daily_search_budget: int = Field(default=12, ge=0, le=12)
+    backfill_search_budget: int = Field(default=40, ge=0, le=40)
+    max_agent_rounds: int = Field(default=4, ge=0, le=12)
+    max_results_per_call: int = Field(default=10, ge=1, le=50)
+    stop_after_no_new_rounds: int = Field(default=2, ge=1, le=4)
     fetch_timeout_seconds: float = Field(default=15.0, gt=0)
+
+    @model_validator(mode="after")
+    def enforce_mode_budget(self) -> "DiscoverySettings":
+        hard_limit = (
+            self.daily_search_budget
+            if self.mode == "daily"
+            else self.backfill_search_budget
+        )
+        if self.max_queries > hard_limit:
+            raise ValueError(
+                f"{self.mode} max_queries must not exceed configured budget {hard_limit}"
+            )
+        return self
 
 
 class DeepSeekSettings(BaseModel):

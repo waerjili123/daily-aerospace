@@ -1,6 +1,6 @@
 # 激光与商业航天情报日报项目进度
 
-更新时间：2026-07-27（北京时间）
+更新时间：2026-07-28（北京时间）
 
 ## 当前结论
 
@@ -16,6 +16,7 @@
 钉钉真实试发：已成功执行一次；一次性分支已恢复 dry-run
 定时任务：当前未启用 schedule
 仓库可见性：public，未修改
+智能多轮检索：离线开发完成，等待真实 dry-run
 ```
 
 ## 已确认事实
@@ -110,13 +111,50 @@ fetch_failure_count
 information_available
 ```
 
+## 智能多轮检索开发
+
+设计与计划：
+
+- `docs/superpowers/specs/2026-07-28-agentic-intelligence-retrieval-design.md`
+- `docs/superpowers/plans/2026-07-28-agentic-intelligence-retrieval.md`
+
+开发分支：
+
+```text
+codex/agentic-intelligence-retrieval
+```
+
+已实现：
+
+- [x] DeepSeek `search_web` Tool Calling 编排器。
+- [x] 四板块确定性种子搜索。
+- [x] 日常 12 次、历史回填 40 次硬预算。
+- [x] 重复查询拦截、轮次上限和连续无新增停止。
+- [x] DeepSeek 规划失败后保留种子搜索结果并标注降级。
+- [x] 日常 `oneMonth`、历史回填 `oneYear` 博查时间范围；本地回填候选限制为近 90 天。
+- [x] 研报销售页、股市评论、荐股和泛化券商观点排除。
+- [x] 采购类主题与生命周期双门槛。
+- [x] 普通页与打印页事件级合并，不合并不同生命周期事件。
+- [x] 分类板块展示“候选线索（未核实）”，不再在“今日重点跟进”重复展示。
+- [x] 报告展示搜索预算、实际调用、模型轮次、重复查询、事件过滤、事件合并和停止原因。
+- [x] Artifact 保存不含敏感信息的 `data/research-trace.json`。
+- [x] CLI 支持 `daily`、`backfill` 和“【测试】”标题。
+- [x] workflow 仍只有手动入口并强制 dry-run。
+
+尚未执行：
+
+- [ ] 40 查询历史回填真实 dry-run。
+- [ ] 12 查询日常真实 dry-run。
+- [ ] 新版受控钉钉测试发送。
+- [ ] 新分支 PR 创建或任何 PR 合并。
+
 ## 测试结果
 
 ```text
 发现层与模型测试：70 passed
 发现/流水线/报告/固定样本定向测试：158 passed
 候选展示修复定向测试：108 passed
-完整离线测试：354 passed
+完整离线测试：372 passed
 git diff --check：通过
 ```
 
@@ -143,16 +181,19 @@ PR #4 分支：codex/pending-candidate-report
 本地开发基线：包含 PR #4 提交 c150877
 PR #5：https://github.com/waerjili123/daily-aerospace/pull/5
 PR #5 状态：open / not merged
+
+智能检索开发分支：codex/agentic-intelligence-retrieval
+智能检索 PR：尚未创建
 ```
 
 ## 下一步
 
-1. 增加来源类型和事件意图过滤，排除研究报告销售页、股市行情评论和泛化券商观点；
-2. 增加标题与摘要近重复合并，避免同一研究报告占用多个候选名额；
-3. 将查询进一步改为事件优先，重点获取招标、中标、签约、发射、交付、融资完成等可核验事件；
-4. 诊断 DeepSeek 覆盖降级和 5 条候选全部未核实的具体原因；
-5. 使用强制 dry-run 再验证一轮候选质量；
-6. 再决定 PR #4 与 PR #5 的合并顺序。
+1. 推送智能检索开发分支；
+2. 运行一次 40 查询历史回填强制 dry-run；
+3. 审核 90 天候选、事件级重复、噪声和研究轨迹；
+4. 运行一次 12 查询日常强制 dry-run；
+5. 审核通过后执行一次标题含“【测试】”的受控钉钉发送；
+6. 再决定 PR #4、PR #5 与智能检索分支的合并顺序。
 
 以下事项仍未授权：
 

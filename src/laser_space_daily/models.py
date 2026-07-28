@@ -227,6 +227,7 @@ class RunMetrics(DomainModel):
     relevance_pass_count: int = Field(default=0, ge=0)
     recent_7d_count: int = Field(default=0, ge=0)
     fallback_8_30d_count: int = Field(default=0, ge=0)
+    fallback_window_days: int = Field(default=30, ge=8, le=90)
     unknown_date_count: int = Field(default=0, ge=0)
     final_candidate_count: int = Field(default=0, ge=0)
     fetch_failure_count: int = Field(default=0, ge=0)
@@ -243,6 +244,14 @@ class RunMetrics(DomainModel):
     search_failure_reasons: list[str] = Field(default_factory=list)
     model_coverage_degraded: bool = False
     search_coverage_degraded: bool = False
+    search_budget: int = Field(default=0, ge=0)
+    search_budget_used: int = Field(default=0, ge=0)
+    agent_round_count: int = Field(default=0, ge=0)
+    duplicate_query_count: int = Field(default=0, ge=0)
+    event_filter_rejected_count: int = Field(default=0, ge=0)
+    event_duplicate_count: int = Field(default=0, ge=0)
+    agent_search_degraded: bool = False
+    agent_stop_reason: str = ""
 
 
 class StateBundle(DomainModel):

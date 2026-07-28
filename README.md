@@ -2,7 +2,7 @@
 
 这是一个面向激光通信与商业航天产业的日度情报管道：收集公开线索、核验来源、关联历史项目，并生成可追溯的 Markdown 报告。它只处理本项目范围内的产业与采购情报，**独立于 AI日报**，不包含任何 AI 新闻内容。
 
-> 当前处于采集链路恢复阶段。自动 workflow 已暂停；工作流暂时只允许手动、小规模 `dry_run=true` 验收，不发送钉钉、不提交状态，也不包含定时入口。
+> 当前处于智能多轮检索验收阶段。工作流只允许手动 `dry_run=true` 验收，不自动发送钉钉、不提交状态，也不包含定时入口。
 
 ## 架构与目录
 
@@ -32,6 +32,20 @@ python -m pip install -c constraints.txt -e ".[dev]"
 laser-space-daily --config config.yaml --dry-run
 ```
 
+日常增量最多执行 12 次博查搜索：
+
+```bash
+laser-space-daily --config config.yaml --dry-run --discovery-mode daily --max-queries 12
+```
+
+一次性近 90 天历史回填最多执行 40 次，并且必须保持 dry-run：
+
+```bash
+laser-space-daily --config config.yaml --dry-run --discovery-mode backfill --max-queries 40
+```
+
+DeepSeek 通过受控的 `search_web` Tool Calling 提出后续查询。本地预算守卫负责执行博查调用，模型不能突破日常 12 次或回填 40 次的硬上限。研究轨迹写入 `data/research-trace.json`，不包含密钥、认证头、完整网页正文或模型隐藏推理。
+
 请检查 `reports/` 中的报告与每条来源链接，再决定是否进行真实推送。不要把密钥写入 `config.yaml`、日志或问题反馈中。
 
 ## 上线验收边界
@@ -42,8 +56,9 @@ laser-space-daily --config config.yaml --dry-run
 - [x] 已完成离线全量测试、核心模块逐文件覆盖率、编译和敏感信息扫描；这些测试使用注入的固定客户端，不访问真实 DeepSeek、博查或钉钉。
 - [x] 已配置 `DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET` Secrets；仓库当前实际为 public，与原定私有要求不一致。
 - [x] 已定位博查真实响应位于 `data.webPages.value`。
-- [ ] 待运行仅手动、小规模 `workflow_dispatch`，固定保持 `dry_run=true`，下载并人工审核报告与状态 artifact。
-- [ ] 待审核通过后运行一次 `dry_run=false`，验收仅一条钉钉消息及其来源链接。
+- [ ] 待运行一次 40 查询历史回填 dry-run，下载并人工审核三个月项目池。
+- [ ] 待运行一次 12 查询日常 dry-run，核对候选质量、去重和研究轨迹。
+- [ ] 待审核通过后，从一次性测试分支发送一条标题含“【测试】”的钉钉消息，随后立即恢复 dry-run。
 
 本地离线验收环境为 Python 3.12；项目要求的 Python 3.13 以 GitHub Actions 工作流为权威兼容性门禁。Actions 成功只表示程序没有失败，不代表采集到真实信息。
 
@@ -51,10 +66,11 @@ laser-space-daily --config config.yaml --dry-run
 
 1. 保持自动 workflow 暂停，先合并 `data.webPages.value` 解析修复。
 2. 重新启用不含 `schedule` 的仅手动工作流。
-3. 首次选择 4 次核心查询运行；命令固定包含 `--dry-run`，无法从页面关闭。
-4. 下载包含 `reports/` 与 `data/` 的 artifact，确认候选数大于 0、原始链接存在，并区分抓取、分析和核验失败。
+3. 日常验证选择 `daily` 与 12 次查询；历史回填选择 `backfill` 与 40 次查询。命令固定包含 `--dry-run`，无法从页面关闭。
+4. 下载包含 `reports/` 与 `data/` 的 artifact，确认候选数大于 0、原始链接存在，并核对 `research-trace.json` 中的预算、轮次、查询和停止原因。
 
-自动运行和 `dry_run=false` 均不在本阶段启用。只有真实信息采集验收通过后，才修复并验证北京时间 07:30 调度；日报人工审核通过后，才进行一次正式钉钉验收。
+自动运行不在本阶段启用。真实信息采集验收通过后，才修复并验证北京时间 07:30 调度；受控钉钉验证只能从名称明确的一次性测试分支人工触发。
+除该一次性测试分支外，不开放一般性的 `dry_run=false` 入口。
 
 同一个 `data_dir` 必须遵守**单写入者**约束。Actions 的 `concurrency` 组负责串行化云端任务；CLI 同时持有 `data/.laser-space-daily.lock` 操作系统锁，本地第二个进程会直接以退出码 4 结束。锁文件可以保留，进程退出或崩溃时操作系统会释放锁；不要用不同工作目录绕过同一份状态的串行要求。
 

@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import logging
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import httpx
 from openai import OpenAI
 import yaml
 
+from .agentic_discovery import AgenticSearchOrchestrator
 from .analyzer import DeepSeekAnalyzer, ResilientAnalyzer, RuleFallbackAnalyzer
 from .config import Settings, load_settings
 from .discovery import BochaProvider, OfficialSeed, OfficialSeedCollector, QueryPlanner
@@ -137,13 +139,29 @@ def build_pipeline(settings: Settings) -> Pipeline:
         ),
         financing_b_domains=settings.financing_sources.independent_media_domains,
     )
-    return Pipeline(
-        repository=StateRepository(settings.data_dir),
-        planner=QueryPlanner(
-            max_queries=settings.discovery.max_queries,
+    planner = QueryPlanner(
+        max_queries=settings.discovery.max_queries,
+        financing_domains=registry.financing_domains,
+    )
+    search_provider = BochaProvider(settings.bocha_api_key, client=search_client)
+    researcher = AgenticSearchOrchestrator(
+        client=model_client,
+        search_provider=search_provider,
+        fallback_planner=QueryPlanner(
+            max_queries=4,
             financing_domains=registry.financing_domains,
         ),
-        search_provider=BochaProvider(settings.bocha_api_key, client=search_client),
+        model=settings.deepseek.pro_model,
+        mode=settings.discovery.mode,
+        search_budget=settings.discovery.max_queries,
+        max_agent_rounds=settings.discovery.max_agent_rounds,
+        max_results_per_call=settings.discovery.max_results_per_call,
+        stop_after_no_new_rounds=settings.discovery.stop_after_no_new_rounds,
+    )
+    return Pipeline(
+        repository=StateRepository(settings.data_dir),
+        planner=planner,
+        search_provider=search_provider,
         official_collector=OfficialSeedCollector(seeds, client=official_client),
         fetcher=PageFetcher(timeout=settings.discovery.fetch_timeout_seconds),
         analyzer=analyzer,
@@ -151,6 +169,7 @@ def build_pipeline(settings: Settings) -> Pipeline:
         matcher=ProjectMatcher(),
         trend_summarizer=deepseek,
         logger=LOGGER,
+        researcher=researcher,
     )
 
 
@@ -180,6 +199,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="laser-space-daily")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--test-label", action="store_true")
+    parser.add_argument("--discovery-mode", choices=("daily", "backfill"))
     parser.add_argument("--max-queries", type=_non_negative_int)
     parser.add_argument("--now")
     parser.add_argument(
@@ -234,6 +255,37 @@ def _atomic_write_report(path: Path, report: RenderedReport) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
+def _atomic_write_research_trace(path: Path, trace: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.stem}-",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump(trace, temporary_file, ensure_ascii=False, indent=2)
+            temporary_file.write("\n")
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _mark_test_report(report: RenderedReport) -> RenderedReport:
+    title = report.title.replace("# ", "# 【测试】", 1)
+    markdown = report.markdown.replace(report.title, title, 1)
+    return report.model_copy(update={"title": title, "markdown": markdown})
+
+
 def _log_failure(code: str, error: BaseException) -> None:
     LOGGER.error("cli_failure code=%s error=%s", code, type(error).__name__)
 
@@ -262,8 +314,15 @@ def _run_locked_cycle(
         result = pipeline.run(now)
         renderer = selected.renderer_factory(settings)
         report = renderer.render(result)
+        if arguments.test_label:
+            report = _mark_test_report(report)
         report_path = settings.report_dir / f"{now.date().isoformat()}.md"
         _atomic_write_report(report_path, report)
+        if result.research_trace:
+            _atomic_write_research_trace(
+                settings.data_dir / "research-trace.json",
+                result.research_trace,
+            )
     except Exception as error:
         _log_failure("pipeline", error)
         return 4
@@ -292,11 +351,20 @@ def run_cli(
     try:
         now = _parse_now(arguments.now)
         settings = selected.settings_loader(Path(arguments.config))
+        discovery_updates: dict[str, Any] = {}
+        if arguments.discovery_mode is not None:
+            discovery_updates["mode"] = arguments.discovery_mode
         if arguments.max_queries is not None:
+            discovery_updates["max_queries"] = arguments.max_queries
+        if discovery_updates:
+            discovery_document = {
+                **settings.discovery.model_dump(),
+                **discovery_updates,
+            }
             settings = settings.model_copy(
                 update={
-                    "discovery": settings.discovery.model_copy(
-                        update={"max_queries": arguments.max_queries}
+                    "discovery": type(settings.discovery).model_validate(
+                        discovery_document
                     )
                 }
             )
