@@ -784,16 +784,21 @@ _FINANCING_ROUND = re.compile(
     r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
     r"天使\+{0,2}|种子|战略投资|战略|新一)\s*轮"
 )
+_COMBINED_FINANCING_ROUNDS = re.compile(
+    r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|天使\+{0,2}|种子)"
+    r"\s*(?:和|及|、|/)\s*"
+    r"(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|天使\+{0,2}|种子)\s*轮"
+)
 
 
 def _same_financing_event(left: Candidate, right: Candidate) -> bool | None:
     left_company = _financing_company(left)
     right_company = _financing_company(right)
-    left_round = _financing_round(left)
-    right_round = _financing_round(right)
-    if not all((left_company, right_company, left_round, right_round)):
+    left_rounds = _financing_rounds(left)
+    right_rounds = _financing_rounds(right)
+    if not left_company or not right_company or not left_rounds or not right_rounds:
         return None
-    if left_company != right_company or left_round != right_round:
+    if left_company != right_company or left_rounds.isdisjoint(right_rounds):
         return False
     if left.source_published_at is None or right.source_published_at is None:
         return True
@@ -823,14 +828,22 @@ def _normalize_company(value: str) -> str:
         if normalized.startswith(prefix.casefold()):
             normalized = normalized[len(prefix) :]
             break
+    normalized = re.sub(r"(?:近日|再次|连续)$", "", normalized)
     return re.sub(r"[\s，,：:丨|]+", "", normalized)
 
 
-def _financing_round(row: Candidate) -> str | None:
-    matched = _FINANCING_ROUND.search(f"{row.title} {row.summary}")
-    if matched is None:
-        return None
-    return re.sub(r"[\s-]+", "", matched.group(1).casefold())
+def _financing_rounds(row: Candidate) -> frozenset[str]:
+    text = f"{row.title} {row.summary}"
+    rounds = {
+        re.sub(r"[\s-]+", "", matched.casefold())
+        for matched in _FINANCING_ROUND.findall(text)
+    }
+    for combined in _COMBINED_FINANCING_ROUNDS.findall(text):
+        rounds.update(
+            re.sub(r"[\s-]+", "", matched.casefold())
+            for matched in combined
+        )
+    return frozenset(rounds)
 
 
 def _title_has_financing_action(row: Candidate) -> bool:

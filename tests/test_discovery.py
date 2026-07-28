@@ -497,6 +497,39 @@ def test_search_selection_keeps_distinct_financing_rounds(fixed_now) -> None:
     assert selection.event_duplicate_count == 0
 
 
+def test_search_selection_merges_combined_round_announcement_with_overlapping_sources(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+            summary="光邮星空聚焦高速卫星激光通信领域。",
+            url="https://media-a.example/combined",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now,
+        ),
+        _search_candidate(
+            title="光邮星空获Pre-A轮投资",
+            summary="光邮星空是一家卫星激光通信产品公司。",
+            url="https://media-b.example/pre-a",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=4),
+        ),
+        _search_candidate(
+            title="「光邮星空」完成Pre-A+轮融资",
+            summary="该航天企业提供星地激光通信终端。",
+            url="https://media-c.example/pre-a-plus",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=5),
+        ),
+    ]
+
+    selection = select_search_candidates(rows, fixed_now, minimum=0)
+
+    assert len(selection.candidates) == 1
+    assert selection.event_duplicate_count == 2
+
+
 def test_search_selection_requires_procurement_event_intent_for_laser_categories(
     fixed_now,
 ) -> None:
