@@ -193,6 +193,30 @@ def test_category_section_surfaces_selected_search_candidate_rejected_downstream
     assert item.title not in followup
 
 
+def test_backfill_candidate_uses_90_day_time_label():
+    item = Candidate(
+        title="商业航天企业完成A轮融资",
+        url="https://search.example.cn/financing",
+        summary="卫星公司宣布完成商业航天股权融资",
+        discovered_at=WINDOW_END,
+        discovery_source="bocha",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=dt(5, 20),
+    )
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        fallback_window_days=90,
+    )
+    result = make_result(metrics=metrics, discovery_candidates=[item])
+
+    candidate_lines = "\n".join(
+        _category_candidate_lines(result, Category.COMMERCIAL_SPACE_FINANCING)
+    )
+
+    assert "8–90 天补充" in candidate_lines
+    assert "时间范围外" not in candidate_lines
+
+
 def test_report_exposes_agentic_budget_and_stop_reason():
     metrics = RunMetrics(
         started_at=WINDOW_END,

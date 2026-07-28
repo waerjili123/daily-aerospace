@@ -657,7 +657,11 @@ def _category_candidate_lines(
             if item.source_published_at is not None
             else "发布日期未知"
         )
-        time_label = _pending_time_label(item.source_published_at, result.window_end)
+        time_label = _pending_time_label(
+            item.source_published_at,
+            result.window_end,
+            result.metrics.fallback_window_days,
+        )
         lines.append(
             "｜".join(
                 (

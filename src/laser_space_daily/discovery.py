@@ -499,9 +499,26 @@ _PROCUREMENT_EVENT_TERMS = (
 _RESEARCH_REPORT_NOISE_TERMS = (
     "行业研究报告",
     "深度研究及发展前景",
+    "发展深度洞察",
+    "产业发展报告",
+    "发展前景分析报告",
+    "市场运行动态及发展前景",
     "市场调研报告",
     "报告目录",
+    "报告摘要",
     "中国行业研究网",
+    "iim信息",
+)
+_RESEARCH_REPORT_DOMAINS = (
+    "chinairn.com",
+    "iim.net.cn",
+)
+_ROUNDUP_TITLE_NOISE_TERMS = (
+    "投融周报",
+    "投融资周报",
+    "融资周报",
+    "投融资盘点",
+    "融资盘点",
 )
 _MARKET_COMMENTARY_NOISE_TERMS = (
     "a股",
@@ -663,7 +680,8 @@ def _assess_relevance(row: Candidate) -> tuple[Candidate, int] | None:
     text = _normalized_candidate_text(row)
     if (
         any(term in text for term in _EXCLUDED_NOISE_TERMS)
-        or any(term in text for term in _RESEARCH_REPORT_NOISE_TERMS)
+        or _is_research_report_noise(row, text)
+        or any(term in row.title.casefold() for term in _ROUNDUP_TITLE_NOISE_TERMS)
         or any(term in text for term in _MARKET_COMMENTARY_NOISE_TERMS)
         or any(term in text for term in _NEGATED_EVENT_TERMS)
     ):
@@ -715,6 +733,10 @@ _ANNOUNCEMENT_CODE = re.compile(
 def _same_search_event(left: Candidate, right: Candidate) -> bool:
     if left.category_hint is not right.category_hint:
         return False
+    if left.category_hint is Category.COMMERCIAL_SPACE_FINANCING:
+        financing_match = _same_financing_event(left, right)
+        if financing_match is not None:
+            return financing_match
     left_code = _announcement_code(left)
     right_code = _announcement_code(right)
     if left_code and right_code:
@@ -727,6 +749,78 @@ def _same_search_event(left: Candidate, right: Candidate) -> bool:
 def _announcement_code(row: Candidate) -> str | None:
     matched = _ANNOUNCEMENT_CODE.search(f"{row.title} {row.summary}")
     return matched.group(1).casefold() if matched else None
+
+
+_QUOTED_COMPANY = re.compile(r"[「『“\"]([^」』”\"]{2,40})[」』”\"]")
+_COMPANY_BEFORE_COMPLETED = re.compile(
+    r"([\u4e00-\u9fffA-Za-z0-9·]{2,40}?)(?:宣布|正式|已)?完成"
+)
+_COMPANY_PREFIXES = (
+    "中国商业航天企业",
+    "商业航天企业",
+    "商业航天卫星公司",
+    "商业航天公司",
+    "卫星公司",
+    "航天企业",
+    "企业",
+)
+_FINANCING_ROUND = re.compile(
+    r"(?i)(pre[\s-]?[a-d]|[a-d]|天使\+?|种子|战略投资|战略|新一)\s*轮"
+)
+
+
+def _same_financing_event(left: Candidate, right: Candidate) -> bool | None:
+    left_company = _financing_company(left)
+    right_company = _financing_company(right)
+    left_round = _financing_round(left)
+    right_round = _financing_round(right)
+    if not all((left_company, right_company, left_round, right_round)):
+        return None
+    if left_company != right_company or left_round != right_round:
+        return False
+    if left.source_published_at is None or right.source_published_at is None:
+        return True
+    return abs(
+        (left.source_published_at.astimezone(UTC) -
+         right.source_published_at.astimezone(UTC)).days
+    ) <= 14
+
+
+def _financing_company(row: Candidate) -> str | None:
+    for text in (row.title, row.summary):
+        quoted = _QUOTED_COMPANY.search(text)
+        if quoted:
+            return _normalize_company(quoted.group(1))
+        completed = _COMPANY_BEFORE_COMPLETED.search(text)
+        if completed:
+            return _normalize_company(completed.group(1))
+    return None
+
+
+def _normalize_company(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    for prefix in _COMPANY_PREFIXES:
+        if normalized.startswith(prefix.casefold()):
+            normalized = normalized[len(prefix) :]
+            break
+    return re.sub(r"[\s，,：:丨|]+", "", normalized)
+
+
+def _financing_round(row: Candidate) -> str | None:
+    matched = _FINANCING_ROUND.search(f"{row.title} {row.summary}")
+    if matched is None:
+        return None
+    return re.sub(r"[\s-]+", "", matched.group(1).casefold())
+
+
+def _is_research_report_noise(row: Candidate, text: str) -> bool:
+    if any(term in text for term in _RESEARCH_REPORT_NOISE_TERMS):
+        return True
+    hostname = (urlsplit(row.url).hostname or "").casefold()
+    return any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in _RESEARCH_REPORT_DOMAINS
+    )
 
 
 def _event_stage(row: Candidate) -> str:

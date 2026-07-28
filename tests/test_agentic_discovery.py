@@ -241,3 +241,25 @@ def test_invalid_long_query_does_not_crash_or_spend_budget():
     assert result.budget_used == 4
     assert result.stop_reason == "model_completed"
     assert subject.deepseek_tokens == 17
+
+
+def test_known_medical_laser_noise_query_is_rejected_without_spending_budget():
+    subject, provider = orchestrator(
+        [
+            response(
+                tool_call(
+                    "call-1",
+                    "激光粒度分析仪 2026-JQ06-W3087 解放军总医院 采购",
+                    Category.LASER_COMMUNICATION,
+                )
+            ),
+            response(),
+        ],
+        budget=8,
+    )
+
+    result = subject.discover(NOW, [])
+
+    assert len(provider.calls) == 4
+    assert result.budget_used == 4
+    assert result.stop_reason == "model_completed"

@@ -381,6 +381,18 @@ def test_search_selection_prefers_recent_then_uses_8_to_30_day_fallback(
             "中国行业研究网提供报告目录和市场发展前景。",
         ),
         (
+            "太空光网筑基：2026年中国星间激光通信行业发展深度洞察",
+            "介绍产业规模、市场需求、采购趋势和未来发展前景。",
+        ),
+        (
+            "全球及中国卫星激光通信产业发展报告（2026）",
+            "IIM信息发布报告摘要，分析终端批量采购需求。",
+        ),
+        (
+            "一家量子计算公司半年融了20亿丨投融周报",
+            "本周商业航天与量子信息成为热点，多家公司完成股权融资。",
+        ),
+        (
             "火箭成功回收，商业航天拉涨，能否成为高切低方向",
             "A股商业航天概念股上涨，建议关注低位布局机会。",
         ),
@@ -405,6 +417,56 @@ def test_search_selection_rejects_reports_and_market_commentary(
 
     assert selection.candidates == ()
     assert selection.filter_rejected_count == 1
+
+
+def test_search_selection_merges_same_company_and_round_across_media(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title="商业航天企业「鹰飒科技」完成数千万元Pre-A轮融资",
+            summary="鹰飒科技宣布完成数千万元Pre-A轮融资，用于卫星研发。",
+            url="https://media-a.example/eaglesat",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=1),
+        ),
+        _search_candidate(
+            title="鹰飒科技完成数千万元Pre-A轮融资，加速卫星研制",
+            summary="商业航天卫星公司鹰飒科技完成Pre-A轮股权融资。",
+            url="https://media-b.example/eaglesat",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now,
+        ),
+    ]
+
+    selection = select_search_candidates(rows, fixed_now, minimum=0)
+
+    assert len(selection.candidates) == 1
+    assert selection.event_duplicate_count == 1
+
+
+def test_search_selection_keeps_distinct_financing_rounds(fixed_now) -> None:
+    rows = [
+        _search_candidate(
+            title="谱星航天完成天使+轮融资",
+            summary="商业航天卫星公司谱星航天完成天使+轮股权融资。",
+            url="https://media.example/angel",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now,
+        ),
+        _search_candidate(
+            title="谱星航天完成Pre-A轮融资",
+            summary="商业航天卫星公司谱星航天完成Pre-A轮股权融资。",
+            url="https://media.example/pre-a",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now,
+        ),
+    ]
+
+    selection = select_search_candidates(rows, fixed_now, minimum=0)
+
+    assert len(selection.candidates) == 2
+    assert selection.event_duplicate_count == 0
 
 
 def test_search_selection_requires_procurement_event_intent_for_laser_categories(

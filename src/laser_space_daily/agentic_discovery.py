@@ -31,6 +31,14 @@ _INTENT_TO_KIND = {
     "status_followup": "rolling_recheck",
     "corroboration": "project_followup",
 }
+_QUERY_NOISE_TERMS = (
+    "激光粒度分析仪",
+    "激光打印机",
+    "激光切割",
+    "激光美容",
+    "医疗器械",
+    "解放军总医院",
+)
 _SYSTEM_PROMPT = """你是中国激光与商业航天情报检索规划器。
 你只能使用 search_web 工具提出后续搜索，不得声称自己已经访问网页。
 四个范围是激光通信采购、激光武器/反无人机采购、光电转塔/吊舱采购和商业航天股权融资。
@@ -354,6 +362,8 @@ def _validated_query(
         raise ValueError("agent search query must contain 1-300 characters")
     if category is None:
         raise ValueError("agent search query must include a supported category")
+    if any(term.casefold() in cleaned.casefold() for term in _QUERY_NOISE_TERMS):
+        raise ValueError("agent search query targets a known out-of-scope topic")
     if intent != "seed" and intent not in _ALLOWED_INTENTS:
         raise ValueError("agent search intent is unsupported")
     if _DISCOVERY_SCOPE not in cleaned:
