@@ -236,6 +236,7 @@ class RuleVerifier:
             or not evidence.quote.strip()
             or (
                 evidence.quote not in page.text
+                and evidence.quote not in page.title
                 and not (
                     evidence.field == "in_china"
                     and evidence.quote == page.final_url
@@ -690,6 +691,7 @@ class RuleVerifier:
             or not item.quote.strip()
             or (
                 item.quote not in page.text
+                and item.quote not in page.title
                 and not (
                     item.field == "in_china"
                     and item.quote == page.final_url
@@ -699,7 +701,9 @@ class RuleVerifier:
             for item in analysis.evidence
         ):
             return "evidence_not_grounded"
-        return self._classification_failure(analysis, page, grade) or self._financing_claim_failure(
+        return self._classification_failure(
+            analysis, page, grade
+        ) or self._financing_claim_failure(
             analysis
         )
 

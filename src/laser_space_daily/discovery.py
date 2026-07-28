@@ -81,6 +81,7 @@ class CandidateSelection:
     unknown_date_count: int
     filter_rejected_count: int = 0
     event_duplicate_count: int = 0
+    corroborating_candidates: tuple[Candidate, ...] = ()
 
 
 class OfficialSeed(BaseModel):
@@ -597,27 +598,57 @@ def select_search_candidates(
         if assessed is not None:
             relevant.append(assessed)
 
-    deduplicated: list[tuple[Candidate, int]] = []
+    unique_relevant: list[tuple[Candidate, int]] = []
     seen: set[str] = set()
-    event_duplicate_count = 0
     for row, score in relevant:
         normalized_url = normalize_url(row.url)
         if normalized_url in seen:
             continue
         seen.add(normalized_url)
-        normalized_row = row.model_copy(update={"url": normalized_url})
-        if any(
-            _same_search_event(normalized_row, existing)
-            for existing, _ in deduplicated
-        ):
+        unique_relevant.append(
+            (row.model_copy(update={"url": normalized_url}), score)
+        )
+
+    eligible: list[tuple[Candidate, int]] = []
+    now_utc = now.astimezone(UTC)
+    for row, score in unique_relevant:
+        published_at = row.source_published_at
+        if published_at is None:
+            eligible.append((row, score))
+            continue
+        published_utc = published_at.astimezone(UTC)
+        if published_utc > now_utc + timedelta(hours=24):
+            continue
+        age = max(timedelta(0), now_utc - published_utc)
+        if age <= timedelta(days=fallback_max_days):
+            eligible.append((row, score))
+
+    # Rank before event-level grouping so an old repost can never hide a newer
+    # source for the same event.
+    eligible.sort(key=_candidate_rank)
+    deduplicated: list[tuple[Candidate, int]] = []
+    corroborating_by_primary: dict[str, list[tuple[Candidate, int]]] = {}
+    event_duplicate_count = 0
+    for normalized_row, score in eligible:
+        duplicate_of = next(
+            (
+                existing
+                for existing, _existing_score in deduplicated
+                if _same_search_event(normalized_row, existing)
+            ),
+            None,
+        )
+        if duplicate_of is not None:
             event_duplicate_count += 1
+            corroborating_by_primary.setdefault(duplicate_of.url, []).append(
+                (normalized_row, score)
+            )
             continue
         deduplicated.append((normalized_row, score))
 
     recent: list[tuple[Candidate, int]] = []
     fallback: list[tuple[Candidate, int]] = []
     unknown: list[tuple[Candidate, int]] = []
-    now_utc = now.astimezone(UTC)
     for row, score in deduplicated:
         published_at = row.source_published_at
         if published_at is None:
@@ -648,8 +679,16 @@ def select_search_candidates(
         ]
         selected.extend(unknown_used)
 
+    corroborating_candidates = tuple(
+        candidate
+        for primary, _score in selected
+        for candidate in _select_corroborating_candidates(
+            primary, corroborating_by_primary.get(primary.url, ())
+        )
+    )
     return CandidateSelection(
         candidates=tuple(row for row, _score in selected),
+        corroborating_candidates=corroborating_candidates,
         raw_search_count=len(input_rows),
         valid_shape_count=len(valid),
         relevance_pass_count=len(relevant),
@@ -659,6 +698,34 @@ def select_search_candidates(
         filter_rejected_count=len(valid) - len(relevant),
         event_duplicate_count=event_duplicate_count,
     )
+
+
+def _select_corroborating_candidates(
+    primary: Candidate,
+    candidates: Iterable[tuple[Candidate, int]],
+    *,
+    maximum: int = 2,
+) -> tuple[Candidate, ...]:
+    """Keep bounded alternate sources, preferring independent hostnames."""
+    ranked = sorted(candidates, key=_candidate_rank)
+    primary_host = (urlsplit(primary.url).hostname or "").casefold()
+    selected: list[Candidate] = []
+    selected_hosts = {primary_host} if primary_host else set()
+
+    for prefer_new_host in (True, False):
+        for row, _score in ranked:
+            if row in selected:
+                continue
+            host = (urlsplit(row.url).hostname or "").casefold()
+            is_new_host = bool(host and host not in selected_hosts)
+            if is_new_host is not prefer_new_host:
+                continue
+            selected.append(row)
+            if host:
+                selected_hosts.add(host)
+            if len(selected) >= maximum:
+                return tuple(selected)
+    return tuple(selected)
 
 
 def _parse_source_published_at(value: object) -> datetime | None:

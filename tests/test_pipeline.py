@@ -347,6 +347,37 @@ def test_pipeline_analyzes_each_corroborating_source_before_verification(deps) -
     assert secondary_page.final_url == SECOND_URL
 
 
+def test_pipeline_fetches_event_duplicate_search_source_for_corroboration(deps) -> None:
+    primary_url = "https://media-a.example/eaglesat"
+    corroborating_url = "https://media-b.example/eaglesat"
+    common = {
+        "summary": "商业航天卫星公司鹰飒科技完成数千万元Pre-A轮股权融资。",
+        "category_hint": Category.COMMERCIAL_SPACE_FINANCING,
+    }
+    deps.official_collector.rows = []
+    deps.search_provider.rows = [
+        candidate(
+            primary_url,
+            source="search:bocha",
+            title="鹰飒科技完成数千万元Pre-A轮融资",
+            source_published_at=NOW - timedelta(days=1),
+            **common,
+        ),
+        candidate(
+            corroborating_url,
+            source="search:bocha",
+            title="商业航天企业「鹰飒科技」完成Pre-A轮融资",
+            source_published_at=NOW,
+            **common,
+        ),
+    ]
+
+    Pipeline(**deps.as_kwargs()).run(NOW)
+
+    assert set(deps.fetcher.calls) == {primary_url, corroborating_url}
+    assert len(deps.verifier.corroborating_by_url[corroborating_url]) == 1
+
+
 def test_pipeline_persists_two_b_source_evidence_records(deps) -> None:
     financing_result = analysis(category=Category.COMMERCIAL_SPACE_FINANCING)
     deps.analyzer.results[OFFICIAL_URL] = financing_result

@@ -470,6 +470,9 @@ def test_search_selection_merges_same_company_and_round_across_media(
     selection = select_search_candidates(rows, fixed_now, minimum=0)
 
     assert len(selection.candidates) == 1
+    assert {item.url for item in selection.corroborating_candidates} == {
+        "https://media-a.example/eaglesat"
+    }
     assert selection.event_duplicate_count == 1
 
 
@@ -560,7 +563,39 @@ def test_search_selection_normalizes_financing_company_prefix_and_legal_name(
     selection = select_search_candidates(rows, fixed_now, minimum=0)
 
     assert len(selection.candidates) == 1
+    assert {item.url for item in selection.corroborating_candidates} == {
+        "https://media-b.example/weiguang",
+        "https://media-c.example/weiguang",
+    }
     assert selection.event_duplicate_count == 2
+
+
+def test_search_selection_does_not_let_old_duplicate_hide_recent_source(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title="鹰飒科技完成Pre-A轮融资",
+            summary="商业航天卫星公司鹰飒科技完成Pre-A轮股权融资。",
+            url="https://old-media.example/eaglesat",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=40),
+        ),
+        _search_candidate(
+            title="鹰飒科技完成Pre-A轮融资",
+            summary="商业航天卫星公司鹰飒科技完成Pre-A轮股权融资。",
+            url="https://recent-media.example/eaglesat",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=1),
+        ),
+    ]
+
+    selection = select_search_candidates(rows, fixed_now, minimum=0)
+
+    assert [item.url for item in selection.candidates] == [
+        "https://recent-media.example/eaglesat"
+    ]
+    assert selection.corroborating_candidates == ()
 
 
 def test_search_selection_requires_procurement_event_intent_for_laser_categories(

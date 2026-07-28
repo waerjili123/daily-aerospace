@@ -246,6 +246,32 @@ def test_grounding_rejects_nonliteral_evidence(official_page, valid_analysis):
         guard_grounded_output(AnalysisResult.model_validate(valid_analysis), official_page)
 
 
+def test_grounding_accepts_title_evidence_from_page_title() -> None:
+    page = make_page(
+        "中国境内激光通信终端招标公告\n采购人：某研究院\n发布日期：2026-07-21",
+        title="星间激光通信终端采购项目招标公告",
+    )
+    result = AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.LASER_COMMUNICATION,
+        event_type=EventType.TENDER,
+        title=page.title,
+        organization="某研究院",
+        published_at="2026-07-21T00:00:00+08:00",
+        evidence=[
+            {
+                "field": "title",
+                "quote": page.title,
+                "source_url": page.final_url,
+            }
+        ],
+        source_url=page.final_url,
+    )
+
+    assert guard_grounded_output(result, page) is result
+
+
 def test_business_area_requires_field_specific_evidence(official_page, valid_analysis):
     valid_analysis["business_area"] = "Laser terminal"
 
@@ -449,6 +475,60 @@ def test_rule_fallback_deterministically_includes_four_categories(text, expected
     assert result.in_scope is True
     assert result.category is expected
     assert result.degraded is True
+
+
+def test_rule_fallback_extracts_grounded_financing_fields_from_realistic_article():
+    page = make_page(
+        "2026年7月23日，北京龙擎空天科技有限公司宣布完成近亿元Pre-A+轮融资。\n"
+        "该公司面向商业航天领域研发低轨卫星终端及星载智算产品。",
+        title="龙擎空天再获Pre-A+轮融资",
+        url="https://media.example.cn/longqing",
+    )
+
+    result = RuleFallbackAnalyzer().analyze(page)
+
+    assert result.in_china is True
+    assert result.in_scope is True
+    assert result.category is Category.COMMERCIAL_SPACE_FINANCING
+    assert result.event_type is EventType.FINANCING
+    assert result.organization == "龙擎空天"
+    assert result.published_at == datetime(
+        2026, 7, 23, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
+    assert result.financing_round == "Pre-A+轮"
+    assert result.amount == "近亿元"
+    assert result.amount_disclosed is True
+    assert {
+        "in_china",
+        "in_scope",
+        "category",
+        "event_type",
+        "title",
+        "organization",
+        "published_at",
+        "financing_round",
+        "amount",
+    }.issubset({item.field for item in result.evidence})
+
+
+def test_rule_fallback_marks_explicitly_undisclosed_financing_amount():
+    page = make_page(
+        "2026年7月16日，北京光邮星空科技有限公司宣布完成Pre-A轮融资，"
+        "具体融资金额未披露。公司聚焦商业航天星地激光通信终端。",
+        title="光邮星空完成Pre-A轮融资",
+        url="https://media.example.cn/guangyou",
+    )
+
+    result = RuleFallbackAnalyzer().analyze(page)
+
+    assert result.organization == "光邮星空"
+    assert result.financing_round == "Pre-A轮"
+    assert result.amount is None
+    assert result.amount_disclosed is False
+    assert any(
+        item.field == "amount" and item.quote == "具体融资金额未披露"
+        for item in result.evidence
+    )
 
 
 @pytest.mark.parametrize(

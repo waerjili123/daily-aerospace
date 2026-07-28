@@ -237,7 +237,11 @@ class Pipeline:
         )
 
         selected_search_rows = list(selection.candidates)
-        all_rows = [*selected_search_rows, *official_rows]
+        all_rows = [
+            *selected_search_rows,
+            *selection.corroborating_candidates,
+            *official_rows,
+        ]
         candidates = dedupe_candidates(all_rows)
         metrics.candidate_count = len(search_rows) + len(official_rows)
         metrics.official_candidate_count = len(official_rows)

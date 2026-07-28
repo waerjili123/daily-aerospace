@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+from laser_space_daily.analyzer import RuleFallbackAnalyzer
 from laser_space_daily.fetcher import (
     FetchRedirectLimit,
     FetchedPage,
@@ -395,6 +396,35 @@ def test_single_b_source_financing_stays_pending(media_page, financing_analysis)
     decision = RuleVerifier(REGISTRY).verify(financing_analysis, media_page)
     assert decision.status == VerificationStatus.PENDING
     assert decision.reason == "financing_requires_official_or_two_independent_b_sources"
+
+
+def test_two_independent_b_articles_verify_with_deterministic_fallback() -> None:
+    primary = page(
+        "https://media.example.cn/longqing",
+        "2026年7月23日，北京龙擎空天科技有限公司宣布完成近亿元Pre-A+轮融资。\n"
+        "该公司面向商业航天领域研发低轨卫星终端及星载智算产品。",
+    ).model_copy(update={"title": "龙擎空天再获Pre-A+轮融资"})
+    secondary = page(
+        "https://other.example.cn/longqing",
+        "2026年7月23日，北京龙擎空天科技有限公司完成近亿元Pre-A+轮融资。\n"
+        "龙擎空天是一家研发低轨卫星终端的中国商业航天企业。",
+    ).model_copy(update={"title": "龙擎空天完成近亿元Pre-A+轮融资"})
+    analyzer = RuleFallbackAnalyzer()
+    primary_analysis = analyzer.analyze(primary)
+    secondary_analysis = analyzer.analyze(secondary)
+
+    decision = RuleVerifier(REGISTRY).verify(
+        primary_analysis,
+        primary,
+        [(secondary_analysis, secondary)],
+    )
+
+    assert decision.status is VerificationStatus.VERIFIED
+    assert decision.reason == "verified_financing_two_independent_sources"
+    assert {record.source_url for record in decision.source_records} == {
+        primary.final_url,
+        secondary.final_url,
+    }
 
 
 def test_grade_a_financing_rejects_empty_evidence(financing_analysis):
