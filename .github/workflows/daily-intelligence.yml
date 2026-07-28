@@ -66,6 +66,18 @@ jobs:
           --discovery-mode daily
           --max-queries 12
 
+      - name: Publish dry-run report summary
+        if: always()
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+
+          reports = sorted(Path("reports").glob("*.md"))
+          if reports:
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write(reports[-1].read_text(encoding="utf-8"))
+
       - name: Upload generated report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

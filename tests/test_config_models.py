@@ -73,6 +73,13 @@ def test_workflow_is_restored_to_manual_bounded_dry_run():
         'test "${GITHUB_REF}" = '
         '"refs/heads/codex/verification-promotion-20260728"'
     )
+    summary_step = _workflow_step(
+        document["jobs"]["run"]["steps"], "Publish dry-run report summary"
+    )
+    assert summary_step["if"] == "always()"
+    assert summary_step["shell"] == "python"
+    assert "GITHUB_STEP_SUMMARY" in summary_step["run"]
+    assert "DINGTALK" not in summary_step["run"]
 
 
 def test_committed_config_contains_no_secret_values():
