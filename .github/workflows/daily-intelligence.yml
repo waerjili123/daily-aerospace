@@ -50,19 +50,19 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Guard one-time daily dry-run branch
-        run: test "${GITHUB_REF}" = "refs/heads/codex/agentic-daily-dry-run-20260728"
+      - name: Guard one-time DingTalk test branch
+        run: test "${GITHUB_REF}" = "refs/heads/codex/agentic-dingtalk-test-20260728"
 
       - name: Run daily pipeline
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}
-          DINGTALK_WEBHOOK: https://example.invalid/manual-dry-run
-          DINGTALK_SECRET: unused-manual-dry-run-secret
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
         run: >-
           laser-space-daily
           --config config.yaml
-          --dry-run
+          --test-label
           --discovery-mode daily
           --max-queries 12
 
