@@ -471,6 +471,32 @@ def test_same_page_split_category_and_event_evidence_passes_classification(
     assert decision.reason == "financing_requires_official_or_two_independent_b_sources"
 
 
+def test_space_laser_business_and_financing_quotes_combine_at_page_level(
+    media_page, financing_analysis
+):
+    media_page.text += " Orbit Corp provides 星地激光通信 products."
+    non_classification = [
+        item
+        for item in financing_analysis.evidence
+        if item.field not in {"in_china", "in_scope", "category", "event_type"}
+    ]
+    financing_analysis.evidence = [
+        *non_classification,
+        *classification_evidence(
+            media_page.final_url,
+            "Orbit Corp",
+            country_quote="中国商业航天企业",
+            category_quote="星地激光通信",
+            event_quote="financing",
+        ),
+    ]
+
+    decision = RuleVerifier(REGISTRY).verify(financing_analysis, media_page)
+
+    assert decision.status == VerificationStatus.PENDING
+    assert decision.reason == "financing_requires_official_or_two_independent_b_sources"
+
+
 @pytest.mark.parametrize(
     ("category_quote", "event_quote"),
     [

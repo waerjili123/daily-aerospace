@@ -429,32 +429,31 @@ class RuleVerifier:
             )
             for item in by_field["in_china"]
         )
-        category_supported = any(
-            RuleFallbackAnalyzer._category(_normalize(item.quote))
-            is analysis.category
-            for item in by_field["category"]
-        )
-        event_supported = any(
-            self._evidence_event_type(item.quote, analysis.category)
-            is analysis.event_type
-            for item in by_field["event_type"]
-        )
         scope_evidence = [
             *by_field["in_scope"],
             *by_field["category"],
             *by_field["event_type"],
         ]
-        scope_category_supported = any(
+        scope_text = "\n".join(item.quote for item in scope_evidence)
+        page_category_supported = (
+            RuleFallbackAnalyzer._category(_normalize(scope_text))
+            is analysis.category
+        )
+        page_event_supported = (
+            self._evidence_event_type(scope_text, analysis.category)
+            is analysis.event_type
+        )
+        category_supported = page_category_supported or any(
             RuleFallbackAnalyzer._category(_normalize(item.quote))
             is analysis.category
-            for item in scope_evidence
+            for item in by_field["category"]
         )
-        scope_event_supported = any(
+        event_supported = page_event_supported or any(
             self._evidence_event_type(item.quote, analysis.category)
             is analysis.event_type
-            for item in scope_evidence
+            for item in by_field["event_type"]
         )
-        scope_supported = scope_category_supported and scope_event_supported
+        scope_supported = page_category_supported and page_event_supported
         if not all(
             (country_supported, category_supported, event_supported, scope_supported)
         ):
