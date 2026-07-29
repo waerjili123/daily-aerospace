@@ -55,6 +55,7 @@ from laser_space_daily.report import (
     _actionable_deadline,
     _category_candidate_lines,
     _followup_lines,
+    _pending_reason_text,
 )
 from laser_space_daily.repository import StateRepository
 from laser_space_daily.verifier import RuleVerifier
@@ -63,6 +64,19 @@ from laser_space_daily.verifier import RuleVerifier
 BEIJING = ZoneInfo("Asia/Shanghai")
 WINDOW_START = datetime(2026, 7, 21, 9, 30, tzinfo=BEIJING)
 WINDOW_END = datetime(2026, 7, 22, 9, 30, tzinfo=BEIJING)
+
+
+@pytest.mark.parametrize(
+    ("reason", "label"),
+    [
+        ("classification_country_evidence_invalid", "境内主体证据不足"),
+        ("classification_category_evidence_invalid", "目标业务证据不足"),
+        ("classification_event_evidence_invalid", "事件动作证据不足"),
+        ("classification_scope_evidence_invalid", "范围证据不足"),
+    ],
+)
+def test_pending_reason_renders_precise_classification_failure(reason, label):
+    assert _pending_reason_text(reason) == label
 ROLLING_START = datetime(2026, 4, 22, 9, 30, tzinfo=BEIJING)
 WEBHOOK = "https://dingtalk.example/robot/send/test-token-never-log"
 DINGTALK_SECRET = "SECtest-signing-secret-never-log"

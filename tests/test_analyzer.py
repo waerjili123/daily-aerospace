@@ -20,6 +20,7 @@ from laser_space_daily.fetcher import FetchedPage
 from laser_space_daily.models import (
     AnalysisResult,
     Category,
+    Evidence,
     Event,
     EventType,
     Project,
@@ -425,6 +426,76 @@ def test_resilient_analyzer_enriches_valid_but_incomplete_financing_result():
         "financing_round",
         "amount",
     }.issubset({item.field for item in result.evidence})
+
+
+def test_resilient_analyzer_adds_grounded_classification_evidence_without_overwriting_claims():
+    page = make_page(
+        "2026年7月21日，北京光邮星空科技有限公司聚焦高速星地激光通信领域。\n"
+        "公司近日完成Pre-A和Pre-A+轮融资，由九合创投领投。",
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        url="https://news.pedaily.cn/financing.html",
+    )
+    primary_result = AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        event_type=EventType.FINANCING,
+        title=page.title,
+        organization="光邮星空",
+        published_at=datetime(
+            2026, 7, 21, tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+        financing_round="Pre-A+轮",
+        financing_subtype="round_equity",
+        source_url=page.final_url,
+        evidence=[
+            Evidence(
+                field="in_china",
+                quote="北京光邮星空科技有限公司",
+                source_url=page.final_url,
+            ),
+            Evidence(
+                field="in_scope",
+                quote="星地激光通信",
+                source_url=page.final_url,
+            ),
+            Evidence(
+                field="category",
+                quote="星地激光通信",
+                source_url=page.final_url,
+            ),
+            Evidence(
+                field="event_type",
+                quote="Pre-A+轮融资",
+                source_url=page.final_url,
+            ),
+        ],
+    )
+
+    class Primary:
+        def analyze(self, _page):
+            return primary_result
+
+    result = ResilientAnalyzer(Primary(), RuleFallbackAnalyzer()).analyze(page)
+
+    assert result.organization == "光邮星空"
+    assert result.financing_round == "Pre-A+轮"
+    assert result.degraded is True
+    classification_quotes = {
+        item.quote
+        for item in result.evidence
+        if item.field in {"in_scope", "category", "event_type"}
+    }
+    assert (
+        "2026年7月21日，北京光邮星空科技有限公司聚焦高速星地激光通信领域。"
+        in classification_quotes
+    )
+    assert page.title in classification_quotes
+    assert page.text not in classification_quotes
+    assert all(
+        item.quote in page.text or item.quote in page.title
+        for item in result.evidence
+    )
 
 
 def test_resilient_analyzer_does_not_override_conflicting_primary_classification():

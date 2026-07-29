@@ -473,10 +473,16 @@ _FINANCING_EVENT_TERMS = (
     "d轮",
 )
 _FINANCING_SPECIFIC_SUBJECT_TERMS = (
-    "航天",
+    "运载火箭",
     "火箭",
     "卫星",
-    "太空",
+    "航天器",
+    "星载",
+    "星地激光通信",
+    "空间激光通信",
+    "太空服务",
+    "太空运输",
+    "空间基础设施",
     "空间科技",
 )
 _PROCUREMENT_EVENT_TERMS = (

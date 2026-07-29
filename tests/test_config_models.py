@@ -121,7 +121,13 @@ def test_committed_config_contains_no_secret_values():
                 "minospace.cn": "微纳星空",
                 "geespace.com": "时空道宇",
             },
-                "official_investor_domains": {},
+                "official_investor_domains": {
+                    "zgccity.com": [
+                        "北京中关村科学城创新发展有限公司",
+                        "中关村科学城公司",
+                        "中关村科学城",
+                    ]
+                },
                 "independent_media_domains": ["stcn.com", "pedaily.cn", "cls.cn"],
         },
     }
@@ -401,9 +407,29 @@ def test_production_financing_registry_is_explicit_and_used_by_pipeline(monkeypa
         "pedaily.cn",
         "cls.cn",
     ]
+    assert settings.financing_sources.official_investor_domains[
+        "zgccity.com"
+    ] == [
+        "北京中关村科学城创新发展有限公司",
+        "中关村科学城公司",
+        "中关村科学城",
+    ]
     assert registry.grade_financing("https://news.landspace.com/a", "蓝箭航天") is SourceGrade.A
     assert registry.grade_financing("https://landspace.com/a", "无关航天公司") is SourceGrade.C
     assert registry.grade_financing("https://www.cls.cn/detail/1", "蓝箭航天") is SourceGrade.B
+    investor_evidence = [
+        Evidence(
+            field="investors",
+            quote="中关村科学城公司完成对北京光邮星空科技有限公司Pre-A+轮投资",
+            source_url="https://m.zgccity.com/view/h5/news/204.html",
+        )
+    ]
+    assert registry.grade_financing(
+        "https://m.zgccity.com/view/h5/news/204.html",
+        "光邮星空",
+        ["中关村科学城公司"],
+        investor_evidence,
+    ) is SourceGrade.A
 
 
 def test_build_pipeline_wires_configured_official_investor_registry(monkeypatch):

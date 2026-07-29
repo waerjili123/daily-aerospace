@@ -35,8 +35,11 @@ financing_sources:
     yinhehangtian.cn: 银河航天
     minospace.cn: 微纳星空
     geespace.com: 时空道宇
-  # No investor domain is promoted until an exact legal-name registry is curated.
-  official_investor_domains: {}
+  official_investor_domains:
+    zgccity.com:
+      - 北京中关村科学城创新发展有限公司
+      - 中关村科学城公司
+      - 中关村科学城
   independent_media_domains:
     - stcn.com
     - pedaily.cn

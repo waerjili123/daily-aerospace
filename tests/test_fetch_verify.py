@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from laser_space_daily.analyzer import RuleFallbackAnalyzer
+from laser_space_daily.analyzer import ResilientAnalyzer, RuleFallbackAnalyzer
 from laser_space_daily.fetcher import (
     FetchRedirectLimit,
     FetchedPage,
@@ -458,7 +458,7 @@ def test_same_page_split_category_and_event_evidence_passes_classification(
         *non_classification,
         *classification_evidence(
             media_page.final_url,
-            "Orbit Corp",
+            "商业航天",
             country_quote="中国商业航天企业",
             category_quote="商业航天",
             event_quote="financing",
@@ -484,7 +484,7 @@ def test_space_laser_business_and_financing_quotes_combine_at_page_level(
         *non_classification,
         *classification_evidence(
             media_page.final_url,
-            "Orbit Corp",
+            "星地激光通信",
             country_quote="中国商业航天企业",
             category_quote="星地激光通信",
             event_quote="financing",
@@ -498,17 +498,46 @@ def test_space_laser_business_and_financing_quotes_combine_at_page_level(
 
 
 @pytest.mark.parametrize(
-    ("category_quote", "event_quote"),
+    ("scope_quote", "country_quote", "category_quote", "event_quote", "expected"),
     [
-        ("Orbit Corp", "financing"),
-        ("商业航天", "Orbit Corp"),
+        (
+            "商业航天",
+            "Orbit Corp",
+            "商业航天",
+            "financing",
+            "classification_country_evidence_invalid",
+        ),
+        (
+            "Orbit Corp",
+            "中国商业航天企业",
+            "Orbit Corp",
+            "financing",
+            "classification_category_evidence_invalid",
+        ),
+        (
+            "商业航天",
+            "中国商业航天企业",
+            "商业航天",
+            "Orbit Corp",
+            "classification_event_evidence_invalid",
+        ),
+        (
+            "Orbit Corp",
+            "中国商业航天企业",
+            "商业航天",
+            "financing",
+            "classification_scope_evidence_invalid",
+        ),
     ],
 )
-def test_same_page_scope_evidence_still_requires_category_and_event_facts(
+def test_classification_evidence_reports_precise_invalid_reason(
     media_page,
     financing_analysis,
+    scope_quote,
+    country_quote,
     category_quote,
     event_quote,
+    expected,
 ):
     non_classification = [
         item
@@ -519,8 +548,8 @@ def test_same_page_scope_evidence_still_requires_category_and_event_facts(
         *non_classification,
         *classification_evidence(
             media_page.final_url,
-            "Orbit Corp",
-            country_quote="中国商业航天企业",
+            scope_quote,
+            country_quote=country_quote,
             category_quote=category_quote,
             event_quote=event_quote,
         ),
@@ -529,7 +558,7 @@ def test_same_page_scope_evidence_still_requires_category_and_event_facts(
     decision = RuleVerifier(REGISTRY).verify(financing_analysis, media_page)
 
     assert decision.status == VerificationStatus.PENDING
-    assert decision.reason == "classification_evidence_invalid"
+    assert decision.reason == expected
 
 
 def test_two_independent_b_articles_verify_with_deterministic_fallback() -> None:
@@ -559,6 +588,60 @@ def test_two_independent_b_articles_verify_with_deterministic_fallback() -> None
         primary.final_url,
         secondary.final_url,
     }
+
+
+def test_two_independent_space_laser_financing_articles_verify_after_evidence_enrichment():
+    primary = page(
+        "https://media.example.cn/guangyou",
+        "2026年7月21日，北京光邮星空科技有限公司聚焦高速星地激光通信领域。\n"
+        "公司近日完成数千万元Pre-A+轮融资。",
+    ).model_copy(update={"title": "光邮星空完成Pre-A+轮融资"})
+    secondary = page(
+        "https://other.example.cn/guangyou",
+        "2026年7月21日，北京光邮星空科技有限公司提供空间激光通信产品。\n"
+        "北京光邮星空科技有限公司近日完成数千万元Pre-A+轮融资。",
+    ).model_copy(update={"title": "光邮星空完成Pre-A+轮融资"})
+
+    class NarrowPrimary:
+        def analyze(self, source):
+            category_quote = (
+                "星地激光通信"
+                if "星地激光通信" in source.text
+                else "空间激光通信"
+            )
+            return AnalysisResult(
+                in_china=True,
+                in_scope=True,
+                category=Category.COMMERCIAL_SPACE_FINANCING,
+                event_type=EventType.FINANCING,
+                title=source.title,
+                source_url=source.final_url,
+                evidence=classification_evidence(
+                    source.final_url,
+                    category_quote,
+                    country_quote="北京光邮星空科技有限公司",
+                    category_quote=category_quote,
+                    event_quote="Pre-A+轮融资",
+                ),
+            )
+
+    analyzer = ResilientAnalyzer(NarrowPrimary(), RuleFallbackAnalyzer())
+    primary_analysis = analyzer.analyze(primary)
+    secondary_analysis = analyzer.analyze(secondary)
+
+    assert primary_analysis.organization == secondary_analysis.organization
+    assert primary_analysis.published_at == secondary_analysis.published_at
+    assert primary_analysis.financing_round == secondary_analysis.financing_round
+    assert primary_analysis.amount == secondary_analysis.amount
+
+    decision = RuleVerifier(REGISTRY).verify(
+        primary_analysis,
+        primary,
+        [(secondary_analysis, secondary)],
+    )
+
+    assert decision.status is VerificationStatus.VERIFIED
+    assert decision.reason == "verified_financing_two_independent_sources"
 
 
 def test_grade_a_financing_rejects_empty_evidence(financing_analysis):

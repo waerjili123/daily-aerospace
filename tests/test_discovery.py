@@ -447,6 +447,50 @@ def test_search_selection_accepts_specific_space_company_financing_without_gener
     assert len(selection.candidates) == 1
 
 
+def test_search_selection_accepts_space_laser_communication_financing():
+    row = _search_candidate(
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        summary="公司聚焦高速星地激光通信，资金用于产品规模化量产。",
+        url="https://media.example/guangyou",
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        published_at=datetime(
+            2026, 7, 21, 9, tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+    )
+
+    selection = select_search_candidates(
+        [row],
+        datetime(2026, 7, 22, 9, tzinfo=ZoneInfo("Asia/Shanghai")),
+        minimum=0,
+    )
+
+    assert len(selection.candidates) == 1
+
+
+def test_search_selection_rejects_financing_based_only_on_founder_space_background():
+    row = _search_candidate(
+        title="云幕智造完成数千万元Pre-A轮融资",
+        summary=(
+            "公司主营重载人形机器人。创始人曾在航天研究所工作，"
+            "把航天基因转化为产业创新力。"
+        ),
+        url="https://media.example/yunmu",
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        published_at=datetime(
+            2026, 7, 21, 9, tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+    )
+
+    selection = select_search_candidates(
+        [row],
+        datetime(2026, 7, 22, 9, tzinfo=ZoneInfo("Asia/Shanghai")),
+        minimum=0,
+    )
+
+    assert selection.candidates == ()
+    assert selection.filter_rejected_count == 1
+
+
 def test_search_selection_merges_same_company_and_round_across_media(
     fixed_now,
 ) -> None:

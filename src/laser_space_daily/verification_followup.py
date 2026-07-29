@@ -28,6 +28,10 @@ _ELIGIBLE_REASONS = frozenset(
         "financing_corroboration_conflict",
         "classification_evidence_missing",
         "classification_evidence_invalid",
+        "classification_country_evidence_invalid",
+        "classification_category_evidence_invalid",
+        "classification_event_evidence_invalid",
+        "classification_scope_evidence_invalid",
         "classification_rule_disagreement",
     }
 )
@@ -172,13 +176,18 @@ class VerificationFollowupPlanner:
         if category is Category.COMMERCIAL_SPACE_FINANCING:
             round_name = _query_value(analysis.financing_round or "")
             event_terms = " ".join(value for value in (organization, round_name, "融资") if value)
+            investors = " ".join(
+                _query_value(value)
+                for value in analysis.investors[:3]
+                if _query_value(value)
+            )
+            investor_terms = (
+                f"{investors} 投资方" if investors else "领投方 投资方"
+            )
             raw = [
                 f"{event_terms} 官网 投资机构 官方披露",
-                *(
-                    f"site:{domain} {event_terms}"
-                    for domain in self._financing_b_domains
-                    if not _url_matches_domain(target.candidate.url, domain)
-                ),
+                f"{event_terms} {investor_terms}",
+                f"{event_terms} 新闻 报道",
             ]
         else:
             title = _query_value(analysis.title)

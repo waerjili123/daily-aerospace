@@ -429,6 +429,8 @@ class RuleVerifier:
             )
             for item in by_field["in_china"]
         )
+        if not country_supported:
+            return "classification_country_evidence_invalid"
         scope_evidence = [
             *by_field["in_scope"],
             *by_field["category"],
@@ -443,21 +445,24 @@ class RuleVerifier:
             self._evidence_event_type(scope_text, analysis.category)
             is analysis.event_type
         )
-        category_supported = page_category_supported or any(
-            RuleFallbackAnalyzer._category(_normalize(item.quote))
-            is analysis.category
-            for item in by_field["category"]
+        if not page_category_supported:
+            return "classification_category_evidence_invalid"
+        if not page_event_supported:
+            return "classification_event_evidence_invalid"
+        in_scope_text = "\n".join(
+            item.quote for item in by_field["in_scope"]
         )
-        event_supported = page_event_supported or any(
-            self._evidence_event_type(item.quote, analysis.category)
+        scope_supported = (
+            analysis.category is not None
+            and self._contains_any(
+                in_scope_text,
+                RuleFallbackAnalyzer._CATEGORY_TERMS[analysis.category],
+            )
+            or self._evidence_event_type(in_scope_text, analysis.category)
             is analysis.event_type
-            for item in by_field["event_type"]
         )
-        scope_supported = page_category_supported and page_event_supported
-        if not all(
-            (country_supported, category_supported, event_supported, scope_supported)
-        ):
-            return "classification_evidence_invalid"
+        if not scope_supported:
+            return "classification_scope_evidence_invalid"
         return None
 
     @classmethod

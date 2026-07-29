@@ -87,6 +87,10 @@ _PENDING_REASON_LABELS = {
     "verified_payload_invalid": "核验字段不完整",
     "suspected_project_match": "疑似项目匹配",
     "missing_matched_project": "匹配项目缺失",
+    "classification_country_evidence_invalid": "境内主体证据不足",
+    "classification_category_evidence_invalid": "目标业务证据不足",
+    "classification_event_evidence_invalid": "事件动作证据不足",
+    "classification_scope_evidence_invalid": "范围证据不足",
 }
 
 _COMPLETED_STATUSES = frozenset(

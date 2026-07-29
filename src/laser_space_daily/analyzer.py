@@ -291,6 +291,7 @@ class RuleFallbackAnalyzer:
             "星载",
             "卫星激光通信",
             "星地激光通信",
+            "空间激光通信",
             "航天企业",
             "commercial space",
         ),
@@ -416,7 +417,7 @@ class RuleFallbackAnalyzer:
             event_quote = _first_line_matching(
                 text, _event_type_terms(event_type)
             )
-            scope_quote = next(
+            combined_scope_quote = next(
                 (
                     line.strip()
                     for line in text.splitlines()
@@ -424,10 +425,14 @@ class RuleFallbackAnalyzer:
                     and _contains_any(_normalize(line), self._CATEGORY_TERMS[category])
                     and _contains_any(_normalize(line), _event_type_terms(event_type))
                 ),
-                page.text,
+                None,
             )
-            if category is Category.COMMERCIAL_SPACE_FINANCING:
-                category_quote = scope_quote
+            scope_quote = (
+                combined_scope_quote
+                or category_quote
+                or event_quote
+                or _first_nonempty_line(page.text)
+            )
             evidence.extend(
                 (
                     Evidence(
@@ -640,21 +645,32 @@ class ResilientAnalyzer:
         if deadline_precision != primary.deadline_precision:
             updates["deadline_precision"] = deadline_precision
 
-        if not updates:
-            return primary
-
         evidence = list(primary.evidence)
         existing = {
             (item.field, item.quote, item.source_url)
             for item in evidence
         }
+        supplemental_evidence_fields = set(filled_evidence_fields)
+        if (
+            primary.category is fallback.category
+            and primary.event_type is fallback.event_type
+            and primary.in_china is fallback.in_china
+            and primary.in_scope is fallback.in_scope
+        ):
+            supplemental_evidence_fields.update(
+                {"in_china", "in_scope", "category", "event_type"}
+            )
+        evidence_changed = False
         for item in fallback.evidence:
             if (
-                item.field in filled_evidence_fields
+                item.field in supplemental_evidence_fields
                 and (item.field, item.quote, item.source_url) not in existing
             ):
                 evidence.append(item)
                 existing.add((item.field, item.quote, item.source_url))
+                evidence_changed = True
+        if not updates and not evidence_changed:
+            return primary
         updates["evidence"] = evidence
         updates["degraded"] = True
         return primary.model_copy(update=updates)
