@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import re
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -14,6 +14,7 @@ from pydantic import Field, ValidationError
 
 from .analyzer import AnalyzerError
 from .discovery import (
+    DiscoveryConfigurationError,
     DiscoveryQuotaError,
     DiscoveryUnavailableError,
     dedupe_candidates,
@@ -45,6 +46,10 @@ from .models import (
     VerificationStatus,
 )
 from .timebox import daily_window, rolling_start
+from .verification_followup import (
+    FollowupTarget,
+    pending_reason_allows_followup,
+)
 
 
 class RunResult(DomainModel):
@@ -124,6 +129,7 @@ class Pipeline:
         trend_summarizer: Any,
         logger: Any,
         researcher: Any | None = None,
+        verification_followup: Any | None = None,
     ) -> None:
         self._repository = repository
         self._planner = planner
@@ -136,6 +142,7 @@ class Pipeline:
         self._trend_summarizer = trend_summarizer
         self._logger = logger
         self._researcher = researcher
+        self._verification_followup = verification_followup
 
     def run(self, now: datetime) -> RunResult:
         deepseek_usage = _usage_snapshot(
@@ -160,6 +167,8 @@ class Pipeline:
             metrics.search_count = research.search_count
             metrics.search_budget = research.budget
             metrics.search_budget_used = research.budget_used
+            metrics.discovery_channel_calls = min(4, research.budget_used)
+            metrics.verification_channel_calls = max(0, research.budget_used - 4)
             metrics.agent_round_count = research.agent_round_count
             metrics.duplicate_query_count = research.duplicate_query_count
             metrics.agent_search_degraded = research.degraded
@@ -188,7 +197,11 @@ class Pipeline:
                 metrics.search_count += 1
                 try:
                     search_rows.extend(self._search_provider.search(query))
-                except (DiscoveryQuotaError, DiscoveryUnavailableError) as error:
+                except (
+                    DiscoveryConfigurationError,
+                    DiscoveryQuotaError,
+                    DiscoveryUnavailableError,
+                ) as error:
                     metrics.search_coverage_degraded = True
                     reason = getattr(error, "reason", "request_rejected")
                     metrics.search_failure_reasons.append(str(reason))
@@ -237,10 +250,35 @@ class Pipeline:
         )
 
         selected_search_rows = list(selection.candidates)
+        verification_pool_rows: list[Candidate] = []
+        if self._verification_followup is not None:
+            pool_start = now - timedelta(
+                days=self._verification_followup.pool_days
+            )
+            verification_pool_rows = [
+                Candidate(
+                    title=item.title,
+                    url=item.source_url,
+                    summary=item.summary,
+                    discovered_at=item.discovered_at,
+                    discovery_source="verification_pool",
+                    category_hint=item.category_hint,
+                    source_published_at=item.source_published_at,
+                )
+                for item in state.pending
+                if pending_reason_allows_followup(item.reason)
+                and (
+                    item.source_published_at or item.discovered_at
+                ) >= pool_start
+                and (
+                    item.source_published_at or item.discovered_at
+                ) <= now
+            ]
         all_rows = [
             *selected_search_rows,
             *selection.corroborating_candidates,
             *official_rows,
+            *verification_pool_rows,
         ]
         candidates = dedupe_candidates(all_rows)
         metrics.candidate_count = len(search_rows) + len(official_rows)
@@ -277,6 +315,149 @@ class Pipeline:
                     metrics.model_coverage_degraded = True
             except _CANDIDATE_ERRORS as error:
                 analyzed_by_url[item.url] = error
+
+        followup_plans = ()
+        followup_target_urls: set[str] = set()
+        followup_new_urls: set[str] = set()
+        if self._verification_followup is not None:
+            prior_pending = {
+                normalize_url(item.source_url): item
+                for item in state.pending
+            }
+            targets: list[FollowupTarget] = []
+            for item in candidates:
+                fetched = fetched_by_url[item.url]
+                analyzed = analyzed_by_url[item.url]
+                if isinstance(fetched, BaseException) or isinstance(
+                    analyzed, BaseException
+                ):
+                    continue
+                try:
+                    decision = self._verifier.verify(
+                        analyzed,
+                        fetched,
+                        (
+                            (analyzed_by_url[url], page)
+                            for url, page in fetched_by_url.items()
+                            if url != item.url
+                            and not isinstance(page, BaseException)
+                            and not isinstance(analyzed_by_url[url], BaseException)
+                        ),
+                    )
+                except _CANDIDATE_ERRORS:
+                    continue
+                targets.append(
+                    FollowupTarget(
+                        candidate=item,
+                        analysis=analyzed,
+                        decision=decision,
+                        pending=prior_pending.get(normalize_url(item.url)),
+                    )
+                )
+            followup_plans = self._verification_followup.plan(now, targets)
+
+        if followup_plans:
+            metrics.verification_targets_count = len(
+                {item.target_url for item in followup_plans}
+            )
+            metrics.elastic_trigger_reasons = list(
+                dict.fromkeys(item.trigger_reason for item in followup_plans)
+            )
+            followup_target_urls = {
+                normalize_url(item.target_url) for item in followup_plans
+            }
+            followup_rows: list[Candidate] = []
+            for planned in followup_plans:
+                try:
+                    rows = list(
+                        self._search_provider.search(
+                            planned.query,
+                            freshness="oneYear",
+                            count=10,
+                        )
+                    )
+                    followup_rows.extend(rows)
+                    outcome = "ok"
+                except (
+                    DiscoveryConfigurationError,
+                    DiscoveryQuotaError,
+                    DiscoveryUnavailableError,
+                ) as error:
+                    metrics.search_coverage_degraded = True
+                    reason = getattr(error, "reason", "request_rejected")
+                    metrics.search_failure_reasons.append(str(reason))
+                    errors.append(f"verification_search:{reason}")
+                    rows = []
+                    outcome = f"error:{reason}"
+                metrics.elastic_search_calls += 1
+                metrics.search_count += 1
+                metrics.search_budget_used += 1
+                metrics.verification_channel_calls += 1
+                research_trace.append(
+                    {
+                        "round_index": -1,
+                        "query": planned.query.text,
+                        "category": planned.query.category.value,
+                        "intent": "verification_elastic",
+                        "result_count": len(rows),
+                        "new_candidate_count": 0,
+                        "budget_remaining": (
+                            self._verification_followup.elastic_budget
+                            - metrics.elastic_search_calls
+                        ),
+                        "outcome": outcome,
+                        "target_url": planned.target_url,
+                        "trigger_reason": planned.trigger_reason,
+                    }
+                )
+
+            followup_limit = min(10, len(followup_rows))
+            followup_selection = select_search_candidates(
+                followup_rows,
+                now,
+                minimum=followup_limit,
+                maximum=followup_limit,
+                fallback_max_days=self._verification_followup.pool_days,
+            )
+            existing_urls = {normalize_url(item.url) for item in candidates}
+            new_candidates = [
+                item
+                for item in dedupe_candidates(
+                    [
+                        *followup_selection.candidates,
+                        *followup_selection.corroborating_candidates,
+                    ]
+                )
+                if normalize_url(item.url) not in existing_urls
+            ]
+            followup_new_urls = {
+                normalize_url(item.url) for item in new_candidates
+            }
+            metrics.verification_new_source_count = len(new_candidates)
+            metrics.verification_duplicate_source_count = max(
+                0, len(followup_rows) - len(new_candidates)
+            )
+            for trace_item in research_trace:
+                if trace_item.get("intent") == "verification_elastic":
+                    trace_item["new_candidate_count"] = len(new_candidates)
+            candidates.extend(new_candidates)
+            metrics.sources_checked = len(candidates)
+
+            for item in new_candidates:
+                try:
+                    fetched_by_url[item.url] = self._fetcher.fetch(item)
+                except _CANDIDATE_ERRORS as error:
+                    fetched_by_url[item.url] = error
+                    metrics.fetch_failure_count += 1
+                    analyzed_by_url[item.url] = error
+                    continue
+                try:
+                    analyzed = self._analyzer.analyze(fetched_by_url[item.url])
+                    analyzed_by_url[item.url] = analyzed
+                    if analyzed.degraded:
+                        metrics.model_coverage_degraded = True
+                except _CANDIDATE_ERRORS as error:
+                    analyzed_by_url[item.url] = error
 
         for item in candidates:
             try:
@@ -391,6 +572,31 @@ class Pipeline:
                     if status_changed:
                         metrics.status_update_count += 1
 
+        if followup_target_urls:
+            for item_id, pending_item in list(pending_by_id.items()):
+                if normalize_url(pending_item.source_url) not in followup_target_urls:
+                    continue
+                attempted = list(pending_item.attempted_queries)
+                for planned in followup_plans:
+                    if normalize_url(planned.target_url) == normalize_url(
+                        pending_item.source_url
+                    ) and planned.query.text not in attempted:
+                        attempted.append(planned.query.text)
+                pending_by_id[item_id] = pending_item.model_copy(
+                    update={
+                        "verification_attempts": (
+                            pending_item.verification_attempts + 1
+                        ),
+                        "last_verification_at": now,
+                        "consecutive_no_new_sources": (
+                            0
+                            if followup_new_urls
+                            else pending_item.consecutive_no_new_sources + 1
+                        ),
+                        "attempted_queries": attempted,
+                    }
+                )
+
         resulting_state = StateBundle(
             events=sorted(events, key=_event_sort_key),
             projects=sorted(projects, key=lambda project: project.project_id),
@@ -467,8 +673,10 @@ class Pipeline:
         pending: dict[str, PendingItem], item: Any, reason: str, now: datetime
     ) -> None:
         normalized_url = normalize_url(item.url)
+        previous: PendingItem | None = None
         for existing_id, existing in list(pending.items()):
             if normalize_url(existing.source_url) == normalized_url:
+                previous = existing
                 del pending[existing_id]
         item_id = _pending_id(item.url, reason)
         pending[item_id] = PendingItem(
@@ -480,6 +688,18 @@ class Pipeline:
             discovered_at=now,
             category_hint=getattr(item, "category_hint", None),
             source_published_at=getattr(item, "source_published_at", None),
+            verification_attempts=(
+                previous.verification_attempts if previous else 0
+            ),
+            last_verification_at=(
+                previous.last_verification_at if previous else None
+            ),
+            consecutive_no_new_sources=(
+                previous.consecutive_no_new_sources if previous else 0
+            ),
+            attempted_queries=(
+                list(previous.attempted_queries) if previous else []
+            ),
         )
 
     def _safe_log(

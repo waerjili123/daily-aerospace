@@ -9,7 +9,11 @@ discovery:
   mode: daily
   max_queries: 12
   daily_search_budget: 12
+  daily_elastic_budget: 3
   backfill_search_budget: 40
+  verification_pool_days: 90
+  verification_max_targets: 1
+  verification_stop_after_no_new: 2
   max_agent_rounds: 8
   max_results_per_call: 10
   stop_after_no_new_rounds: 2
@@ -34,6 +38,6 @@ financing_sources:
   # No investor domain is promoted until an exact legal-name registry is curated.
   official_investor_domains: {}
   independent_media_domains:
-    - cls.cn
-    - pedaily.cn
     - stcn.com
+    - pedaily.cn
+    - cls.cn

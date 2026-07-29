@@ -702,15 +702,43 @@ def _trend_lines(result: RunResult) -> tuple[str, ...]:
             "未达到 5 条验收门槛"
         )
     )
+    base_search_used = max(
+        0, metrics.search_budget_used - metrics.elastic_search_calls
+    )
+    agent_budget_text = (
+        f"基础预算 {metrics.search_budget}；"
+        f"基础调用 {base_search_used}；"
+        f"弹性调用 {metrics.elastic_search_calls}；"
+        f"总调用 {metrics.search_budget_used}"
+        if metrics.elastic_search_calls
+        else (
+            f"预算 {metrics.search_budget}；"
+            f"实际调用 {metrics.search_budget_used}"
+        )
+    )
     agent_line = (
-        f"- 智能检索：预算 {metrics.search_budget}；"
-        f"实际调用 {metrics.search_budget_used}；"
+        f"- 智能检索：{agent_budget_text}；"
         f"模型轮次 {metrics.agent_round_count}；"
         f"重复查询拦截 {metrics.duplicate_query_count}；"
         f"事件过滤淘汰 {metrics.event_filter_rejected_count}；"
         f"事件级合并 {metrics.event_duplicate_count}；"
         f"停止原因 {_safe_text(metrics.agent_stop_reason or '未记录')}"
         if metrics.search_budget
+        else None
+    )
+    verification_line = (
+        f"- 定向核验：处理事件 {metrics.verification_targets_count}；"
+        f"新增来源 {metrics.verification_new_source_count}；"
+        f"重复来源 {metrics.verification_duplicate_source_count}；"
+        "触发原因 "
+        + (
+            "、".join(
+                _safe_text(reason)
+                for reason in metrics.elastic_trigger_reasons
+            )
+            or "未记录"
+        )
+        if metrics.verification_targets_count or metrics.elastic_search_calls
         else None
     )
     lines = [
@@ -738,6 +766,8 @@ def _trend_lines(result: RunResult) -> tuple[str, ...]:
     ]
     if agent_line is not None:
         lines.insert(3, agent_line)
+    if verification_line is not None:
+        lines.insert(4, verification_line)
     return tuple(lines)
 
 

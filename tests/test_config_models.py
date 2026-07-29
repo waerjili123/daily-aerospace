@@ -9,7 +9,7 @@ import yaml
 from pydantic import ValidationError
 
 from laser_space_daily.cli import build_pipeline
-from laser_space_daily.config import load_settings
+from laser_space_daily.config import DiscoverySettings, load_settings
 from laser_space_daily.models import Candidate, Category, Event, Evidence, SourceGrade, VerificationStatus
 from laser_space_daily.timebox import daily_window, rolling_start
 
@@ -93,9 +93,13 @@ def test_committed_config_contains_no_secret_values():
         "bocha": {"timeout_seconds": "30"},
         "discovery": {
             "mode": "daily",
-            "max_queries": "12",
-            "daily_search_budget": "12",
-            "backfill_search_budget": "40",
+                "max_queries": "12",
+                "daily_search_budget": "12",
+                "daily_elastic_budget": "3",
+                "backfill_search_budget": "40",
+                "verification_pool_days": "90",
+                "verification_max_targets": "1",
+                "verification_stop_after_no_new": "2",
             "max_agent_rounds": "8",
             "max_results_per_call": "10",
             "stop_after_no_new_rounds": "2",
@@ -118,7 +122,7 @@ def test_committed_config_contains_no_secret_values():
                 "geespace.com": "时空道宇",
             },
                 "official_investor_domains": {},
-            "independent_media_domains": ["cls.cn", "pedaily.cn", "stcn.com"],
+                "independent_media_domains": ["stcn.com", "pedaily.cn", "cls.cn"],
         },
     }
     config = _base_yaml("config.yaml")
@@ -305,6 +309,20 @@ def test_windows_use_beijing_time_and_calendar_months():
     assert rolling_start(now).isoformat() == "2026-04-22T07:30:00+08:00"
 
 
+def test_daily_base_plus_elastic_budget_never_exceeds_fifteen():
+    settings = DiscoverySettings(
+        daily_search_budget=12,
+        daily_elastic_budget=3,
+    )
+
+    assert settings.daily_search_budget + settings.daily_elastic_budget == 15
+    with pytest.raises(ValidationError, match="less than or equal to 3"):
+        DiscoverySettings(
+            daily_search_budget=12,
+            daily_elastic_budget=4,
+        )
+
+
 def test_event_rejects_unverified_formal_record():
     with pytest.raises(ValueError, match="verified"):
         Event(
@@ -374,11 +392,14 @@ def test_production_financing_registry_is_explicit_and_used_by_pipeline(monkeypa
     pipeline = build_pipeline(settings)
     registry = pipeline._verifier._registry
 
+    assert pipeline._verification_followup.elastic_budget == 3
+    assert pipeline._verification_followup.pool_days == 90
+
     assert settings.financing_sources.official_company_domains["landspace.com"] == "蓝箭航天"
     assert settings.financing_sources.independent_media_domains == [
-        "cls.cn",
-        "pedaily.cn",
         "stcn.com",
+        "pedaily.cn",
+        "cls.cn",
     ]
     assert registry.grade_financing("https://news.landspace.com/a", "蓝箭航天") is SourceGrade.A
     assert registry.grade_financing("https://landspace.com/a", "无关航天公司") is SourceGrade.C

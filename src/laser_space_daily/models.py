@@ -212,6 +212,10 @@ class PendingItem(DomainModel):
     discovered_at: datetime
     category_hint: Category | None = None
     source_published_at: datetime | None = None
+    verification_attempts: int = Field(default=0, ge=0)
+    last_verification_at: datetime | None = None
+    consecutive_no_new_sources: int = Field(default=0, ge=0)
+    attempted_queries: list[str] = Field(default_factory=list)
 
 
 class RunMetrics(DomainModel):
@@ -246,6 +250,13 @@ class RunMetrics(DomainModel):
     search_coverage_degraded: bool = False
     search_budget: int = Field(default=0, ge=0)
     search_budget_used: int = Field(default=0, ge=0)
+    discovery_channel_calls: int = Field(default=0, ge=0)
+    verification_channel_calls: int = Field(default=0, ge=0)
+    elastic_search_calls: int = Field(default=0, ge=0, le=3)
+    verification_targets_count: int = Field(default=0, ge=0)
+    verification_new_source_count: int = Field(default=0, ge=0)
+    verification_duplicate_source_count: int = Field(default=0, ge=0)
+    elastic_trigger_reasons: list[str] = Field(default_factory=list)
     agent_round_count: int = Field(default=0, ge=0)
     duplicate_query_count: int = Field(default=0, ge=0)
     event_filter_rejected_count: int = Field(default=0, ge=0)

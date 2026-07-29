@@ -32,6 +32,7 @@ from .report import RenderedReport, ReportRenderer
 from .repository import StateRepository
 from .timebox import beijing_now
 from .verifier import RuleVerifier, SourceRegistry
+from .verification_followup import VerificationFollowupPlanner
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -170,6 +171,19 @@ def build_pipeline(settings: Settings) -> Pipeline:
         trend_summarizer=deepseek,
         logger=LOGGER,
         researcher=researcher,
+        verification_followup=VerificationFollowupPlanner(
+            financing_b_domains=(
+                settings.financing_sources.independent_media_domains
+            ),
+            elastic_budget=settings.discovery.daily_elastic_budget,
+            pool_days=settings.discovery.verification_pool_days,
+            max_targets=settings.discovery.verification_max_targets,
+            stop_after_no_new=(
+                settings.discovery.verification_stop_after_no_new
+            ),
+        )
+        if settings.discovery.mode == "daily"
+        else None,
     )
 
 

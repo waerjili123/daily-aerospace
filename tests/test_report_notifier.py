@@ -238,6 +238,35 @@ def test_report_exposes_agentic_budget_and_stop_reason():
     assert "停止原因 no\\_new\\_candidates" in markdown
 
 
+def test_report_exposes_elastic_verification_budget_and_outcome():
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        search_budget=12,
+        search_budget_used=15,
+        discovery_channel_calls=4,
+        verification_channel_calls=11,
+        elastic_search_calls=3,
+        verification_targets_count=1,
+        verification_new_source_count=2,
+        verification_duplicate_source_count=4,
+        elastic_trigger_reasons=[
+            "financing_requires_official_or_two_independent_b_sources"
+        ],
+    )
+
+    markdown = ReportRenderer().render(make_result(metrics=metrics)).markdown
+
+    assert (
+        "智能检索：基础预算 12；基础调用 12；弹性调用 3；总调用 15"
+        in markdown
+    )
+    assert "定向核验：处理事件 1；新增来源 2；重复来源 4" in markdown
+    assert (
+        "financing\\_requires\\_official\\_or\\_two\\_independent\\_b\\_sources"
+        in markdown
+    )
+
+
 def test_test_label_marks_title_and_markdown():
     report = RenderedReport(
         title="# 中国激光与商业航天情报日报｜2026-07-28",

@@ -36,6 +36,7 @@ from laser_space_daily.models import (
 )
 from laser_space_daily.pipeline import Pipeline
 from laser_space_daily.report import ReportRenderer
+from laser_space_daily.verification_followup import VerificationFollowupPlanner
 from laser_space_daily.verifier import VerificationDecision
 
 
@@ -161,13 +162,14 @@ class FakeSearchProvider:
         self.error: BaseException | None = None
         self.usage_count = 0
         self.calls = 0
+        self.responses: dict[str, list[Candidate]] = {}
 
-    def search(self, query):
+    def search(self, query, **_kwargs):
         self.calls += 1
         self.usage_count += 1
         if self.error:
             raise self.error
-        return list(self.rows)
+        return list(self.responses.get(getattr(query, "text", ""), self.rows))
 
 
 class FakeOfficialCollector:
@@ -1013,6 +1015,103 @@ def test_pipeline_uses_agentic_research_result_and_exposes_trace(deps) -> None:
     ]
 
 
+def test_pipeline_uses_at_most_three_elastic_queries_and_reverifies_target(deps):
+    primary_url = "https://media-a.example/laser-terminal"
+    official_followup_url = "https://official.example.cn/notices/laser-terminal"
+    primary = candidate(
+        primary_url,
+        source="search:bocha",
+        title="中国境内星间激光通信终端采购公告",
+        summary="某研究院发布星间激光通信终端采购招标公告。",
+        category_hint=Category.LASER_COMMUNICATION,
+        source_published_at=NOW - timedelta(days=2),
+    )
+    followup = candidate(
+        official_followup_url,
+        source="search:bocha",
+        title="中国境内星间激光通信终端采购公告",
+        summary="某研究院发布星间激光通信终端采购招标公告。",
+        category_hint=Category.LASER_COMMUNICATION,
+        source_published_at=NOW - timedelta(days=2),
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(primary,),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    class ReverifyAfterFollowup(FakeVerifier):
+        def verify(self, result, fetched, corroborating=()):
+            related = list(corroborating)
+            self.corroborating_by_url[fetched.final_url] = related
+            if fetched.final_url == official_followup_url or any(
+                other_page.final_url == official_followup_url
+                for _other_analysis, other_page in related
+            ):
+                return VerificationDecision(
+                    status=VerificationStatus.VERIFIED,
+                    reason="verified_tender",
+                    source_grade=SourceGrade.A,
+                    evidence=result.evidence,
+                )
+            return VerificationDecision(
+                status=VerificationStatus.PENDING,
+                reason="classification_evidence_invalid",
+                source_grade=SourceGrade.B,
+                evidence=result.evidence,
+            )
+
+    deps.official_collector.rows = []
+    deps.analyzer.results[primary_url] = analysis(
+        primary_url,
+        event_type=EventType.TENDER,
+        title=primary.title,
+    )
+    deps.analyzer.results[official_followup_url] = analysis(
+        official_followup_url,
+        event_type=EventType.TENDER,
+        title=followup.title,
+    )
+    deps.verifier = ReverifyAfterFollowup()
+    deps.search_provider.rows = [followup]
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=1,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert result.metrics.search_budget_used == 15
+    assert result.metrics.elastic_search_calls == 3
+    assert result.metrics.discovery_channel_calls == 4
+    assert result.metrics.verification_channel_calls == 11
+    assert result.metrics.verification_targets_count == 1
+    assert result.metrics.verification_new_source_count == 1
+    assert result.metrics.verification_duplicate_source_count == 2
+    assert result.metrics.verified_count >= 1
+    assert len(result.state.events) >= 1
+    assert any(
+        item["intent"] == "verification_elastic"
+        for item in result.research_trace
+    )
+
+
 def test_pipeline_backfill_keeps_relevant_candidates_up_to_90_days(deps) -> None:
     item = candidate(
         "https://search.example.cn/backfill-result",
@@ -1165,6 +1264,9 @@ def test_repeated_pending_url_replaces_reason_without_duplicate(deps) -> None:
                 reason="source_unavailable",
                 source_url=OFFICIAL_URL,
                 discovered_at=datetime(2026, 7, 21, tzinfo=BEIJING),
+                verification_attempts=2,
+                consecutive_no_new_sources=1,
+                attempted_queries=["existing verification query"],
             )
         ]
     )
@@ -1177,6 +1279,11 @@ def test_repeated_pending_url_replaces_reason_without_duplicate(deps) -> None:
     assert len(result.state.pending) == 1
     assert result.state.pending[0].reason == "missing_required_fields"
     assert result.state.pending[0].discovered_at == NOW
+    assert result.state.pending[0].verification_attempts == 2
+    assert result.state.pending[0].consecutive_no_new_sources == 1
+    assert result.state.pending[0].attempted_queries == [
+        "existing verification query"
+    ]
 
 
 def test_verified_rerun_removes_resolved_pending_item(deps) -> None:
