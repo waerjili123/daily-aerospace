@@ -86,8 +86,9 @@ def test_planner_spends_three_elastic_queries_on_top_financing_target():
     assert len(planned) == 3
     assert all(item.target_url.endswith("/primary") for item in planned)
     assert "官网 投资机构 官方披露" in planned[0].query.text
-    assert "site:stcn.com" in planned[1].query.text
-    assert "site:pedaily.cn" in planned[2].query.text
+    assert "site:pedaily.cn" in planned[1].query.text
+    assert "site:cls.cn" in planned[2].query.text
+    assert all("site:stcn.com" not in item.query.text for item in planned)
     assert all(item.query.kind == "project_followup" for item in planned)
 
 
@@ -152,7 +153,37 @@ def test_planner_does_not_repeat_persisted_query():
 
     planned = planner().plan(NOW, [target(pending=existing)])
 
-    assert len(planned) == 3
+    assert len(planned) == 2
     assert all(item.query.text != first_query for item in planned)
     assert planned[-1].query.text.startswith("site:cls.cn")
 
+
+def test_planner_skips_target_b_domain_with_www_or_subdomain():
+    for url, excluded in (
+        ("https://www.pedaily.cn/news/1", "site:pedaily.cn"),
+        ("https://news.stcn.com/article/1", "site:stcn.com"),
+    ):
+        planned = planner().plan(NOW, [target(url=url)])
+
+        assert len(planned) == 3
+        assert all(excluded not in item.query.text for item in planned)
+
+
+def test_planner_keeps_b_domains_for_non_b_target():
+    planned = planner().plan(
+        NOW,
+        [target(url="https://finance.ifeng.com/article/1", grade=SourceGrade.C)],
+    )
+
+    assert len(planned) == 3
+    assert "site:stcn.com" in planned[1].query.text
+    assert "site:pedaily.cn" in planned[2].query.text
+
+
+def test_planner_does_not_repeat_queries_to_fill_budget_after_domain_exclusion():
+    planned = planner(
+        financing_b_domains=["stcn.com"],
+        elastic_budget=3,
+    ).plan(NOW, [target(url="https://www.stcn.com/article/1")])
+
+    assert len(planned) == 1

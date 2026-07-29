@@ -446,6 +446,66 @@ def test_single_b_source_financing_stays_pending(media_page, financing_analysis)
     assert decision.reason == "financing_requires_official_or_two_independent_b_sources"
 
 
+def test_same_page_split_category_and_event_evidence_passes_classification(
+    media_page, financing_analysis
+):
+    non_classification = [
+        item
+        for item in financing_analysis.evidence
+        if item.field not in {"in_china", "in_scope", "category", "event_type"}
+    ]
+    financing_analysis.evidence = [
+        *non_classification,
+        *classification_evidence(
+            media_page.final_url,
+            "Orbit Corp",
+            country_quote="中国商业航天企业",
+            category_quote="商业航天",
+            event_quote="financing",
+        ),
+    ]
+
+    decision = RuleVerifier(REGISTRY).verify(financing_analysis, media_page)
+
+    assert decision.status == VerificationStatus.PENDING
+    assert decision.reason == "financing_requires_official_or_two_independent_b_sources"
+
+
+@pytest.mark.parametrize(
+    ("category_quote", "event_quote"),
+    [
+        ("Orbit Corp", "financing"),
+        ("商业航天", "Orbit Corp"),
+    ],
+)
+def test_same_page_scope_evidence_still_requires_category_and_event_facts(
+    media_page,
+    financing_analysis,
+    category_quote,
+    event_quote,
+):
+    non_classification = [
+        item
+        for item in financing_analysis.evidence
+        if item.field not in {"in_china", "in_scope", "category", "event_type"}
+    ]
+    financing_analysis.evidence = [
+        *non_classification,
+        *classification_evidence(
+            media_page.final_url,
+            "Orbit Corp",
+            country_quote="中国商业航天企业",
+            category_quote=category_quote,
+            event_quote=event_quote,
+        ),
+    ]
+
+    decision = RuleVerifier(REGISTRY).verify(financing_analysis, media_page)
+
+    assert decision.status == VerificationStatus.PENDING
+    assert decision.reason == "classification_evidence_invalid"
+
+
 def test_two_independent_b_articles_verify_with_deterministic_fallback() -> None:
     primary = page(
         "https://media.example.cn/longqing",

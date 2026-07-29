@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import re
 from typing import Iterable
+from urllib.parse import urlsplit
 
 from .discovery import SearchQuery
 from .models import (
@@ -176,6 +177,7 @@ class VerificationFollowupPlanner:
                 *(
                     f"site:{domain} {event_terms}"
                     for domain in self._financing_b_domains
+                    if not _url_matches_domain(target.candidate.url, domain)
                 ),
             ]
         else:
@@ -202,3 +204,13 @@ def _query_value(value: str) -> str:
 
 def _normalize_query(value: str) -> str:
     return re.sub(r"\s+", "", value).casefold()
+
+
+def _url_matches_domain(url: str, domain: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    normalized_domain = domain.lower().rstrip(".")
+    return bool(
+        host
+        and normalized_domain
+        and (host == normalized_domain or host.endswith(f".{normalized_domain}"))
+    )
