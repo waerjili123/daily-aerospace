@@ -175,6 +175,12 @@ def build_pipeline(settings: Settings) -> Pipeline:
             financing_b_domains=(
                 settings.financing_sources.independent_media_domains
             ),
+            official_company_domains=(
+                settings.financing_sources.official_company_domains
+            ),
+            official_investor_domains=(
+                settings.financing_sources.official_investor_domains
+            ),
             elastic_budget=settings.discovery.daily_elastic_budget,
             pool_days=settings.discovery.verification_pool_days,
             max_targets=settings.discovery.verification_max_targets,

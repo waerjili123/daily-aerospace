@@ -316,58 +316,78 @@ class Pipeline:
             except _CANDIDATE_ERRORS as error:
                 analyzed_by_url[item.url] = error
 
-        followup_plans = ()
+        followup_plans = []
         followup_target_urls: set[str] = set()
-        followup_new_urls: set[str] = set()
+        followup_new_by_target: Counter[str] = Counter()
         if self._verification_followup is not None:
             prior_pending = {
                 normalize_url(item.source_url): item
                 for item in state.pending
             }
-            targets: list[FollowupTarget] = []
-            for item in candidates:
-                fetched = fetched_by_url[item.url]
-                analyzed = analyzed_by_url[item.url]
-                if isinstance(fetched, BaseException) or isinstance(
-                    analyzed, BaseException
-                ):
-                    continue
-                try:
-                    decision = self._verifier.verify(
-                        analyzed,
-                        fetched,
-                        (
-                            (analyzed_by_url[url], page)
-                            for url, page in fetched_by_url.items()
-                            if url != item.url
-                            and not isinstance(page, BaseException)
-                            and not isinstance(analyzed_by_url[url], BaseException)
-                        ),
-                    )
-                except _CANDIDATE_ERRORS:
-                    continue
-                targets.append(
-                    FollowupTarget(
-                        candidate=item,
-                        analysis=analyzed,
-                        decision=decision,
-                        pending=prior_pending.get(normalize_url(item.url)),
-                    )
-                )
-            followup_plans = self._verification_followup.plan(now, targets)
-
-        if followup_plans:
-            metrics.verification_targets_count = len(
-                {item.target_url for item in followup_plans}
-            )
-            metrics.elastic_trigger_reasons = list(
-                dict.fromkeys(item.trigger_reason for item in followup_plans)
-            )
-            followup_target_urls = {
-                normalize_url(item.target_url) for item in followup_plans
+            initial_followup_urls = {
+                normalize_url(item.url) for item in candidates
             }
-            followup_rows: list[Candidate] = []
-            for planned in followup_plans:
+
+            def current_followup_targets() -> list[FollowupTarget]:
+                targets: list[FollowupTarget] = []
+                for candidate_item in candidates:
+                    if (
+                        normalize_url(candidate_item.url)
+                        not in initial_followup_urls
+                    ):
+                        continue
+                    fetched = fetched_by_url[candidate_item.url]
+                    analyzed = analyzed_by_url[candidate_item.url]
+                    if isinstance(fetched, BaseException) or isinstance(
+                        analyzed, BaseException
+                    ):
+                        continue
+                    try:
+                        decision = self._verifier.verify(
+                            analyzed,
+                            fetched,
+                            (
+                                (analyzed_by_url[url], page)
+                                for url, page in fetched_by_url.items()
+                                if url != candidate_item.url
+                                and not isinstance(page, BaseException)
+                                and not isinstance(
+                                    analyzed_by_url[url], BaseException
+                                )
+                            ),
+                        )
+                    except _CANDIDATE_ERRORS:
+                        continue
+                    targets.append(
+                        FollowupTarget(
+                            candidate=candidate_item,
+                            analysis=analyzed,
+                            decision=decision,
+                            pending=prior_pending.get(
+                                normalize_url(candidate_item.url)
+                            ),
+                        )
+                    )
+                return targets
+
+            attempted_queries: list[str] = []
+            targeted_urls: list[str] = []
+            for allocation_index in range(
+                self._verification_followup.elastic_budget
+            ):
+                planned = self._verification_followup.plan_next(
+                    now,
+                    current_followup_targets(),
+                    attempted_queries=attempted_queries,
+                    targeted_urls=targeted_urls,
+                )
+                if planned is None:
+                    break
+                followup_plans.append(planned)
+                attempted_queries.append(planned.query.text)
+                targeted_urls.append(planned.target_key)
+                normalized_target = normalize_url(planned.target_url)
+                followup_target_urls.add(normalized_target)
                 try:
                     rows = list(
                         self._search_provider.search(
@@ -376,7 +396,6 @@ class Pipeline:
                             count=10,
                         )
                     )
-                    followup_rows.extend(rows)
                     outcome = "ok"
                 except (
                     DiscoveryConfigurationError,
@@ -393,6 +412,85 @@ class Pipeline:
                 metrics.search_count += 1
                 metrics.search_budget_used += 1
                 metrics.verification_channel_calls += 1
+                followup_limit = min(10, len(rows))
+                followup_selection = select_search_candidates(
+                    rows,
+                    now,
+                    minimum=followup_limit,
+                    maximum=followup_limit,
+                    fallback_max_days=self._verification_followup.pool_days,
+                )
+                preferred_rows: list[Candidate] = []
+                for row in rows:
+                    if not any(
+                        _url_matches_domain(row.url, domain)
+                        for domain in planned.preferred_domains
+                    ):
+                        continue
+                    preferred_selection = select_search_candidates(
+                        [row],
+                        now,
+                        minimum=1,
+                        maximum=1,
+                        fallback_max_days=self._verification_followup.pool_days,
+                    )
+                    if preferred_selection.candidates:
+                        preferred_rows.extend(preferred_selection.candidates)
+                    elif _preferred_official_result_matches(
+                        row,
+                        planned.target_terms,
+                    ):
+                        preferred_rows.append(row)
+                existing_urls = {
+                    normalize_url(candidate_item.url)
+                    for candidate_item in candidates
+                }
+                new_candidates = [
+                    candidate_item
+                    for candidate_item in dedupe_candidates(
+                        [
+                            *preferred_rows,
+                            *followup_selection.candidates,
+                            *followup_selection.corroborating_candidates,
+                        ]
+                    )
+                    if normalize_url(candidate_item.url) not in existing_urls
+                ]
+                followup_new_by_target[normalized_target] += len(new_candidates)
+                metrics.verification_new_source_count += len(new_candidates)
+                metrics.verification_duplicate_source_count += max(
+                    0, len(rows) - len(new_candidates)
+                )
+                candidates.extend(new_candidates)
+                metrics.sources_checked = len(candidates)
+
+                for candidate_item in new_candidates:
+                    try:
+                        fetched_by_url[candidate_item.url] = self._fetcher.fetch(
+                            candidate_item
+                        )
+                    except _CANDIDATE_ERRORS as error:
+                        fetched_by_url[candidate_item.url] = error
+                        metrics.fetch_failure_count += 1
+                        analyzed_by_url[candidate_item.url] = error
+                        continue
+                    try:
+                        analyzed = self._analyzer.analyze(
+                            fetched_by_url[candidate_item.url]
+                        )
+                        analyzed_by_url[candidate_item.url] = analyzed
+                        if analyzed.degraded:
+                            metrics.model_coverage_degraded = True
+                    except _CANDIDATE_ERRORS as error:
+                        analyzed_by_url[candidate_item.url] = error
+
+                post_status = "not_found"
+                post_reason = planned.trigger_reason
+                for target in current_followup_targets():
+                    if normalize_url(target.candidate.url) == normalized_target:
+                        post_status = target.decision.status.value
+                        post_reason = target.decision.reason
+                        break
                 research_trace.append(
                     {
                         "round_index": -1,
@@ -400,7 +498,7 @@ class Pipeline:
                         "category": planned.query.category.value,
                         "intent": "verification_elastic",
                         "result_count": len(rows),
-                        "new_candidate_count": 0,
+                        "new_candidate_count": len(new_candidates),
                         "budget_remaining": (
                             self._verification_followup.elastic_budget
                             - metrics.elastic_search_calls
@@ -408,56 +506,18 @@ class Pipeline:
                         "outcome": outcome,
                         "target_url": planned.target_url,
                         "trigger_reason": planned.trigger_reason,
+                        "allocation_index": allocation_index + 1,
+                        "allocation_reason": planned.allocation_reason,
+                        "post_verification_status": post_status,
+                        "post_verification_reason": post_reason,
                     }
                 )
 
-            followup_limit = min(10, len(followup_rows))
-            followup_selection = select_search_candidates(
-                followup_rows,
-                now,
-                minimum=followup_limit,
-                maximum=followup_limit,
-                fallback_max_days=self._verification_followup.pool_days,
+        if followup_plans:
+            metrics.verification_targets_count = len(followup_target_urls)
+            metrics.elastic_trigger_reasons = list(
+                dict.fromkeys(item.trigger_reason for item in followup_plans)
             )
-            existing_urls = {normalize_url(item.url) for item in candidates}
-            new_candidates = [
-                item
-                for item in dedupe_candidates(
-                    [
-                        *followup_selection.candidates,
-                        *followup_selection.corroborating_candidates,
-                    ]
-                )
-                if normalize_url(item.url) not in existing_urls
-            ]
-            followup_new_urls = {
-                normalize_url(item.url) for item in new_candidates
-            }
-            metrics.verification_new_source_count = len(new_candidates)
-            metrics.verification_duplicate_source_count = max(
-                0, len(followup_rows) - len(new_candidates)
-            )
-            for trace_item in research_trace:
-                if trace_item.get("intent") == "verification_elastic":
-                    trace_item["new_candidate_count"] = len(new_candidates)
-            candidates.extend(new_candidates)
-            metrics.sources_checked = len(candidates)
-
-            for item in new_candidates:
-                try:
-                    fetched_by_url[item.url] = self._fetcher.fetch(item)
-                except _CANDIDATE_ERRORS as error:
-                    fetched_by_url[item.url] = error
-                    metrics.fetch_failure_count += 1
-                    analyzed_by_url[item.url] = error
-                    continue
-                try:
-                    analyzed = self._analyzer.analyze(fetched_by_url[item.url])
-                    analyzed_by_url[item.url] = analyzed
-                    if analyzed.degraded:
-                        metrics.model_coverage_degraded = True
-                except _CANDIDATE_ERRORS as error:
-                    analyzed_by_url[item.url] = error
 
         for item in candidates:
             try:
@@ -590,7 +650,9 @@ class Pipeline:
                         "last_verification_at": now,
                         "consecutive_no_new_sources": (
                             0
-                            if followup_new_urls
+                            if followup_new_by_target[
+                                normalize_url(pending_item.source_url)
+                            ]
                             else pending_item.consecutive_no_new_sources + 1
                         ),
                         "attempted_queries": attempted,
@@ -1215,6 +1277,36 @@ def _hostname(url: str | None) -> str:
     if not url:
         return ""
     return (urlsplit(url).hostname or "").lower().rstrip(".")
+
+
+def _url_matches_domain(url: str, domain: str) -> bool:
+    host = _hostname(url)
+    normalized_domain = _normalize_domain(domain)
+    return bool(
+        host
+        and normalized_domain
+        and (
+            host == normalized_domain
+            or host.endswith(f".{normalized_domain}")
+        )
+    )
+
+
+def _preferred_official_result_matches(
+    item: Candidate,
+    target_terms: tuple[str, ...],
+) -> bool:
+    text = normalize_text(f"{item.title} {item.summary}")
+    normalized_terms = [
+        normalize_text(value)
+        for value in target_terms
+        if normalize_text(value)
+    ]
+    return bool(
+        normalized_terms
+        and normalized_terms[0] in text
+        and any(term in text for term in ("融资", "投资", "增资"))
+    )
 
 
 def _normalize_domain(value: str) -> str:

@@ -93,6 +93,80 @@ def test_planner_spends_three_elastic_queries_on_top_financing_target():
     assert all(item.query.kind == "project_followup" for item in planned)
 
 
+def test_planner_distributes_three_queries_across_two_events_before_revisit():
+    first = target(url="https://www.stcn.com/article/first")
+    second = target(
+        url="https://media.example/second",
+        grade=SourceGrade.C,
+        published_at=NOW - timedelta(days=1),
+    )
+    second.analysis.organization = "谱星航天"
+    second.analysis.title = "谱星航天完成Pre-A轮融资"
+    second.analysis.financing_round = "Pre-A轮"
+
+    planned = planner(max_targets=3).plan(NOW, [first, second])
+
+    assert [item.target_url for item in planned] == [
+        first.candidate.url,
+        second.candidate.url,
+        first.candidate.url,
+    ]
+    assert planned[1].allocation_reason == "cover_distinct_target"
+
+
+def test_same_event_sources_do_not_crowd_out_a_second_event():
+    first = target(url="https://www.stcn.com/article/first")
+    first_copy = target(url="https://www.pedaily.cn/article/first-copy")
+    first_copy.analysis.amount = None
+    second = target(url="https://media.example/second", grade=SourceGrade.C)
+    second.analysis.organization = "谱星航天"
+    second.analysis.title = "谱星航天完成Pre-A轮融资"
+    second.analysis.financing_round = "Pre-A轮"
+
+    planned = planner(max_targets=2).plan(
+        NOW,
+        [first, first_copy, second],
+    )
+
+    assert planned[0].target_url in {
+        first.candidate.url,
+        first_copy.candidate.url,
+    }
+    assert planned[1].target_url == second.candidate.url
+
+
+def test_planner_prioritizes_matching_official_investor_domain():
+    official_ready = target(
+        url="https://news.qq.com/article/light-post",
+        grade=SourceGrade.C,
+        published_at=NOW - timedelta(days=12),
+    )
+    official_ready.analysis.organization = "光邮星空"
+    official_ready.analysis.investors = ["中关村科学城", "九合创投"]
+    ordinary_b = target(
+        url="https://www.stcn.com/article/ordinary",
+        grade=SourceGrade.B,
+        published_at=NOW - timedelta(days=1),
+    )
+    ordinary_b.analysis.organization = "谱星航天"
+
+    planned = planner(
+        max_targets=3,
+        official_investor_domains={
+            "zgccity.com": [
+                "北京中关村科学城创新发展有限公司",
+                "中关村科学城公司",
+                "中关村科学城",
+            ]
+        },
+    ).plan(NOW, [ordinary_b, official_ready])
+
+    assert planned[0].target_url == official_ready.candidate.url
+    assert "site:zgccity.com" in planned[0].query.text
+    assert planned[0].preferred_domains == ("zgccity.com",)
+    assert planned[0].allocation_reason == "official_source_match"
+
+
 def test_planner_prioritizes_existing_b_source_over_newer_c_source():
     selected = planner(elastic_budget=1).plan(
         NOW,

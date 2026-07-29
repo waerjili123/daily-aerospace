@@ -98,7 +98,7 @@ def test_committed_config_contains_no_secret_values():
                 "daily_elastic_budget": "3",
                 "backfill_search_budget": "40",
                 "verification_pool_days": "90",
-                "verification_max_targets": "1",
+                "verification_max_targets": "3",
                 "verification_stop_after_no_new": "2",
             "max_agent_rounds": "8",
             "max_results_per_call": "10",

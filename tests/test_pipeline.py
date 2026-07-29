@@ -1097,19 +1097,245 @@ def test_pipeline_uses_at_most_three_elastic_queries_and_reverifies_target(deps)
 
     result = Pipeline(**arguments).run(NOW)
 
-    assert result.metrics.search_budget_used == 15
-    assert result.metrics.elastic_search_calls == 3
+    assert result.metrics.search_budget_used == 13
+    assert result.metrics.elastic_search_calls == 1
     assert result.metrics.discovery_channel_calls == 4
-    assert result.metrics.verification_channel_calls == 11
+    assert result.metrics.verification_channel_calls == 9
     assert result.metrics.verification_targets_count == 1
     assert result.metrics.verification_new_source_count == 1
-    assert result.metrics.verification_duplicate_source_count == 2
+    assert result.metrics.verification_duplicate_source_count == 0
     assert result.metrics.verified_count >= 1
     assert len(result.state.events) >= 1
-    assert any(
-        item["intent"] == "verification_elastic"
+    elastic_trace = [
+        item
         for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert len(elastic_trace) == 1
+    assert elastic_trace[0]["post_verification_status"] == "verified"
+
+
+def test_pipeline_keeps_matching_official_result_beyond_selection_limit(deps):
+    primary_url = "https://news.qq.com/article/light-post"
+    official_url = "https://m.zgccity.com/view/h5/news/204.html"
+    primary = candidate(
+        primary_url,
+        source="search:bocha",
+        title="光邮星空完成Pre-A+轮融资",
+        summary="光邮星空聚焦空间激光通信并完成Pre-A+轮融资。",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=NOW - timedelta(days=12),
     )
+    official = candidate(
+        official_url,
+        source="search:bocha",
+        title="中关村科学城公司投资光邮星空",
+        summary=(
+            "中关村科学城公司完成对空间激光通信企业光邮星空Pre-A+轮投资。"
+        ),
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=None,
+    )
+    distracting_rows = [
+        candidate(
+            f"https://media.example/financing/{index}",
+            source="search:bocha",
+            title=f"卫星企业{index}完成A轮融资",
+            summary=f"卫星企业{index}完成A轮融资并用于卫星制造。",
+            category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+            source_published_at=NOW - timedelta(days=1),
+        )
+        for index in range(10)
+    ]
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(primary,),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    class VerifyWithOfficialInvestor(FakeVerifier):
+        def verify(self, result, fetched, corroborating=()):
+            related = list(corroborating)
+            self.corroborating_by_url[fetched.final_url] = related
+            if fetched.final_url == official_url or any(
+                other_page.final_url == official_url
+                for _other_analysis, other_page in related
+            ):
+                return VerificationDecision(
+                    status=VerificationStatus.VERIFIED,
+                    reason="verified_financing_official",
+                    source_grade=SourceGrade.A,
+                    evidence=result.evidence,
+                )
+            return VerificationDecision(
+                status=VerificationStatus.PENDING,
+                reason="financing_requires_official_or_two_independent_b_sources",
+                source_grade=SourceGrade.C,
+                evidence=result.evidence,
+            )
+
+    primary_analysis = analysis(
+        primary_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=primary.title,
+        published_at=NOW - timedelta(days=12),
+    )
+    primary_analysis.organization = "光邮星空"
+    primary_analysis.financing_round = "Pre-A+轮"
+    primary_analysis.investors = ["中关村科学城", "九合创投"]
+    official_analysis = primary_analysis.model_copy(
+        update={"source_url": official_url, "title": official.title}
+    )
+
+    deps.official_collector.rows = []
+    deps.analyzer.results[primary_url] = primary_analysis
+    deps.analyzer.results[official_url] = official_analysis
+    deps.verifier = VerifyWithOfficialInvestor()
+    deps.search_provider.rows = [*distracting_rows, official]
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        official_investor_domains={
+            "zgccity.com": [
+                "北京中关村科学城创新发展有限公司",
+                "中关村科学城公司",
+                "中关村科学城",
+            ]
+        },
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert official_url in deps.fetcher.calls, result.research_trace
+    assert result.metrics.elastic_search_calls == 1
+    assert result.metrics.verification_new_source_count == 11
+    assert result.metrics.verified_count >= 1
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert "site:zgccity.com" in elastic_trace[0]["query"]
+    assert elastic_trace[0]["allocation_reason"] == "official_source_match"
+    assert elastic_trace[0]["post_verification_status"] == "verified"
+
+
+def test_pipeline_distributes_empty_followups_two_plus_one(deps):
+    first_url = "https://www.stcn.com/article/first"
+    second_url = "https://news.qq.com/article/second"
+    first = candidate(
+        first_url,
+        source="search:bocha",
+        title="龙擎空天完成Pre-A+轮融资",
+        summary="龙擎空天完成Pre-A+轮融资并用于低轨卫星产品研发。",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=NOW - timedelta(days=2),
+    )
+    second = candidate(
+        second_url,
+        source="search:bocha",
+        title="谱星航天完成Pre-A轮融资",
+        summary="谱星航天完成Pre-A轮融资并用于卫星制造。",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=NOW - timedelta(days=1),
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(first, second),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    first_analysis = analysis(
+        first_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=first.title,
+        published_at=NOW - timedelta(days=2),
+    )
+    first_analysis.organization = "龙擎空天"
+    first_analysis.financing_round = "Pre-A+轮"
+    second_analysis = analysis(
+        second_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=second.title,
+        published_at=NOW - timedelta(days=1),
+    )
+    second_analysis.organization = "谱星航天"
+    second_analysis.financing_round = "Pre-A轮"
+
+    deps.official_collector.rows = []
+    deps.analyzer.results[first_url] = first_analysis
+    deps.analyzer.results[second_url] = second_analysis
+    deps.verifier.decisions[first_url] = VerificationDecision(
+        status=VerificationStatus.PENDING,
+        reason="financing_requires_official_or_two_independent_b_sources",
+        source_grade=SourceGrade.B,
+    )
+    deps.verifier.decisions[second_url] = VerificationDecision(
+        status=VerificationStatus.PENDING,
+        reason="financing_requires_official_or_two_independent_b_sources",
+        source_grade=SourceGrade.C,
+    )
+    deps.search_provider.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert [item["target_url"] for item in elastic_trace] == [
+        first_url,
+        second_url,
+        first_url,
+    ]
+    assert [item["allocation_reason"] for item in elastic_trace] == [
+        "highest_promotion_potential",
+        "cover_distinct_target",
+        "highest_promotion_potential",
+    ]
+    assert result.metrics.elastic_search_calls == 3
+    assert result.metrics.verification_targets_count == 2
+    assert result.metrics.search_budget_used == 15
 
 
 def test_pipeline_backfill_keeps_relevant_candidates_up_to_90_days(deps) -> None:
