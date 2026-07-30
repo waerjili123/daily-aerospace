@@ -7,6 +7,7 @@ from laser_space_daily.models import (
     AnalysisResult,
     Candidate,
     Category,
+    Evidence,
     EventType,
     PendingItem,
     SourceGrade,
@@ -196,6 +197,54 @@ def test_candidate_summary_can_trigger_registered_official_investor_query():
     assert planned[0].matched_aliases == ("中关村科学城",)
     assert planned[0].clue_layers == ("candidate",)
     assert item.analysis.investors == []
+
+
+def test_missing_financing_amount_evidence_triggers_official_gap_query():
+    item = target(
+        url="https://m.pedaily.cn/news/566658",
+        grade=SourceGrade.B,
+        reason="financing_missing_required_evidence",
+    )
+    item.analysis.organization = "光邮星空"
+    item.analysis.amount = None
+    item.analysis.amount_disclosed = None
+    item.analysis.investors = []
+    item.analysis.evidence = [
+        Evidence(
+            field="organization",
+            quote="北京光邮星空科技有限公司",
+            source_url=item.analysis.source_url,
+        ),
+        Evidence(
+            field="published_at",
+            quote="2026年7月23日",
+            source_url=item.analysis.source_url,
+        ),
+        Evidence(
+            field="financing_round",
+            quote="Pre-A和Pre-A+轮融资",
+            source_url=item.analysis.source_url,
+        ),
+    ]
+    item.candidate.summary = (
+        "北京光邮星空科技有限公司连续完成Pre-A和Pre-A+轮融资，"
+        "九合创投领投，同创伟业、中关村科学城跟投。"
+    )
+
+    planned = planner(
+        max_targets=3,
+        official_investor_domains={
+            "zgccity.com": ["中关村科学城"],
+        },
+    ).plan(NOW, [item])
+
+    assert len(planned) == 3
+    assert planned[0].missing_evidence_fields == ("amount",)
+    assert "site:zgccity.com" in planned[0].query.text
+    assert "融资金额" in planned[0].query.text
+    assert "金额未披露" in planned[0].query.text
+    assert item.analysis.amount is None
+    assert item.analysis.amount_disclosed is None
 
 
 def test_unregistered_candidate_name_does_not_trigger_site_query():

@@ -1388,7 +1388,26 @@ def test_pipeline_stops_single_target_after_two_no_new_queries(
     )
     primary_analysis.organization = "光邮星空"
     primary_analysis.financing_round = "Pre-A+轮"
+    primary_analysis.amount = None
+    primary_analysis.amount_disclosed = None
     primary_analysis.investors = []
+    primary_analysis.evidence = [
+        Evidence(
+            field="organization",
+            quote="北京光邮星空科技有限公司",
+            source_url=primary_url,
+        ),
+        Evidence(
+            field="published_at",
+            quote=(NOW - timedelta(days=9)).strftime("%Y年%m月%d日"),
+            source_url=primary_url,
+        ),
+        Evidence(
+            field="financing_round",
+            quote="Pre-A和Pre-A+轮融资",
+            source_url=primary_url,
+        ),
+    ]
 
     deps.official_collector.rows = []
     if prior_no_new:
@@ -1397,7 +1416,7 @@ def test_pipeline_stops_single_target_after_two_no_new_queries(
                 PendingItem(
                     item_id="guangyou-pending",
                     title=primary.title,
-                    reason="classification_country_evidence_invalid",
+                    reason="financing_missing_required_evidence",
                     source_url=primary_url,
                     discovered_at=NOW - timedelta(days=1),
                     consecutive_no_new_sources=prior_no_new,
@@ -1407,7 +1426,7 @@ def test_pipeline_stops_single_target_after_two_no_new_queries(
     deps.analyzer.results[primary_url] = primary_analysis
     deps.verifier.decisions[primary_url] = VerificationDecision(
         status=VerificationStatus.PENDING,
-        reason="classification_country_evidence_invalid",
+        reason="financing_missing_required_evidence",
         source_grade=SourceGrade.B,
     )
     deps.search_provider.rows = []
@@ -1435,7 +1454,10 @@ def test_pipeline_stops_single_target_after_two_no_new_queries(
     assert result.metrics.elastic_search_calls == expected_calls
     assert result.metrics.search_budget_used == 12 + expected_calls
     assert "site:zgccity.com" in elastic_trace[0]["query"]
+    assert "融资金额" in elastic_trace[0]["query"]
+    assert "金额未披露" in elastic_trace[0]["query"]
     assert elastic_trace[0]["clue_layers"] == ["candidate"]
+    assert elastic_trace[0]["missing_evidence_fields"] == ["amount"]
     if expected_calls == 2:
         assert elastic_trace[1]["allocation_reason"] == "retry_same_target"
     assert elastic_trace[-1]["stop_reason"] == "no_new_source_threshold"

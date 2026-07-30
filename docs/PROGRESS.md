@@ -498,6 +498,7 @@ codex/verification-promotion-20260728
 - workflow 仍仅允许手动触发并强制 `--dry-run`。
 - 未修改 Secrets、仓库可见性或 workflow 启停/定时配置。
 - 未发送钉钉，未合并任何 PR。
+
 - 下一次真实 dry-run 仍需在推送开发分支后由用户手动触发，并以 Artifact 至少 1 条严格
   `verified` 作为业务验收；Actions success 不能替代该验收。
 
@@ -546,5 +547,53 @@ codex/verification-promotion-20260728
 安全边界保持不变：
 
 - workflow 仍仅允许手动触发并强制 `--dry-run`。
+- 未修改 Secrets、仓库可见性或 workflow 启停/定时配置。
+- 未发送钉钉，未合并任何 PR。
+
+## 2026-07-30 融资证据缺口定向核验
+
+最新真实 dry-run Artifact（报告时点 2026-07-30 11:08）：
+
+- [x] 基础检索调用 12 次。
+- [ ] 弹性核验调用 0 次；总调用只有 12 次，预留的 3 次没有进入规划。
+- [x] 博查原始 95、主题相关 15、最终候选 5、待核实 4。
+- [ ] 严格已核实仍为 0；`financings.json` 和 `events.jsonl` 为空。
+- [x] 光邮星空投资界页面已不再报境内分类证据错误，推进到
+  `financing_missing_required_evidence`。
+- [x] 该原因未在弹性核验允许集合中，导致 `site:zgccity.com` 和其他证据补充
+  查询均未执行。
+- [x] 页面同时包含“北京光邮星空科技有限公司”和“北京邮电大学”时，原规则会
+  错误选择更短的大学名称作为境内主体证据。
+
+已确认设计与计划：
+
+- `docs/superpowers/specs/2026-07-30-financing-evidence-gap-followup-design.md`
+- `docs/superpowers/plans/2026-07-30-financing-evidence-gap-followup.md`
+
+本轮实现：
+
+- [x] 新增无副作用的融资证据缺口分类，覆盖主体、日期、金额、轮次、融资子类型和
+  已有投资方的逐字证据。
+- [x] 金额严格区分“明确披露”“明确未披露”和“页面单纯省略”；单纯省略仍是
+  `amount` 缺口，不能晋升。
+- [x] `financing_missing_required_evidence` 现在可以进入 90 天弹性核验池。
+- [x] 弹性计划附带 `missing_evidence_fields`，研究轨迹可直接看到具体缺口。
+- [x] 金额缺口查询增加“融资金额、金额未披露、具体金额”关键词。
+- [x] 光邮星空摘要命中“中关村科学城”时，首个查询同时包含金额缺口词和
+  `site:zgccity.com`。
+- [x] 境内主体按企业、采购/军队单位、研究机构、大学排序；同页企业优先于
+  北京邮电大学。
+- [x] 标题和摘要仍只决定搜索方向，不写回金额、日期、投资方或核验状态。
+- [x] pending 顶层原因、连续无新增停止、12+3 预算和严格来源门槛保持不变。
+- [x] 定向测试：224 passed。
+- [x] 完整离线测试：442 passed。
+- [x] `git diff --check`：通过。
+- [ ] 修复后的真实 dry-run：待推送后由用户手动触发。
+- [ ] 至少产生 1 条严格“已核实”信息：待真实 Artifact 验证。
+
+安全边界保持不变：
+
+- workflow 仍仅允许手动触发并强制 `--dry-run`。
+- 钉钉 webhook 仍为无效占位地址。
 - 未修改 Secrets、仓库可见性或 workflow 启停/定时配置。
 - 未发送钉钉，未合并任何 PR。

@@ -605,6 +605,66 @@ class RuleVerifier:
         return None
 
     @classmethod
+    def _financing_evidence_gaps(
+        cls,
+        analysis: AnalysisResult,
+    ) -> tuple[str, ...]:
+        gaps: list[str] = []
+        if not analysis.organization or not cls._field_has_quote_containing(
+            analysis.evidence,
+            "organization",
+            analysis.organization or "",
+        ):
+            gaps.append("organization")
+        if analysis.published_at is None or not cls._field_has_date(
+            analysis.evidence,
+            analysis.published_at,
+        ):
+            gaps.append("published_at")
+
+        if analysis.amount:
+            if analysis.amount_disclosed is False or not any(
+                item.field == "amount"
+                and cls._amount_key(item.quote)
+                == cls._amount_key(analysis.amount)
+                for item in analysis.evidence
+            ):
+                gaps.append("amount")
+        elif analysis.amount_disclosed is not False or not any(
+            item.field == "amount" and cls._is_undisclosed(item.quote)
+            for item in analysis.evidence
+        ):
+            gaps.append("amount")
+
+        subtype = analysis.financing_subtype or (
+            "round_equity" if analysis.financing_round else None
+        )
+        if subtype == "round_equity":
+            if not analysis.financing_round or not any(
+                item.field == "financing_round"
+                and cls._contains_round(item.quote, analysis.financing_round)
+                for item in analysis.evidence
+            ):
+                gaps.append("financing_round")
+        elif subtype is None or not any(
+            item.field == "financing_subtype"
+            and cls._financing_subtype_supported(item.quote, subtype)
+            for item in analysis.evidence
+        ):
+            gaps.append("financing_subtype")
+
+        if analysis.investors and any(
+            not cls._field_has_quote_containing(
+                analysis.evidence,
+                "investors",
+                investor,
+            )
+            for investor in analysis.investors
+        ):
+            gaps.append("investors")
+        return tuple(gaps)
+
+    @classmethod
     def _financing_subtype_supported(cls, quote: str, subtype: str) -> bool:
         terms = {
             "strategic": ("战略融资", "战略投资"),
@@ -877,3 +937,11 @@ class RuleVerifier:
             evidence=list(evidence),
             source_records=list(source_records),
         )
+
+
+def financing_evidence_gaps(
+    analysis: AnalysisResult,
+) -> tuple[str, ...]:
+    """Return deterministic missing/ungrounded financing evidence fields."""
+
+    return RuleVerifier._financing_evidence_gaps(analysis)

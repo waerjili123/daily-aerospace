@@ -549,6 +549,23 @@ def test_resilient_analyzer_adds_exact_domestic_subject_evidence():
     assert result.degraded is True
 
 
+def test_domestic_company_subject_is_preferred_over_university():
+    page = make_page(
+        "2026年7月21日，北京光邮星空科技有限公司聚焦高速星地激光通信领域。\n"
+        "公司技术脱胎于北京邮电大学近20年科研成果积累。\n"
+        "公司近日完成Pre-A和Pre-A+轮融资，由九合创投领投。",
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        url="https://news.pedaily.cn/financing.html",
+    )
+
+    result = RuleFallbackAnalyzer().analyze(page)
+
+    country_quotes = [
+        item.quote for item in result.evidence if item.field == "in_china"
+    ]
+    assert country_quotes == ["北京光邮星空科技有限公司"]
+
+
 def test_resilient_analyzer_does_not_override_conflicting_primary_classification():
     page = make_page(
         "2026年7月7日，谱星航天连续完成数千万元Pre-A轮融资。"

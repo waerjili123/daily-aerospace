@@ -869,11 +869,27 @@ def _domestic_subject_quote(text: str) -> str | None:
         item.group(0).strip()
         for item in re.finditer(
             rf"(?:{locations})(?:市)?[\u4e00-\u9fffA-Za-z0-9·]{{2,40}}?"
-            r"(?:股份有限公司|有限责任公司|有限公司|研究院|研究所|公安局|大学|中心)",
+            r"(?:股份有限公司|有限责任公司|有限公司|公安局|部队|单位|研究院|研究所|中心|大学)",
             text,
         )
     )
-    return min((item for item in matches if item), key=len, default=None)
+    return min(
+        (item for item in matches if item),
+        key=_domestic_subject_rank,
+        default=None,
+    )
+
+
+def _domestic_subject_rank(value: str) -> tuple[int, int, str]:
+    if value.endswith(("股份有限公司", "有限责任公司", "有限公司")):
+        entity_rank = 0
+    elif value.endswith(("公安局", "部队", "单位")):
+        entity_rank = 1
+    elif value.endswith(("研究院", "研究所", "中心")):
+        entity_rank = 2
+    else:
+        entity_rank = 3
+    return entity_rank, len(value), value
 
 
 def _extract_organization(text: str) -> tuple[str | None, str | None]:

@@ -25,7 +25,11 @@ from laser_space_daily.models import (
     SourceGrade,
     VerificationStatus,
 )
-from laser_space_daily.verifier import RuleVerifier, SourceRegistry
+from laser_space_daily.verifier import (
+    RuleVerifier,
+    SourceRegistry,
+    financing_evidence_gaps,
+)
 
 
 NOW = datetime(2026, 7, 22, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -677,6 +681,48 @@ def test_grade_a_financing_rejects_empty_evidence(financing_analysis):
 
     assert decision.status == VerificationStatus.PENDING
     assert decision.reason == "financing_missing_required_evidence"
+
+
+def test_financing_evidence_gaps_distinguish_omitted_and_undisclosed_amount(
+    financing_analysis,
+):
+    original = financing_analysis.model_copy(deep=True)
+    financing_analysis.amount = None
+    financing_analysis.amount_disclosed = None
+    financing_analysis.evidence = [
+        item for item in financing_analysis.evidence if item.field != "amount"
+    ]
+
+    assert financing_evidence_gaps(financing_analysis) == ("amount",)
+    assert financing_analysis.amount is None
+    assert financing_analysis.amount_disclosed is None
+
+    financing_analysis.amount_disclosed = False
+    financing_analysis.evidence.append(
+        Evidence(
+            field="amount",
+            quote="具体融资金额未披露",
+            source_url=financing_analysis.source_url,
+        )
+    )
+    assert financing_evidence_gaps(financing_analysis) == ()
+    assert original.amount == "1亿元"
+
+
+def test_financing_evidence_gaps_report_only_required_present_claims(
+    financing_analysis,
+):
+    financing_analysis.evidence = [
+        item
+        for item in financing_analysis.evidence
+        if item.field not in {"published_at", "financing_round", "investors"}
+    ]
+
+    assert financing_evidence_gaps(financing_analysis) == (
+        "published_at",
+        "financing_round",
+        "investors",
+    )
 
 
 def test_grade_a_financing_rejects_unrelated_literal_evidence(financing_analysis):

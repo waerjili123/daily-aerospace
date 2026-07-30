@@ -17,7 +17,7 @@ from .models import (
     SourceGrade,
     VerificationStatus,
 )
-from .verifier import VerificationDecision
+from .verifier import VerificationDecision, financing_evidence_gaps
 
 
 _ELIGIBLE_REASONS = frozenset(
@@ -26,6 +26,7 @@ _ELIGIBLE_REASONS = frozenset(
         "financing_requires_independent_sources",
         "financing_corroboration_insufficient",
         "financing_corroboration_conflict",
+        "financing_missing_required_evidence",
         "classification_evidence_missing",
         "classification_evidence_invalid",
         "classification_country_evidence_invalid",
@@ -60,6 +61,7 @@ class PlannedFollowup:
     target_terms: tuple[str, ...] = ()
     matched_aliases: tuple[str, ...] = ()
     clue_layers: tuple[str, ...] = ()
+    missing_evidence_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -192,6 +194,7 @@ class VerificationFollowupPlanner:
                 if normalized in run_attempted or normalized in persisted_attempts:
                     continue
                 clue = self._official_search_clue(target)
+                missing_evidence_fields = _target_evidence_gaps(target)
                 target_key = self._target_key(target)
                 is_distinct = target_key not in targeted
                 is_switch = bool(targeted) and is_distinct
@@ -224,6 +227,7 @@ class VerificationFollowupPlanner:
                     ),
                     matched_aliases=clue.aliases,
                     clue_layers=clue.layers,
+                    missing_evidence_fields=missing_evidence_fields,
                 )
         return None
 
@@ -283,6 +287,7 @@ class VerificationFollowupPlanner:
             "classification_evidence_invalid": 2,
             "classification_rule_disagreement": 3,
             "financing_corroboration_conflict": 4,
+            "financing_missing_required_evidence": 1,
         }.get(target.decision.reason, 5)
         grade_rank = {
             SourceGrade.B: 0,
@@ -320,10 +325,11 @@ class VerificationFollowupPlanner:
             official_suffix = (
                 f" site:{official_domains[0]}" if official_domains else ""
             )
+            gap_terms = _gap_query_terms(_target_evidence_gaps(target))
             raw = [
-                f"{event_terms} 官网 投资机构 官方披露{official_suffix}",
-                f"{event_terms} {investor_terms}",
-                f"{event_terms} 新闻 报道",
+                f"{event_terms} {gap_terms} 官网 投资机构 官方披露{official_suffix}",
+                f"{event_terms} {gap_terms} {investor_terms}",
+                f"{event_terms} {gap_terms} 新闻 报道",
             ]
         else:
             title = _query_value(analysis.title)
@@ -399,6 +405,31 @@ class VerificationFollowupPlanner:
 
 def _query_value(value: str) -> str:
     return " ".join(value.replace('"', " ").replace("“", " ").replace("”", " ").split())
+
+
+def _target_evidence_gaps(
+    target: FollowupTarget,
+) -> tuple[str, ...]:
+    if (
+        target.analysis.category is Category.COMMERCIAL_SPACE_FINANCING
+        and target.decision.reason == "financing_missing_required_evidence"
+    ):
+        return financing_evidence_gaps(target.analysis)
+    return ()
+
+
+def _gap_query_terms(fields: Iterable[str]) -> str:
+    terms = {
+        "organization": "企业主体 公司全称",
+        "published_at": "发布日期 公告时间",
+        "amount": "融资金额 金额未披露 具体金额",
+        "financing_round": "融资轮次 Pre-A Pre-A+",
+        "financing_subtype": "融资类型 战略投资 增资 并购",
+        "investors": "投资方 领投 跟投",
+    }
+    return " ".join(
+        dict.fromkeys(terms[field] for field in fields if field in terms)
+    )
 
 
 def _normalize_query(value: str) -> str:

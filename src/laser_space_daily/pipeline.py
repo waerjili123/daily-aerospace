@@ -547,6 +547,9 @@ class Pipeline:
                     "preferred_domains": list(planned.preferred_domains),
                     "matched_aliases": list(planned.matched_aliases),
                     "clue_layers": list(planned.clue_layers),
+                    "missing_evidence_fields": list(
+                        planned.missing_evidence_fields
+                    ),
                     "consecutive_no_new_sources": effective_no_new,
                     "post_verification_status": post_status,
                     "post_verification_reason": post_reason,
