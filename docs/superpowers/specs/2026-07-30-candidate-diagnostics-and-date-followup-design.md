@@ -1,7 +1,7 @@
 # 候选诊断与发布日期定向核验设计
 
 日期：2026-07-30
-状态：已获用户口头确认，待书面复核
+状态：已获用户书面复核确认
 开发分支：`codex/verification-promotion-20260728`
 
 ## 1. 背景
@@ -72,6 +72,7 @@
 - `elastic_eligible`
 - `elastic_ineligible_reason`
 - `elastic_attempted`
+- `elastic_not_attempted_reason`
 
 枚举语义：
 

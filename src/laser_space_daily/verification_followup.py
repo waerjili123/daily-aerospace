@@ -27,6 +27,7 @@ _ELIGIBLE_REASONS = frozenset(
         "financing_corroboration_insufficient",
         "financing_corroboration_conflict",
         "financing_missing_required_evidence",
+        "missing_required_fields:published_at",
         "classification_evidence_missing",
         "classification_evidence_invalid",
         "classification_country_evidence_invalid",
@@ -69,6 +70,12 @@ class OfficialSearchClue:
     domains: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
     layers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FollowupEligibility:
+    eligible: bool
+    reason: str
 
 
 class VerificationFollowupPlanner:
@@ -237,29 +244,43 @@ class VerificationFollowupPlanner:
         target: FollowupTarget,
         no_new_counts: Mapping[str, int] | None = None,
     ) -> bool:
+        return self.eligibility(now, target, no_new_counts).eligible
+
+    def eligibility(
+        self,
+        now: datetime,
+        target: FollowupTarget,
+        no_new_counts: Mapping[str, int] | None = None,
+    ) -> FollowupEligibility:
         analysis = target.analysis
-        published_at = analysis.published_at or target.candidate.source_published_at
+        if target.decision.status is not VerificationStatus.PENDING:
+            return FollowupEligibility(False, "status_not_pending")
+        if target.decision.reason not in _ELIGIBLE_REASONS:
+            return FollowupEligibility(False, "reason_not_supported")
         if (
-            target.decision.status is not VerificationStatus.PENDING
-            or target.decision.reason not in _ELIGIBLE_REASONS
-            or not analysis.in_china
+            not analysis.in_china
             or not analysis.in_scope
             or analysis.category is None
             or analysis.event_type is None
-            or not analysis.organization
-            or published_at is None
+        ):
+            return FollowupEligibility(False, "classification_incomplete")
+        if not analysis.organization:
+            return FollowupEligibility(False, "organization_missing")
+        published_at = analysis.published_at or target.candidate.source_published_at
+        if (
+            published_at is None
             or published_at < now - timedelta(days=self._pool_days)
             or published_at > now
         ):
-            return False
+            return FollowupEligibility(False, "published_at_outside_pool")
         target_key = self._target_key(target)
         effective_no_new = (no_new_counts or {}).get(
             target_key,
             target.pending.consecutive_no_new_sources if target.pending else 0,
         )
-        return not (
-            effective_no_new >= self._stop_after_no_new
-        )
+        if effective_no_new >= self._stop_after_no_new:
+            return FollowupEligibility(False, "no_new_source_threshold")
+        return FollowupEligibility(True, "eligible")
 
     def _sort_key(self, target: FollowupTarget) -> tuple[object, ...]:
         published_at = target.analysis.published_at or target.candidate.source_published_at
@@ -288,6 +309,7 @@ class VerificationFollowupPlanner:
             "classification_rule_disagreement": 3,
             "financing_corroboration_conflict": 4,
             "financing_missing_required_evidence": 1,
+            "missing_required_fields:published_at": 1,
         }.get(target.decision.reason, 5)
         grade_rank = {
             SourceGrade.B: 0,
@@ -410,6 +432,8 @@ def _query_value(value: str) -> str:
 def _target_evidence_gaps(
     target: FollowupTarget,
 ) -> tuple[str, ...]:
+    if target.decision.reason == "missing_required_fields:published_at":
+        return ("published_at",)
     if (
         target.analysis.category is Category.COMMERCIAL_SPACE_FINANCING
         and target.decision.reason == "financing_missing_required_evidence"
@@ -421,7 +445,7 @@ def _target_evidence_gaps(
 def _gap_query_terms(fields: Iterable[str]) -> str:
     terms = {
         "organization": "企业主体 公司全称",
-        "published_at": "发布日期 公告时间",
+        "published_at": "发布日期 发布时间 公告时间 官方披露",
         "amount": "融资金额 金额未披露 具体金额",
         "financing_round": "融资轮次 Pre-A Pre-A+",
         "financing_subtype": "融资类型 战略投资 增资 并购",

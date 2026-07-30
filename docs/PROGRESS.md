@@ -597,3 +597,51 @@ codex/verification-promotion-20260728
 - 钉钉 webhook 仍为无效占位地址。
 - 未修改 Secrets、仓库可见性或 workflow 启停/定时配置。
 - 未发送钉钉，未合并任何 PR。
+
+## 2026-07-30 候选诊断与发布日期定向核验
+
+真实 dry-run 运行 #22（提交 `3ca57e6`，报告时点 2026-07-30 16:30）：
+
+- [x] 确认运行分支为 `codex/verification-promotion-20260728`，提交正确。
+- [x] 基础检索 12 次，博查原始 97、主题相关 10、最终候选 4。
+- [ ] 弹性核验 0 次，严格已核实 0，待核实 2。
+- [x] 两条 pending 均为微光启航，原因是
+  `missing_required_fields:published_at`。
+- [x] 光邮星空腾讯候选出现在报告中，但原 Artifact 没有记录其未进入 pending 和
+  弹性核验的具体原因。
+- [x] dry-run 从仓库空状态启动，上一轮 Artifact pending 不会自动成为下一轮输入。
+
+已确认设计与计划：
+
+- `docs/superpowers/specs/2026-07-30-candidate-diagnostics-and-date-followup-design.md`
+- `docs/superpowers/plans/2026-07-30-candidate-diagnostics-and-date-followup.md`
+
+本轮实现：
+
+- [x] 新增统一、可解释的弹性资格结果，规划器和候选诊断共用相同判断。
+- [x] 精确允许 `missing_required_fields:published_at` 进入 90 天弹性核验池。
+- [x] 候选搜索日期只用于滚动池资格和排序，不写回
+  `AnalysisResult.published_at`。
+- [x] 日期缺口查询加入“发布日期、发布时间、公告时间、官方披露”。
+- [x] 同时缺主体或类别、池外日期、非 pending、原因不支持和无新增阈值均有明确
+  不合格原因。
+- [x] 新增精简候选诊断，覆盖抓取失败、分析失败、核验拒绝、pending、verified 和
+  后置 payload 校验失败。
+- [x] 诊断记录来源、是否为报告候选、阶段、状态、原因、来源等级、缺失字段、首次
+  弹性资格及是否已尝试。
+- [x] 诊断 URL 自动移除查询参数和片段；不保存正文、异常消息、模型原始输出、
+  Secrets 或 webhook。
+- [x] CLI 原子写入 UTF-8 `data/candidate-diagnostics.json`；现有 Artifact 上传
+  已覆盖整个 `data/` 目录。
+- [x] 定向测试：146 passed。
+- [x] 完整离线测试：446 passed。
+- [x] `git diff --check`：通过。
+- [ ] 修复后的真实 dry-run：待推送后由用户手动触发。
+- [ ] 至少产生 1 条严格“已核实”信息：待真实 Artifact 验证。
+
+安全边界保持不变：
+
+- workflow 仍仅允许手动触发并强制 `--dry-run`。
+- 钉钉 webhook 仍为无效占位地址。
+- 未修改 Secrets、仓库可见性或 workflow 启停/定时配置。
+- 未发送钉钉，未合并任何 PR。

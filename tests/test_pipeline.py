@@ -323,8 +323,15 @@ def pending_decision(reason: str = "source_unavailable") -> VerificationDecision
 
 def test_pipeline_routes_verified_and_pending(deps) -> None:
     unreachable = candidate(SECOND_URL, summary="Search-provider fallback summary")
-    deps.official_collector.rows = [candidate(), unreachable]
+    rejected_url = "https://news.example.cn/rejected"
+    rejected = candidate(rejected_url, summary="Visible search candidate")
+    deps.official_collector.rows = [candidate(), unreachable, rejected]
     deps.verifier.decisions[SECOND_URL] = pending_decision()
+    deps.verifier.decisions[rejected_url] = VerificationDecision(
+        status=VerificationStatus.REJECTED,
+        reason="out_of_scope",
+        source_grade=SourceGrade.C,
+    )
 
     result = Pipeline(**deps.as_kwargs()).run(NOW)
 
@@ -333,6 +340,24 @@ def test_pipeline_routes_verified_and_pending(deps) -> None:
     assert len(result.state.events) == 1
     assert result.state.pending[0].reason == "source_unavailable"
     assert result.state.pending[0].summary == "Search-provider fallback summary"
+    diagnostics = {
+        item.source_url: item for item in result.candidate_diagnostics
+    }
+    assert diagnostics[OFFICIAL_URL].stage == "persisted"
+    assert diagnostics[OFFICIAL_URL].status == "verified"
+    assert diagnostics[OFFICIAL_URL].source_grade is SourceGrade.A
+    assert diagnostics[SECOND_URL].stage == "persisted"
+    assert diagnostics[SECOND_URL].status == "pending"
+    assert diagnostics[SECOND_URL].reason == "source_unavailable"
+    assert diagnostics[SECOND_URL].elastic_eligible is False
+    assert (
+        diagnostics[SECOND_URL].elastic_ineligible_reason
+        == "followup_disabled"
+    )
+    assert diagnostics[rejected_url].stage == "verification"
+    assert diagnostics[rejected_url].status == "rejected"
+    assert diagnostics[rejected_url].reason == "out_of_scope"
+    assert diagnostics[rejected_url].source_grade is SourceGrade.C
 
 
 def test_pipeline_analyzes_each_corroborating_source_before_verification(deps) -> None:
@@ -1467,6 +1492,93 @@ def test_pipeline_stops_single_target_after_two_no_new_queries(
     assert pending.consecutive_no_new_sources == 2
 
 
+def test_pipeline_date_gap_uses_candidate_date_without_writeback(deps):
+    primary_url = "https://www.chinaventure.com.cn/news/date-missing"
+    candidate_date = NOW - timedelta(days=15)
+    primary = candidate(
+        primary_url,
+        source="search:bocha",
+        title="微光启航完成亿元级天使++轮融资",
+        summary=(
+            "北京微光启航科技有限公司近日完成亿元级天使++轮融资，"
+            "资金用于液体火箭和发动机研制。"
+        ),
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=candidate_date,
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(primary,),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=1,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    primary_analysis = analysis(
+        primary_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=primary.title,
+        published_at=candidate_date,
+    )
+    primary_analysis.organization = "微光启航"
+    primary_analysis.published_at = None
+    primary_analysis.financing_round = "天使++轮"
+
+    deps.official_collector.rows = []
+    deps.analyzer.results[primary_url] = primary_analysis
+    deps.verifier.decisions[primary_url] = VerificationDecision(
+        status=VerificationStatus.PENDING,
+        reason="missing_required_fields:published_at",
+        source_grade=SourceGrade.B,
+    )
+    deps.search_provider.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+        stop_after_no_new=2,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert len(elastic_trace) == 2
+    assert result.metrics.search_budget_used == 14
+    assert elastic_trace[0]["missing_evidence_fields"] == ["published_at"]
+    assert "发布日期" in elastic_trace[0]["query"]
+    assert "发布时间" in elastic_trace[0]["query"]
+    assert "公告时间" in elastic_trace[0]["query"]
+    assert primary_analysis.published_at is None
+    diagnostic = next(
+        item
+        for item in result.candidate_diagnostics
+        if item.source_url == primary_url
+    )
+    assert diagnostic.status == "pending"
+    assert diagnostic.missing_fields == ["published_at"]
+    assert diagnostic.elastic_eligible is True
+    assert diagnostic.elastic_attempted is True
+    assert diagnostic.elastic_ineligible_reason is None
+
+
 def test_pipeline_backfill_keeps_relevant_candidates_up_to_90_days(deps) -> None:
     item = candidate(
         "https://search.example.cn/backfill-result",
@@ -1575,6 +1687,11 @@ def test_pipeline_preserves_search_metadata_when_fetch_fails(deps) -> None:
     assert pending.category_hint is Category.LASER_WEAPON
     assert pending.source_published_at == source_date
     assert pending.summary == item.summary
+    diagnostic = result.candidate_diagnostics[0]
+    assert diagnostic.stage == "fetch"
+    assert diagnostic.status == "failed"
+    assert diagnostic.reason == "fetch_failed"
+    assert diagnostic.selected_for_report is True
 
 
 def test_trend_failure_uses_deterministic_degraded_fallback(deps) -> None:
@@ -1608,6 +1725,10 @@ def test_pending_id_is_stable_and_logs_exclude_secrets_and_body(deps) -> None:
     assert "super-secret" not in log_text
     assert "PRIVATE PAGE BODY" not in log_text
     assert "api_key" not in log_text
+    diagnostic_text = first.candidate_diagnostics[0].model_dump_json()
+    assert "super-secret" not in diagnostic_text
+    assert "PRIVATE PAGE BODY" not in diagnostic_text
+    assert "api_key" not in diagnostic_text
 
 
 def test_repeated_pending_url_replaces_reason_without_duplicate(deps) -> None:

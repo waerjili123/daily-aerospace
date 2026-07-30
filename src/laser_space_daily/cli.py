@@ -275,7 +275,7 @@ def _atomic_write_report(path: Path, report: RenderedReport) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
-def _atomic_write_research_trace(path: Path, trace: list[dict[str, Any]]) -> None:
+def _atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
@@ -289,7 +289,7 @@ def _atomic_write_research_trace(path: Path, trace: list[dict[str, Any]]) -> Non
             delete=False,
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
-            json.dump(trace, temporary_file, ensure_ascii=False, indent=2)
+            json.dump(payload, temporary_file, ensure_ascii=False, indent=2)
             temporary_file.write("\n")
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
@@ -298,6 +298,10 @@ def _atomic_write_research_trace(path: Path, trace: list[dict[str, Any]]) -> Non
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _atomic_write_research_trace(path: Path, trace: list[dict[str, Any]]) -> None:
+    _atomic_write_json(path, trace)
 
 
 def _mark_test_report(report: RenderedReport) -> RenderedReport:
@@ -343,6 +347,13 @@ def _run_locked_cycle(
                 settings.data_dir / "research-trace.json",
                 result.research_trace,
             )
+        _atomic_write_json(
+            settings.data_dir / "candidate-diagnostics.json",
+            [
+                item.model_dump(mode="json")
+                for item in result.candidate_diagnostics
+            ],
+        )
     except Exception as error:
         _log_failure("pipeline", error)
         return 4

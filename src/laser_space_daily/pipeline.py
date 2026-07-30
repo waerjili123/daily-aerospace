@@ -41,15 +41,35 @@ from .models import (
     PendingItem,
     Project,
     RunMetrics,
+    SourceGrade,
     StateBundle,
     TrendSummary,
     VerificationStatus,
 )
 from .timebox import daily_window, rolling_start
 from .verification_followup import (
+    FollowupEligibility,
     FollowupTarget,
     pending_reason_allows_followup,
 )
+from .verifier import financing_evidence_gaps
+
+
+class CandidateDiagnostic(DomainModel):
+    source_url: str
+    title: str
+    discovery_source: str
+    selected_for_report: bool = False
+    category_hint: Category | None = None
+    stage: str
+    status: str
+    reason: str
+    source_grade: SourceGrade | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    elastic_eligible: bool = False
+    elastic_ineligible_reason: str | None = None
+    elastic_attempted: bool = False
+    elastic_not_attempted_reason: str | None = None
 
 
 class RunResult(DomainModel):
@@ -64,6 +84,9 @@ class RunResult(DomainModel):
     changed_financing_ids: list[str] = Field(default_factory=list)
     discovery_candidates: list[Candidate] = Field(default_factory=list)
     research_trace: list[dict[str, Any]] = Field(default_factory=list)
+    candidate_diagnostics: list[CandidateDiagnostic] = Field(
+        default_factory=list
+    )
 
 
 _OFFICIAL_COLLECTION_ERRORS = (
@@ -281,6 +304,14 @@ class Pipeline:
             *verification_pool_rows,
         ]
         candidates = dedupe_candidates(all_rows)
+        selected_report_urls = {
+            normalize_url(item.url) for item in selected_search_rows
+        }
+        initial_candidate_urls = {
+            normalize_url(item.url) for item in candidates
+        }
+        initial_eligibility_by_url: dict[str, FollowupEligibility] = {}
+        diagnostics_by_url: dict[str, CandidateDiagnostic] = {}
         metrics.candidate_count = len(search_rows) + len(official_rows)
         metrics.official_candidate_count = len(official_rows)
         metrics.deduplicated_count = len(all_rows) - len(candidates)
@@ -320,14 +351,12 @@ class Pipeline:
         followup_target_urls: set[str] = set()
         run_no_new_by_target: dict[str, int] = {}
         followup_no_new_by_url: dict[str, int] = {}
+        prior_pending = {
+            normalize_url(item.source_url): item
+            for item in state.pending
+        }
         if self._verification_followup is not None:
-            prior_pending = {
-                normalize_url(item.source_url): item
-                for item in state.pending
-            }
-            initial_followup_urls = {
-                normalize_url(item.url) for item in candidates
-            }
+            initial_followup_urls = set(initial_candidate_urls)
 
             def current_followup_targets() -> list[FollowupTarget]:
                 targets: list[FollowupTarget] = []
@@ -373,6 +402,10 @@ class Pipeline:
 
             attempted_queries: list[str] = []
             targeted_urls: list[str] = []
+            for target in current_followup_targets():
+                initial_eligibility_by_url[
+                    normalize_url(target.candidate.url)
+                ] = self._verification_followup.eligibility(now, target)
             for allocation_index in range(
                 self._verification_followup.elastic_budget
             ):
@@ -567,14 +600,86 @@ class Pipeline:
                 dict.fromkeys(item.trigger_reason for item in followup_plans)
             )
 
+        def record_diagnostic(
+            item: Candidate,
+            *,
+            stage: str,
+            status: str,
+            reason: str,
+            analyzed: AnalysisResult | None = None,
+            decision: Any | None = None,
+        ) -> None:
+            normalized_url = normalize_url(item.url)
+            attempted = normalized_url in followup_target_urls
+            eligibility = initial_eligibility_by_url.get(normalized_url)
+            if eligibility is None and decision is not None and analyzed is not None:
+                if self._verification_followup is None:
+                    eligibility = FollowupEligibility(
+                        False,
+                        "followup_disabled",
+                    )
+                elif normalized_url not in initial_candidate_urls:
+                    eligibility = FollowupEligibility(
+                        False,
+                        "not_initial_candidate",
+                    )
+                else:
+                    eligibility = self._verification_followup.eligibility(
+                        now,
+                        FollowupTarget(
+                            candidate=item,
+                            analysis=analyzed,
+                            decision=decision,
+                            pending=prior_pending.get(normalized_url),
+                        ),
+                    )
+            if eligibility is None:
+                eligibility = FollowupEligibility(
+                    False,
+                    f"{stage}_failed",
+                )
+            diagnostics_by_url[normalized_url] = CandidateDiagnostic(
+                source_url=_diagnostic_url(item.url),
+                title=item.title,
+                discovery_source=item.discovery_source,
+                selected_for_report=normalized_url in selected_report_urls,
+                category_hint=(
+                    item.category_hint
+                    or (analyzed.category if analyzed is not None else None)
+                ),
+                stage=stage,
+                status=status,
+                reason=reason,
+                source_grade=(
+                    decision.source_grade if decision is not None else None
+                ),
+                missing_fields=_diagnostic_missing_fields(
+                    reason,
+                    analyzed,
+                ),
+                elastic_eligible=eligibility.eligible,
+                elastic_ineligible_reason=(
+                    None if eligibility.eligible else eligibility.reason
+                ),
+                elastic_attempted=attempted,
+                elastic_not_attempted_reason=(
+                    "budget_or_query_exhausted"
+                    if eligibility.eligible and not attempted
+                    else None
+                ),
+            )
+
         for item in candidates:
+            failure_stage = "fetch"
             try:
                 fetched = fetched_by_url[item.url]
                 if isinstance(fetched, BaseException):
                     raise fetched
+                failure_stage = "analysis"
                 result = analyzed_by_url[item.url]
                 if isinstance(result, BaseException):
                     raise result
+                failure_stage = "verification"
                 corroborating = (
                     (analyzed_by_url[url], page)
                     for url, page in fetched_by_url.items()
@@ -585,6 +690,12 @@ class Pipeline:
                 decision = self._verifier.verify(result, fetched, corroborating)
             except _CANDIDATE_ERRORS as error:
                 reason = _failure_reason(error)
+                record_diagnostic(
+                    item,
+                    stage=failure_stage,
+                    status="failed",
+                    reason=reason,
+                )
                 self._put_pending(pending_by_id, item, reason, now)
                 metrics.pending_count += 1
                 hostname = _hostname(item.url)
@@ -597,18 +708,50 @@ class Pipeline:
             if decision.status is not VerificationStatus.PENDING:
                 _clear_pending_for_url(pending_by_id, item.url)
             if decision.status is VerificationStatus.REJECTED:
+                record_diagnostic(
+                    item,
+                    stage="verification",
+                    status="rejected",
+                    reason=decision.reason,
+                    analyzed=result,
+                    decision=decision,
+                )
                 continue
             if decision.status is VerificationStatus.PENDING:
                 self._put_pending(pending_by_id, item, decision.reason, now)
                 metrics.pending_count += 1
+                record_diagnostic(
+                    item,
+                    stage="persisted",
+                    status="pending",
+                    reason=decision.reason,
+                    analyzed=result,
+                    decision=decision,
+                )
                 continue
             if decision.status is not VerificationStatus.VERIFIED:
+                record_diagnostic(
+                    item,
+                    stage="verification",
+                    status=decision.status.value,
+                    reason=decision.reason,
+                    analyzed=result,
+                    decision=decision,
+                )
                 continue
             if not _verified_payload_valid(result):
                 self._put_pending(
                     pending_by_id, item, "verified_payload_invalid", now
                 )
                 metrics.pending_count += 1
+                record_diagnostic(
+                    item,
+                    stage="persisted",
+                    status="pending",
+                    reason="verified_payload_invalid",
+                    analyzed=result,
+                    decision=decision,
+                )
                 continue
 
             metrics.verified_count += 1
@@ -627,11 +770,27 @@ class Pipeline:
                     ):
                         _append_once(changed_financing_ids, merged.financing_id)
                     metrics.deduplicated_count += 1
+                record_diagnostic(
+                    item,
+                    stage="persisted",
+                    status="verified",
+                    reason=decision.reason,
+                    analyzed=result,
+                    decision=decision,
+                )
                 continue
 
             event = _make_event(result, decision, item, fetched)
             if _event_exists(events, event):
                 metrics.deduplicated_count += 1
+                record_diagnostic(
+                    item,
+                    stage="persisted",
+                    status="verified",
+                    reason=decision.reason,
+                    analyzed=result,
+                    decision=decision,
+                )
                 continue
 
             match = self._matcher.match(event, projects)
@@ -640,6 +799,14 @@ class Pipeline:
                     pending_by_id, item, "suspected_project_match", now
                 )
                 metrics.pending_count += 1
+                record_diagnostic(
+                    item,
+                    stage="persisted",
+                    status="pending",
+                    reason="suspected_project_match",
+                    analyzed=result,
+                    decision=decision,
+                )
                 continue
 
             previous_events = list(events)
@@ -656,6 +823,14 @@ class Pipeline:
                     events.pop()
                     metrics.events_created -= 1
                     changed_event_ids.pop()
+                    record_diagnostic(
+                        item,
+                        stage="persisted",
+                        status="pending",
+                        reason="missing_matched_project",
+                        analyzed=result,
+                        decision=decision,
+                    )
                     continue
                 updated, status_changed = _update_project(
                     projects[index], event, previous_events
@@ -679,6 +854,14 @@ class Pipeline:
                     _append_once(changed_project_ids, updated.project_id)
                     if status_changed:
                         metrics.status_update_count += 1
+            record_diagnostic(
+                item,
+                stage="persisted",
+                status="verified",
+                reason=decision.reason,
+                analyzed=result,
+                decision=decision,
+            )
 
         if followup_target_urls:
             for item_id, pending_item in list(pending_by_id.items()):
@@ -775,6 +958,10 @@ class Pipeline:
             changed_financing_ids=changed_financing_ids,
             discovery_candidates=selected_search_rows,
             research_trace=research_trace,
+            candidate_diagnostics=sorted(
+                diagnostics_by_url.values(),
+                key=lambda item: item.source_url,
+            ),
         )
 
     @staticmethod
@@ -1169,6 +1356,38 @@ def _failure_reason(error: BaseException) -> str:
     if isinstance(error, ValidationError):
         return "validation_failed"
     return "network_failed"
+
+
+def _diagnostic_url(value: str) -> str:
+    parsed = urlsplit(value)
+    hostname = (parsed.hostname or "").lower()
+    if not parsed.scheme or not hostname:
+        return "invalid-url"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    authority = f"{hostname}:{port}" if port is not None else hostname
+    return f"{parsed.scheme.lower()}://{authority}{parsed.path or '/'}"
+
+
+def _diagnostic_missing_fields(
+    reason: str,
+    analyzed: AnalysisResult | None,
+) -> list[str]:
+    prefix = "missing_required_fields:"
+    if reason.startswith(prefix):
+        return [
+            field
+            for field in reason.removeprefix(prefix).split(",")
+            if field
+        ]
+    if (
+        reason == "financing_missing_required_evidence"
+        and analyzed is not None
+    ):
+        return list(financing_evidence_gaps(analyzed))
+    return []
 
 
 def _verified_payload_valid(result: AnalysisResult) -> bool:

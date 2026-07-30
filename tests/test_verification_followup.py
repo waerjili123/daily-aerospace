@@ -247,6 +247,53 @@ def test_missing_financing_amount_evidence_triggers_official_gap_query():
     assert item.analysis.amount_disclosed is None
 
 
+def test_missing_page_publication_date_is_eligible_for_elastic_followup():
+    item = target(reason="missing_required_fields:published_at")
+    item.analysis.published_at = None
+    candidate_date = item.candidate.source_published_at
+
+    eligibility = planner().eligibility(NOW, item)
+    planned = planner().plan(NOW, [item])
+
+    assert eligibility.eligible is True
+    assert eligibility.reason == "eligible"
+    assert len(planned) == 3
+    assert planned[0].missing_evidence_fields == ("published_at",)
+    assert "发布日期" in planned[0].query.text
+    assert "发布时间" in planned[0].query.text
+    assert "公告时间" in planned[0].query.text
+    assert "官方披露" in planned[0].query.text
+    assert item.analysis.published_at is None
+    assert item.candidate.source_published_at == candidate_date
+
+
+def test_multiple_missing_required_fields_are_not_date_followup_eligible():
+    item = target(
+        reason="missing_required_fields:organization,published_at",
+    )
+    item.analysis.published_at = None
+    item.analysis.organization = None
+
+    eligibility = planner().eligibility(NOW, item)
+
+    assert eligibility.eligible is False
+    assert eligibility.reason == "reason_not_supported"
+    assert planner().plan(NOW, [item]) == ()
+
+
+def test_date_followup_requires_candidate_date_inside_pool():
+    item = target(
+        reason="missing_required_fields:published_at",
+        published_at=NOW - timedelta(days=91),
+    )
+    item.analysis.published_at = None
+
+    eligibility = planner().eligibility(NOW, item)
+
+    assert eligibility.eligible is False
+    assert eligibility.reason == "published_at_outside_pool"
+
+
 def test_unregistered_candidate_name_does_not_trigger_site_query():
     item = target()
     item.analysis.investors = []
@@ -301,7 +348,9 @@ def test_planner_rejects_old_incomplete_and_non_source_gap_targets():
     incomplete = target()
     incomplete.analysis.published_at = None
     incomplete.candidate.source_published_at = None
-    wrong_reason = target(reason="missing_required_fields:published_at")
+    wrong_reason = target(
+        reason="missing_required_fields:organization,published_at"
+    )
 
     assert planner().plan(NOW, [old, incomplete, wrong_reason]) == ()
 

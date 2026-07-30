@@ -47,7 +47,7 @@ from laser_space_daily.models import (
     VerificationStatus,
 )
 from laser_space_daily.notifier import DingTalkNotifier, NotificationError
-from laser_space_daily.pipeline import RunResult
+from laser_space_daily.pipeline import CandidateDiagnostic, RunResult
 from laser_space_daily.report import (
     RenderedReport,
     ReportRenderer,
@@ -1203,6 +1203,25 @@ def cli_deps(
 
 
 def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None:
+    cli_deps.pipeline.result = cli_deps.pipeline.result.model_copy(
+        update={
+            "candidate_diagnostics": [
+                CandidateDiagnostic(
+                    source_url="https://news.example/item",
+                    title="微光启航完成融资",
+                    discovery_source="search:bocha",
+                    selected_for_report=True,
+                    category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+                    stage="persisted",
+                    status="pending",
+                    reason="missing_required_fields:published_at",
+                    source_grade=SourceGrade.B,
+                    missing_fields=["published_at"],
+                    elastic_eligible=True,
+                )
+            ]
+        }
+    )
     code = run_cli(
         [
             "--config",
@@ -1217,6 +1236,26 @@ def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None
     assert code == 0
     report_path = tmp_path / "reports" / "2026-07-22.md"
     assert report_path.read_text(encoding="utf-8") == cli_deps.renderer.report.markdown
+    diagnostics_path = tmp_path / "data" / "candidate-diagnostics.json"
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert diagnostics == [
+        {
+            "source_url": "https://news.example/item",
+            "title": "微光启航完成融资",
+            "discovery_source": "search:bocha",
+            "selected_for_report": True,
+            "category_hint": "commercial_space_financing",
+            "stage": "persisted",
+            "status": "pending",
+            "reason": "missing_required_fields:published_at",
+            "source_grade": "B",
+            "missing_fields": ["published_at"],
+            "elastic_eligible": True,
+            "elastic_ineligible_reason": None,
+            "elastic_attempted": False,
+            "elastic_not_attempted_reason": None,
+        }
+    ]
     assert cli_deps.notifier.calls == 0
 
 
@@ -1345,10 +1384,14 @@ def test_atomic_report_write_uses_same_directory_and_leaves_no_temp_file(
     )
 
     report_dir = tmp_path / "reports"
+    data_dir = tmp_path / "data"
     assert code == 0
-    assert len(replacements) == 1
-    assert replacements[0][1] == report_dir / "2026-07-22.md"
+    assert {target for _source, target in replacements} == {
+        report_dir / "2026-07-22.md",
+        data_dir / "candidate-diagnostics.json",
+    }
     assert list(report_dir.glob("*.tmp")) == []
+    assert list(data_dir.glob("*.tmp")) == []
 
 
 def test_atomic_report_write_failure_cleans_temp_and_returns_four(
