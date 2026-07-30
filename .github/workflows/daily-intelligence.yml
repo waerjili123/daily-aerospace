@@ -54,6 +54,7 @@ jobs:
         run: test "${GITHUB_REF}" = "refs/heads/codex/verification-promotion-20260728"
 
       - name: Run daily pipeline
+        id: daily_pipeline
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}
@@ -67,23 +68,101 @@ jobs:
           --max-queries 12
 
       - name: Publish dry-run report summary
-        if: always()
+        if: success()
         shell: python
         run: |
-          from pathlib import Path
+          import json
           import os
+          from pathlib import Path
 
-          reports = sorted(Path("reports").glob("*.md"))
-          if reports:
-              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-                  summary.write(reports[-1].read_text(encoding="utf-8"))
+          workspace = Path.cwd().resolve()
+          manifest_path = workspace / "data/run-result.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          if manifest.get("status") != "success":
+              raise SystemExit("run-result.json does not describe a successful run")
+
+          report_reference = manifest.get("report_path")
+          if not isinstance(report_reference, str) or not report_reference:
+              raise SystemExit("run-result.json has no report_path")
+
+          reports_root = (workspace / "reports").resolve()
+          report_path = (workspace / report_reference).resolve()
+          if (
+              not report_path.is_relative_to(reports_root)
+              or report_path.suffix.lower() != ".md"
+              or not report_path.is_file()
+          ):
+              raise SystemExit("run-result.json points to an invalid report")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(report_path.read_text(encoding="utf-8"))
+
+      - name: Publish failure diagnostics summary
+        if: failure()
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          diagnostic_path = Path("data/failure-diagnostics.json")
+
+          def inline(value):
+              if not isinstance(value, str) or not value:
+                  return "unknown"
+              return value.replace("`", "'").replace("\r", " ").replace("\n", " ")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Pipeline failure diagnostics\n\n")
+              if not diagnostic_path.is_file():
+                  summary.write(
+                      "Structured diagnostics were not generated; "
+                      "inspect the failed step log.\n"
+                  )
+              else:
+                  try:
+                      diagnostic = json.loads(
+                          diagnostic_path.read_text(encoding="utf-8")
+                      )
+                  except (OSError, UnicodeError, json.JSONDecodeError):
+                      summary.write(
+                          "Structured diagnostics are unreadable; "
+                          "inspect the failed step log.\n"
+                      )
+                  else:
+                      summary.write(f"- Stage: `{inline(diagnostic.get('stage'))}`\n")
+                      summary.write(
+                          f"- Error type: `{inline(diagnostic.get('error_type'))}`\n"
+                      )
+                      frames = diagnostic.get("frames")
+                      if isinstance(frames, list) and frames:
+                          summary.write("- Repository traceback frames:\n")
+                          for frame in frames:
+                              if not isinstance(frame, dict):
+                                  continue
+                              path = inline(frame.get("path"))
+                              function = inline(frame.get("function"))
+                              line = frame.get("line")
+                              if not isinstance(line, int):
+                                  line = "unknown"
+                              summary.write(
+                                  f"  - `{path}:{line} ({function})`\n"
+                              )
 
       - name: Upload generated report
-        if: always()
+        if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daily-intelligence-report
           path: |
             reports/
             data/
+          if-no-files-found: warn
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daily-intelligence-failure-diagnostics
+          path: data/failure-diagnostics.json
           if-no-files-found: warn

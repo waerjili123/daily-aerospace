@@ -62,6 +62,7 @@ def test_workflow_is_restored_to_manual_bounded_dry_run():
     pipeline_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Run daily pipeline"
     )
+    assert pipeline_step["id"] == "daily_pipeline"
     assert "--dry-run" in pipeline_step["run"]
     assert "--test-label" not in pipeline_step["run"]
     assert "--discovery-mode daily" in pipeline_step["run"]
@@ -76,10 +77,20 @@ def test_workflow_is_restored_to_manual_bounded_dry_run():
     summary_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Publish dry-run report summary"
     )
-    assert summary_step["if"] == "always()"
+    assert summary_step["if"] == "success()"
     assert summary_step["shell"] == "python"
     assert "GITHUB_STEP_SUMMARY" in summary_step["run"]
+    assert "data/run-result.json" in summary_step["run"]
+    assert 'glob("*.md")' not in summary_step["run"]
     assert "DINGTALK" not in summary_step["run"]
+    failure_summary = _workflow_step(
+        document["jobs"]["run"]["steps"],
+        "Publish failure diagnostics summary",
+    )
+    assert failure_summary["if"] == "failure()"
+    assert failure_summary["shell"] == "python"
+    assert "data/failure-diagnostics.json" in failure_summary["run"]
+    assert "GITHUB_STEP_SUMMARY" in failure_summary["run"]
 
 
 def test_committed_config_contains_no_secret_values():
@@ -207,8 +218,23 @@ def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
     assert artifact_step["uses"] == (
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     )
-    assert artifact_step["if"] == "always()"
+    assert artifact_step["if"] == "success()"
+    assert artifact_step["with"]["name"] == "daily-intelligence-report"
     assert artifact_step["with"]["path"].splitlines() == ["reports/", "data/"]
+    failure_artifact = _workflow_step(
+        steps,
+        "Upload failure diagnostics",
+    )
+    assert failure_artifact["uses"] == (
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    )
+    assert failure_artifact["if"] == "failure()"
+    assert failure_artifact["with"]["name"] == (
+        "daily-intelligence-failure-diagnostics"
+    )
+    assert failure_artifact["with"]["path"] == (
+        "data/failure-diagnostics.json"
+    )
     assert all(step.get("name") != "Commit state and report" for step in steps)
     assert "git add data reports" not in workflow
     assert "git push origin" not in workflow
