@@ -58,6 +58,15 @@ class PlannedFollowup:
     allocation_reason: str = "highest_promotion_potential"
     preferred_domains: tuple[str, ...] = ()
     target_terms: tuple[str, ...] = ()
+    matched_aliases: tuple[str, ...] = ()
+    clue_layers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class OfficialSearchClue:
+    domains: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    layers: tuple[str, ...] = ()
 
 
 class VerificationFollowupPlanner:
@@ -104,6 +113,10 @@ class VerificationFollowupPlanner:
     def pool_days(self) -> int:
         return self._pool_days
 
+    @property
+    def stop_after_no_new(self) -> int:
+        return self._stop_after_no_new
+
     def plan(
         self,
         now: datetime,
@@ -134,11 +147,16 @@ class VerificationFollowupPlanner:
         *,
         attempted_queries: Iterable[str] = (),
         targeted_urls: Iterable[str] = (),
+        no_new_counts: Mapping[str, int] | None = None,
     ) -> PlannedFollowup | None:
         if now.tzinfo is None:
             raise ValueError("verification planning time must include timezone")
         ranked = sorted(
-            (target for target in targets if self._eligible(now, target)),
+            (
+                target
+                for target in targets
+                if self._eligible(now, target, no_new_counts or {})
+            ),
             key=self._sort_key,
         )
         eligible: list[FollowupTarget] = []
@@ -173,22 +191,29 @@ class VerificationFollowupPlanner:
                 normalized = _normalize_query(query.text)
                 if normalized in run_attempted or normalized in persisted_attempts:
                     continue
-                preferred_domains = self._matching_official_domains(target)
+                clue = self._official_search_clue(target)
+                target_key = self._target_key(target)
+                is_distinct = target_key not in targeted
+                is_switch = bool(targeted) and is_distinct
                 return PlannedFollowup(
                     target_url=target.candidate.url,
                     trigger_reason=target.decision.reason,
                     query=query,
-                    target_key=self._target_key(target),
+                    target_key=target_key,
                     allocation_reason=(
                         "cover_distinct_target"
-                        if prefer_distinct
+                        if is_switch
                         else (
-                            "official_source_match"
-                            if preferred_domains
-                            else "highest_promotion_potential"
+                            "retry_same_target"
+                            if not is_distinct
+                            else (
+                                "official_source_match"
+                                if clue.domains
+                                else "highest_promotion_potential"
+                            )
                         )
                     ),
-                    preferred_domains=preferred_domains,
+                    preferred_domains=clue.domains,
                     target_terms=tuple(
                         value
                         for value in (
@@ -197,10 +222,17 @@ class VerificationFollowupPlanner:
                         )
                         if value
                     ),
+                    matched_aliases=clue.aliases,
+                    clue_layers=clue.layers,
                 )
         return None
 
-    def _eligible(self, now: datetime, target: FollowupTarget) -> bool:
+    def _eligible(
+        self,
+        now: datetime,
+        target: FollowupTarget,
+        no_new_counts: Mapping[str, int] | None = None,
+    ) -> bool:
         analysis = target.analysis
         published_at = analysis.published_at or target.candidate.source_published_at
         if (
@@ -216,10 +248,13 @@ class VerificationFollowupPlanner:
             or published_at > now
         ):
             return False
+        target_key = self._target_key(target)
+        effective_no_new = (no_new_counts or {}).get(
+            target_key,
+            target.pending.consecutive_no_new_sources if target.pending else 0,
+        )
         return not (
-            target.pending is not None
-            and target.pending.consecutive_no_new_sources
-            >= self._stop_after_no_new
+            effective_no_new >= self._stop_after_no_new
         )
 
     def _sort_key(self, target: FollowupTarget) -> tuple[object, ...]:
@@ -255,7 +290,7 @@ class VerificationFollowupPlanner:
             SourceGrade.C: 2,
         }[target.decision.source_grade]
         return (
-            0 if self._matching_official_domains(target) else 1,
+            0 if self._official_search_clue(target).domains else 1,
             missing_fields,
             source_gap_rank,
             grade_rank,
@@ -281,7 +316,7 @@ class VerificationFollowupPlanner:
             investor_terms = (
                 f"{investors} 投资方" if investors else "领投方 投资方"
             )
-            official_domains = self._matching_official_domains(target)
+            official_domains = self._official_search_clue(target).domains
             official_suffix = (
                 f" site:{official_domains[0]}" if official_domains else ""
             )
@@ -307,19 +342,48 @@ class VerificationFollowupPlanner:
             for text in raw
         )
 
-    def _matching_official_domains(
+    def _official_search_clue(
         self,
         target: FollowupTarget,
-    ) -> tuple[str, ...]:
+    ) -> OfficialSearchClue:
         analysis = target.analysis
-        matched: list[str] = []
+        matches: list[tuple[str, str, str]] = []
         for domain, aliases in self._official_company_domains.items():
-            if _matches_any_alias(analysis.organization, aliases):
-                matched.append(domain)
+            alias = _matching_alias(analysis.organization or "", aliases)
+            if alias:
+                matches.append((domain, alias, "structured"))
         for domain, aliases in self._official_investor_domains.items():
-            if any(_matches_any_alias(investor, aliases) for investor in analysis.investors):
-                matched.append(domain)
-        return tuple(dict.fromkeys(matched))
+            for investor in analysis.investors:
+                alias = _matching_alias(investor, aliases)
+                if alias:
+                    matches.append((domain, alias, "structured"))
+
+        evidence_text = "\n".join(
+            item.quote
+            for item in analysis.evidence
+            if item.source_url == analysis.source_url
+        )
+        candidate_text = f"{target.candidate.title}\n{target.candidate.summary}"
+        for domain, aliases in self._official_investor_domains.items():
+            alias = _matching_alias_in_text(evidence_text, aliases)
+            if alias:
+                matches.append((domain, alias, "evidence"))
+            alias = _matching_alias_in_text(candidate_text, aliases)
+            if alias:
+                matches.append((domain, alias, "candidate"))
+        for domain, aliases in self._official_company_domains.items():
+            alias = _matching_alias_in_text(evidence_text, aliases)
+            if alias:
+                matches.append((domain, alias, "evidence"))
+            alias = _matching_alias_in_text(candidate_text, aliases)
+            if alias:
+                matches.append((domain, alias, "candidate"))
+
+        return OfficialSearchClue(
+            domains=tuple(dict.fromkeys(domain for domain, _alias, _layer in matches)),
+            aliases=tuple(dict.fromkeys(alias for _domain, alias, _layer in matches)),
+            layers=tuple(dict.fromkeys(layer for _domain, _alias, layer in matches)),
+        )
 
     @staticmethod
     def _target_key(target: FollowupTarget) -> str:
@@ -356,20 +420,37 @@ def _normalize_domain_aliases(
     return normalized
 
 
-def _matches_any_alias(value: str | None, aliases: Iterable[str]) -> bool:
-    normalized_value = _normalize_name(value or "")
-    return bool(
-        normalized_value
-        and any(
-            normalized_alias
-            and (
-                normalized_alias in normalized_value
-                or normalized_value in normalized_alias
-            )
-            for alias in aliases
-            if (normalized_alias := _normalize_name(alias))
+def _matching_alias(value: str, aliases: Iterable[str]) -> str | None:
+    normalized_value = _normalize_name(value)
+    if not normalized_value:
+        return None
+    matches = [
+        (
+            0 if normalized_alias == normalized_value else 1,
+            len(alias),
+            alias,
         )
-    )
+        for alias in aliases
+        if (normalized_alias := _normalize_name(alias))
+        and (
+            normalized_alias in normalized_value
+            or normalized_value in normalized_alias
+        )
+    ]
+    return min(matches)[2] if matches else None
+
+
+def _matching_alias_in_text(text: str, aliases: Iterable[str]) -> str | None:
+    normalized_text = _normalize_name(text)
+    if not normalized_text:
+        return None
+    matches = [
+        (len(alias), alias)
+        for alias in aliases
+        if (normalized_alias := _normalize_name(alias))
+        and normalized_alias in normalized_text
+    ]
+    return min(matches)[1] if matches else None
 
 
 def _normalize_name(value: str) -> str:

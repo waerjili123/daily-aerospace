@@ -399,7 +399,7 @@ class RuleFallbackAnalyzer:
         )
         evidence: list[Evidence] = []
         if in_china:
-            country_quote = _first_line_matching(
+            country_quote = _domestic_subject_quote(text) or _first_line_matching(
                 page.text,
                 ("中国境内", "我国境内", "国内项目", "中国", "我国", "国内"),
             ) or _first_domestic_line(page.text)
@@ -861,6 +861,19 @@ def _first_domestic_line(text: str) -> str | None:
         ),
         None,
     )
+
+
+def _domestic_subject_quote(text: str) -> str | None:
+    locations = "|".join(re.escape(item) for item in _DOMESTIC_LOCATION_PREFIXES)
+    matches = (
+        item.group(0).strip()
+        for item in re.finditer(
+            rf"(?:{locations})(?:市)?[\u4e00-\u9fffA-Za-z0-9·]{{2,40}}?"
+            r"(?:股份有限公司|有限责任公司|有限公司|研究院|研究所|公安局|大学|中心)",
+            text,
+        )
+    )
+    return min((item for item in matches if item), key=len, default=None)
 
 
 def _extract_organization(text: str) -> tuple[str | None, str | None]:

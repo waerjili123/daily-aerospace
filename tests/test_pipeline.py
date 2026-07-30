@@ -1234,6 +1234,8 @@ def test_pipeline_keeps_matching_official_result_beyond_selection_limit(deps):
     ]
     assert "site:zgccity.com" in elastic_trace[0]["query"]
     assert elastic_trace[0]["allocation_reason"] == "official_source_match"
+    assert elastic_trace[0]["preferred_domains"] == ["zgccity.com"]
+    assert "中关村科学城" in elastic_trace[0]["matched_aliases"]
     assert elastic_trace[0]["post_verification_status"] == "verified"
 
 
@@ -1331,11 +1333,116 @@ def test_pipeline_distributes_empty_followups_two_plus_one(deps):
     assert [item["allocation_reason"] for item in elastic_trace] == [
         "highest_promotion_potential",
         "cover_distinct_target",
-        "highest_promotion_potential",
+        "retry_same_target",
     ]
     assert result.metrics.elastic_search_calls == 3
     assert result.metrics.verification_targets_count == 2
     assert result.metrics.search_budget_used == 15
+
+
+@pytest.mark.parametrize(
+    ("prior_no_new", "expected_calls"),
+    [(0, 2), (1, 1)],
+)
+def test_pipeline_stops_single_target_after_two_no_new_queries(
+    deps,
+    prior_no_new,
+    expected_calls,
+):
+    primary_url = "https://m.pedaily.cn/news/566658"
+    primary = candidate(
+        primary_url,
+        source="search:bocha",
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        summary=(
+            "北京光邮星空科技有限公司聚焦高速星地激光通信并完成两轮融资，"
+            "九合创投领投，同创伟业、中关村科学城跟投。"
+        ),
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=NOW - timedelta(days=9),
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(primary,),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    primary_analysis = analysis(
+        primary_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=primary.title,
+        published_at=NOW - timedelta(days=9),
+    )
+    primary_analysis.organization = "光邮星空"
+    primary_analysis.financing_round = "Pre-A+轮"
+    primary_analysis.investors = []
+
+    deps.official_collector.rows = []
+    if prior_no_new:
+        deps.repository.state = StateBundle(
+            pending=[
+                PendingItem(
+                    item_id="guangyou-pending",
+                    title=primary.title,
+                    reason="classification_country_evidence_invalid",
+                    source_url=primary_url,
+                    discovered_at=NOW - timedelta(days=1),
+                    consecutive_no_new_sources=prior_no_new,
+                )
+            ]
+        )
+    deps.analyzer.results[primary_url] = primary_analysis
+    deps.verifier.decisions[primary_url] = VerificationDecision(
+        status=VerificationStatus.PENDING,
+        reason="classification_country_evidence_invalid",
+        source_grade=SourceGrade.B,
+    )
+    deps.search_provider.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        official_investor_domains={
+            "zgccity.com": ["中关村科学城"],
+        },
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+        stop_after_no_new=2,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert len(elastic_trace) == expected_calls
+    assert result.metrics.elastic_search_calls == expected_calls
+    assert result.metrics.search_budget_used == 12 + expected_calls
+    assert "site:zgccity.com" in elastic_trace[0]["query"]
+    assert elastic_trace[0]["clue_layers"] == ["candidate"]
+    if expected_calls == 2:
+        assert elastic_trace[1]["allocation_reason"] == "retry_same_target"
+    assert elastic_trace[-1]["stop_reason"] == "no_new_source_threshold"
+    pending = next(
+        item for item in result.state.pending if item.source_url == primary_url
+    )
+    assert pending.consecutive_no_new_sources == 2
 
 
 def test_pipeline_backfill_keeps_relevant_candidates_up_to_90_days(deps) -> None:

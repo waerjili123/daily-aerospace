@@ -616,13 +616,17 @@ def test_two_independent_space_laser_financing_articles_verify_after_evidence_en
                 event_type=EventType.FINANCING,
                 title=source.title,
                 source_url=source.final_url,
-                evidence=classification_evidence(
-                    source.final_url,
-                    category_quote,
-                    country_quote="北京光邮星空科技有限公司",
-                    category_quote=category_quote,
-                    event_quote="Pre-A+轮融资",
-                ),
+                evidence=[
+                    item
+                    for item in classification_evidence(
+                        source.final_url,
+                        category_quote,
+                        country_quote="北京光邮星空科技有限公司",
+                        category_quote=category_quote,
+                        event_quote="Pre-A+轮融资",
+                    )
+                    if item.field != "in_china"
+                ],
             )
 
     analyzer = ResilientAnalyzer(NarrowPrimary(), RuleFallbackAnalyzer())
@@ -633,6 +637,16 @@ def test_two_independent_space_laser_financing_articles_verify_after_evidence_en
     assert primary_analysis.published_at == secondary_analysis.published_at
     assert primary_analysis.financing_round == secondary_analysis.financing_round
     assert primary_analysis.amount == secondary_analysis.amount
+    assert any(
+        item.field == "in_china"
+        and item.quote == "北京光邮星空科技有限公司"
+        for item in primary_analysis.evidence
+    )
+    assert any(
+        item.field == "in_china"
+        and item.quote == "北京光邮星空科技有限公司"
+        for item in secondary_analysis.evidence
+    )
 
     decision = RuleVerifier(REGISTRY).verify(
         primary_analysis,

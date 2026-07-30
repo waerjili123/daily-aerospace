@@ -498,6 +498,57 @@ def test_resilient_analyzer_adds_grounded_classification_evidence_without_overwr
     )
 
 
+def test_resilient_analyzer_adds_exact_domestic_subject_evidence():
+    page = make_page(
+        "2026年7月21日，北京光邮星空科技有限公司聚焦高速星地激光通信领域。\n"
+        "公司近日完成Pre-A和Pre-A+轮融资，由九合创投领投。",
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        url="https://news.pedaily.cn/financing.html",
+    )
+    primary_result = AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        event_type=EventType.FINANCING,
+        title=page.title,
+        organization="光邮星空",
+        published_at=datetime(
+            2026, 7, 21, tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+        financing_round="Pre-A+轮",
+        financing_subtype="round_equity",
+        source_url=page.final_url,
+        evidence=[
+            Evidence(
+                field="category",
+                quote="星地激光通信",
+                source_url=page.final_url,
+            ),
+            Evidence(
+                field="event_type",
+                quote="Pre-A+轮融资",
+                source_url=page.final_url,
+            ),
+        ],
+    )
+
+    class Primary:
+        def analyze(self, _page):
+            return primary_result
+
+    result = ResilientAnalyzer(
+        Primary(),
+        RuleFallbackAnalyzer(),
+    ).analyze(page)
+
+    country_quotes = [
+        item.quote for item in result.evidence if item.field == "in_china"
+    ]
+    assert "北京光邮星空科技有限公司" in country_quotes
+    assert all(quote in page.text or quote in page.title for quote in country_quotes)
+    assert result.degraded is True
+
+
 def test_resilient_analyzer_does_not_override_conflicting_primary_classification():
     page = make_page(
         "2026年7月7日，谱星航天连续完成数千万元Pre-A轮融资。"

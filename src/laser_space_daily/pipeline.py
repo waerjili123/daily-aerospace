@@ -318,7 +318,8 @@ class Pipeline:
 
         followup_plans = []
         followup_target_urls: set[str] = set()
-        followup_new_by_target: Counter[str] = Counter()
+        run_no_new_by_target: dict[str, int] = {}
+        followup_no_new_by_url: dict[str, int] = {}
         if self._verification_followup is not None:
             prior_pending = {
                 normalize_url(item.source_url): item
@@ -375,14 +376,37 @@ class Pipeline:
             for allocation_index in range(
                 self._verification_followup.elastic_budget
             ):
+                targets_for_plan = current_followup_targets()
                 planned = self._verification_followup.plan_next(
                     now,
-                    current_followup_targets(),
+                    targets_for_plan,
                     attempted_queries=attempted_queries,
                     targeted_urls=targeted_urls,
+                    no_new_counts=run_no_new_by_target,
                 )
                 if planned is None:
+                    if (
+                        research_trace
+                        and run_no_new_by_target
+                        and any(
+                            count
+                            >= self._verification_followup.stop_after_no_new
+                            for count in run_no_new_by_target.values()
+                        )
+                    ):
+                        research_trace[-1][
+                            "stop_reason"
+                        ] = "no_new_source_threshold"
                     break
+                selected_target = next(
+                    (
+                        item
+                        for item in targets_for_plan
+                        if normalize_url(item.candidate.url)
+                        == normalize_url(planned.target_url)
+                    ),
+                    None,
+                )
                 followup_plans.append(planned)
                 attempted_queries.append(planned.query.text)
                 targeted_urls.append(planned.target_key)
@@ -456,7 +480,20 @@ class Pipeline:
                     )
                     if normalize_url(candidate_item.url) not in existing_urls
                 ]
-                followup_new_by_target[normalized_target] += len(new_candidates)
+                prior_no_new = run_no_new_by_target.get(
+                    planned.target_key,
+                    (
+                        selected_target.pending.consecutive_no_new_sources
+                        if selected_target is not None
+                        and selected_target.pending is not None
+                        else 0
+                    ),
+                )
+                effective_no_new = (
+                    0 if new_candidates else prior_no_new + 1
+                )
+                run_no_new_by_target[planned.target_key] = effective_no_new
+                followup_no_new_by_url[normalized_target] = effective_no_new
                 metrics.verification_new_source_count += len(new_candidates)
                 metrics.verification_duplicate_source_count += max(
                     0, len(rows) - len(new_candidates)
@@ -491,27 +528,35 @@ class Pipeline:
                         post_status = target.decision.status.value
                         post_reason = target.decision.reason
                         break
-                research_trace.append(
-                    {
-                        "round_index": -1,
-                        "query": planned.query.text,
-                        "category": planned.query.category.value,
-                        "intent": "verification_elastic",
-                        "result_count": len(rows),
-                        "new_candidate_count": len(new_candidates),
-                        "budget_remaining": (
-                            self._verification_followup.elastic_budget
-                            - metrics.elastic_search_calls
-                        ),
-                        "outcome": outcome,
-                        "target_url": planned.target_url,
-                        "trigger_reason": planned.trigger_reason,
-                        "allocation_index": allocation_index + 1,
-                        "allocation_reason": planned.allocation_reason,
-                        "post_verification_status": post_status,
-                        "post_verification_reason": post_reason,
-                    }
-                )
+                trace_item = {
+                    "round_index": -1,
+                    "query": planned.query.text,
+                    "category": planned.query.category.value,
+                    "intent": "verification_elastic",
+                    "result_count": len(rows),
+                    "new_candidate_count": len(new_candidates),
+                    "budget_remaining": (
+                        self._verification_followup.elastic_budget
+                        - metrics.elastic_search_calls
+                    ),
+                    "outcome": outcome,
+                    "target_url": planned.target_url,
+                    "trigger_reason": planned.trigger_reason,
+                    "allocation_index": allocation_index + 1,
+                    "allocation_reason": planned.allocation_reason,
+                    "preferred_domains": list(planned.preferred_domains),
+                    "matched_aliases": list(planned.matched_aliases),
+                    "clue_layers": list(planned.clue_layers),
+                    "consecutive_no_new_sources": effective_no_new,
+                    "post_verification_status": post_status,
+                    "post_verification_reason": post_reason,
+                }
+                if (
+                    effective_no_new
+                    >= self._verification_followup.stop_after_no_new
+                ):
+                    trace_item["stop_reason"] = "no_new_source_threshold"
+                research_trace.append(trace_item)
 
         if followup_plans:
             metrics.verification_targets_count = len(followup_target_urls)
@@ -649,11 +694,10 @@ class Pipeline:
                         ),
                         "last_verification_at": now,
                         "consecutive_no_new_sources": (
-                            0
-                            if followup_new_by_target[
-                                normalize_url(pending_item.source_url)
-                            ]
-                            else pending_item.consecutive_no_new_sources + 1
+                            followup_no_new_by_url.get(
+                                normalize_url(pending_item.source_url),
+                                pending_item.consecutive_no_new_sources,
+                            )
                         ),
                         "attempted_queries": attempted,
                     }

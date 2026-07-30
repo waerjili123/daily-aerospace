@@ -112,6 +112,7 @@ def test_planner_distributes_three_queries_across_two_events_before_revisit():
         first.candidate.url,
     ]
     assert planned[1].allocation_reason == "cover_distinct_target"
+    assert planned[2].allocation_reason == "retry_same_target"
 
 
 def test_same_event_sources_do_not_crowd_out_a_second_event():
@@ -165,6 +166,64 @@ def test_planner_prioritizes_matching_official_investor_domain():
     assert "site:zgccity.com" in planned[0].query.text
     assert planned[0].preferred_domains == ("zgccity.com",)
     assert planned[0].allocation_reason == "official_source_match"
+
+
+def test_candidate_summary_can_trigger_registered_official_investor_query():
+    item = target(
+        url="https://m.pedaily.cn/news/566658",
+        grade=SourceGrade.B,
+    )
+    item.analysis.organization = "光邮星空"
+    item.analysis.investors = []
+    item.candidate.summary = (
+        "北京光邮星空科技有限公司连续完成Pre-A和Pre-A+轮融资，"
+        "九合创投领投，同创伟业、中关村科学城跟投。"
+    )
+
+    planned = planner(
+        max_targets=3,
+        official_investor_domains={
+            "zgccity.com": [
+                "北京中关村科学城创新发展有限公司",
+                "中关村科学城公司",
+                "中关村科学城",
+            ]
+        },
+    ).plan(NOW, [item])
+
+    assert "site:zgccity.com" in planned[0].query.text
+    assert planned[0].preferred_domains == ("zgccity.com",)
+    assert planned[0].matched_aliases == ("中关村科学城",)
+    assert planned[0].clue_layers == ("candidate",)
+    assert item.analysis.investors == []
+
+
+def test_unregistered_candidate_name_does_not_trigger_site_query():
+    item = target()
+    item.analysis.investors = []
+    item.candidate.summary = "某地方产业基金参与本轮融资。"
+
+    planned = planner(
+        official_investor_domains={
+            "zgccity.com": ["中关村科学城"],
+        },
+    ).plan(NOW, [item])
+
+    assert all("site:" not in row.query.text for row in planned)
+    assert all(row.preferred_domains == () for row in planned)
+
+
+def test_run_no_new_count_stops_target_at_threshold():
+    item = target()
+    target_key = planner().plan(NOW, [item])[0].target_key
+
+    planned = planner().plan_next(
+        NOW,
+        [item],
+        no_new_counts={target_key: 2},
+    )
+
+    assert planned is None
 
 
 def test_planner_prioritizes_existing_b_source_over_newer_c_source():
