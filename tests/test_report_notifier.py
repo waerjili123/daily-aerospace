@@ -74,6 +74,10 @@ WINDOW_END = datetime(2026, 7, 22, 9, 30, tzinfo=BEIJING)
         ("classification_category_evidence_invalid", "目标业务证据不足"),
         ("classification_event_evidence_invalid", "事件动作证据不足"),
         ("classification_scope_evidence_invalid", "范围证据不足"),
+        (
+            "financing_requires_official_or_two_independent_b_sources",
+            "缺少官方来源或第二个独立 B 级来源",
+        ),
     ],
 )
 def test_pending_reason_renders_precise_classification_failure(reason, label):
@@ -242,6 +246,50 @@ def test_high_confidence_pending_signal_renders_once_in_top_section():
     assert "光邮星空完成Pre-A轮融资" in top
     assert "高可信待核实" not in financing_section
     assert markdown.count("光邮星空完成Pre-A轮融资") == 1
+
+
+def test_verified_financing_suppresses_same_company_round_candidate_variants():
+    verified = financing(
+        company="微光启航",
+        announced_at=dt(7, 7),
+    ).model_copy(update={"round_name": "天使++轮"})
+    diagnostic = CandidateDiagnostic(
+        source_url="https://media.example/weiguang-third",
+        title="微光启航完成亿元天使++轮融资",
+        summary="北京微光启航科技有限公司完成本轮融资。",
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization=None,
+        published_at=dt(7, 7),
+        financing_round=None,
+        evidence_count=4,
+        stage="persisted",
+        status="pending",
+        reason="missing_required_fields:organization",
+        source_grade=SourceGrade.B,
+    )
+    candidate = Candidate(
+        title="微光启航完成亿元级人民币天使++轮融资",
+        url="https://search.example/weiguang-fourth",
+        summary="该轮融资用于全碳纤维火箭工程研制。",
+        discovered_at=WINDOW_END,
+        discovery_source="bocha",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=dt(7, 8),
+    )
+    result = make_result(
+        state=StateBundle(financings=[verified]),
+        changed_financing_ids=[verified.financing_id],
+        discovery_candidates=[candidate],
+    ).model_copy(update={"candidate_diagnostics": [diagnostic]})
+
+    markdown = ReportRenderer().render(result).markdown
+
+    assert "严格已核实" in markdown
+    assert markdown.count("微光启航") == 1
+    assert "weiguang-third" not in markdown
+    assert "weiguang-fourth" not in markdown
 
 
 def test_backfill_candidate_uses_90_day_time_label():

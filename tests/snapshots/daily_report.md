@@ -6,7 +6,7 @@
   - 公告链：[招标公告](https://official.example/open)（2026-07-21）
 - 2026-07-21｜激光通信｜2026-04-22边界项目｜采购单位：中国航天采购中心｜状态：已中标｜金额：1.2亿元｜[查看原始公告](https://official.example/award)
   - 公告链：[采购意向](https://official.example/intention)（2026-04-22） → [中标结果](https://official.example/award)（2026-07-21）
-- 2026-07-22｜商业航天融资｜星河动力｜A轮｜金额：1.00亿元｜投资方：未来基金、航天资本｜领域：商业运载火箭｜[企业公告](https://company.example/financing) / [权威媒体报道](https://media.example/financing)
+- 严格已核实｜2026-07-22｜商业航天融资｜星河动力｜A轮｜金额：1.00亿元｜投资方：未来基金、航天资本｜领域：商业运载火箭｜[企业公告](https://company.example/financing) / [权威媒体报道](https://media.example/financing)
 
 ## 过去24小时新增/变化
 - 暂无已核实信息

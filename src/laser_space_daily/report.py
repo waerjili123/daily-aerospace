@@ -92,6 +92,15 @@ _PENDING_REASON_LABELS = {
     "classification_category_evidence_invalid": "目标业务证据不足",
     "classification_event_evidence_invalid": "事件动作证据不足",
     "classification_scope_evidence_invalid": "范围证据不足",
+    "financing_requires_official_or_two_independent_b_sources": (
+        "缺少官方来源或第二个独立 B 级来源"
+    ),
+    "financing_requires_independent_sources": "缺少独立来源互证",
+    "financing_corroboration_insufficient": "融资来源互证不足",
+    "financing_corroboration_conflict": "融资来源信息冲突",
+    "financing_missing_required_evidence": "融资关键证据不足",
+    "missing_required_fields:organization": "核验字段缺失（主体）",
+    "missing_required_fields:published_at": "核验字段缺失（发布日期）",
 }
 
 _COMPLETED_STATUSES = frozenset(
@@ -564,7 +573,8 @@ def _format_financing(item: Financing) -> str:
         "merger_acquisition": "并购融资",
     }
     parts = [
-        f"- {_format_date(item.announced_at)}",
+        f"- 严格已核实",
+        _format_date(item.announced_at),
         _CATEGORY_LABELS[Category.COMMERCIAL_SPACE_FINANCING],
         _safe_text(item.company),
     ]
@@ -757,6 +767,14 @@ def _category_candidate_lines(
             for item in result.state.pending
             if item.category_hint is category
             and item.source_url not in diagnostic_urls
+            and not _overlaps_verified_financing(
+                result,
+                category=item.category_hint,
+                title=item.title,
+                organization="",
+                round_name="",
+                published_at=item.source_published_at,
+            )
             and result.window_start
             <= _as_beijing(item.discovered_at)
             <= result.window_end
@@ -778,6 +796,14 @@ def _category_candidate_lines(
         if item.category_hint is category
         and item.url not in surfaced_urls
         and item.url not in diagnostic_urls
+        and not _overlaps_verified_financing(
+            result,
+            category=item.category_hint,
+            title=item.title,
+            organization="",
+            round_name="",
+            published_at=item.source_published_at,
+        )
     ]
     lines: list[str] = list(diagnostic_lines)
     for item in pending_rows[: max(0, 5 - len(lines))]:
@@ -912,6 +938,15 @@ def _diagnostic_signal_lines(
             continue
         if category is not None and item.category_hint is not category:
             continue
+        if _overlaps_verified_financing(
+            result,
+            category=item.category_hint,
+            title=item.title,
+            organization=item.organization or "",
+            round_name=item.financing_round or "",
+            published_at=item.published_at,
+        ):
+            continue
         if (
             not item.selected_for_report
             and item.source_grade not in {SourceGrade.A, SourceGrade.B}
@@ -983,6 +1018,53 @@ def _diagnostic_signal_lines(
                 f"  - 摘要（未核实）：{_safe_text(summary[:180])}"
             )
     return tuple(lines), urls
+
+
+def _overlaps_verified_financing(
+    result: RunResult,
+    *,
+    category: Category | None,
+    title: str,
+    organization: str,
+    round_name: str,
+    published_at: datetime | None,
+) -> bool:
+    if category is not Category.COMMERCIAL_SPACE_FINANCING:
+        return False
+    identity_text = _identity_text(f"{organization} {title}")
+    candidate_round = _round_identity(round_name or title)
+    for item in result.state.financings:
+        if item.verification_status is not VerificationStatus.VERIFIED:
+            continue
+        if _identity_text(item.company) not in identity_text:
+            continue
+        verified_round = _round_identity(item.round_name or "")
+        if verified_round and candidate_round and verified_round != candidate_round:
+            continue
+        if verified_round and not candidate_round:
+            continue
+        if published_at is not None:
+            candidate_date = _as_beijing(published_at)
+            verified_date = _as_beijing(item.announced_at)
+            if abs((candidate_date.date() - verified_date.date()).days) > 45:
+                continue
+        return True
+    return False
+
+
+def _identity_text(value: str) -> str:
+    return re.sub(r"[^\w+]+", "", value.casefold())
+
+
+def _round_identity(value: str) -> str:
+    match = re.search(
+        r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
+        r"天使\+{0,2}|种子|战略投资|战略)",
+        value,
+    )
+    if match is None:
+        return ""
+    return re.sub(r"[\s-]+", "", match.group(1).casefold())
 
 
 def _high_confidence_group(rows: list[object]) -> bool:
