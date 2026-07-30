@@ -922,12 +922,14 @@ def test_near_date_financing_source_merge_refreshes_rolling_report(deps) -> None
         OFFICIAL_URL: datetime(2026, 7, 18, tzinfo=BEIJING),
         SECOND_URL: datetime(2026, 7, 21, 12, tzinfo=BEIJING),
     }
-    financing_section = ReportRenderer(18000).render(result).markdown.split(
-        "## 商业航天融资", maxsplit=1
-    )[1].split("## 今日重点跟进", maxsplit=1)[0]
-    assert "Space Institute" in financing_section
-    assert OFFICIAL_URL in financing_section
-    assert SECOND_URL in financing_section
+    report = ReportRenderer(18000).render(result).markdown
+    top_section = report.split(
+        "## 今日最值得看", maxsplit=1
+    )[1].split("## 过去24小时新增/变化", maxsplit=1)[0]
+    assert "Space Institute" in top_section
+    assert OFFICIAL_URL in top_section
+    assert SECOND_URL in top_section
+    assert report.count("Space Institute") == 1
 
 
 def test_same_financing_terms_outside_corroboration_window_stay_separate(deps) -> None:

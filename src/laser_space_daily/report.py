@@ -217,16 +217,88 @@ class ReportRenderer:
             key=lambda item: (_datetime_key(item.announced_at), item.financing_id),
             reverse=True,
         )
+        current_run_groups = (
+            tuple(
+                _format_project(project, event_by_id, compact=False)
+                for project in changed_projects
+            )
+            + tuple((_format_event(event),) for event in changed_events)
+            + tuple((_format_financing(item),) for item in changed_financings)
+        )
+        daily_projects = tuple(
+            project
+            for project in changed_projects
+            if (
+                (latest_at := _project_latest_at(project, event_by_id))
+                is not None
+                and _in_window(
+                    latest_at,
+                    result.window_start,
+                    result.window_end,
+                )
+            )
+        )
+        daily_events = tuple(
+            event
+            for event in changed_events
+            if _in_window(
+                event.published_at,
+                result.window_start,
+                result.window_end,
+            )
+        )
+        daily_financings = tuple(
+            item
+            for item in changed_financings
+            if _in_window(
+                _financing_latest_at(item),
+                result.window_start,
+                result.window_end,
+            )
+        )
         daily_lines = (
             tuple(
                 line
-                for project in changed_projects
+                for project in daily_projects
                 for line in _format_project(project, event_by_id, compact=False)
             )
-            + tuple(_format_event(event) for event in changed_events)
-            + tuple(_format_financing(item) for item in changed_financings)
+            + tuple(_format_event(event) for event in daily_events)
+            + tuple(_format_financing(item) for item in daily_financings)
         )
-        top_lines = _top_signal_lines(result, daily_lines)
+        backfill_project_ids = {
+            project.project_id for project in changed_projects
+        } - {
+            project.project_id for project in daily_projects
+        }
+        backfill_event_ids = {
+            event.event_id for event in changed_events
+        } - {
+            event.event_id for event in daily_events
+        }
+        backfill_financing_ids = {
+            item.financing_id for item in changed_financings
+        } - {
+            item.financing_id for item in daily_financings
+        }
+        backfill_lines = (
+            tuple(
+                line
+                for project in changed_projects
+                if project.project_id in backfill_project_ids
+                for line in _format_project(project, event_by_id, compact=False)
+            )
+            + tuple(
+                _format_event(event)
+                for event in changed_events
+                if event.event_id in backfill_event_ids
+            )
+            + tuple(
+                _format_financing(item)
+                for item in changed_financings
+                if item.financing_id in backfill_financing_ids
+            )
+        )
+        top_lines = _top_signal_lines(result, current_run_groups)
 
         open_projects = sorted(
             (
@@ -254,8 +326,14 @@ class ReportRenderer:
                 lines=daily_lines,
                 protected=True,
                 project_ids=tuple(
-                    project.project_id for project in changed_projects
+                    project.project_id for project in daily_projects
                 ),
+            ),
+            _Section(
+                heading="本轮新核实/历史补录",
+                lines=backfill_lines,
+                protected=True,
+                project_ids=tuple(sorted(backfill_project_ids)),
             ),
             _Section(
                 heading="当前可报名及即将启动",
@@ -344,6 +422,7 @@ class ReportRenderer:
                 protected=True,
             )
         )
+        sections = _deduplicate_section_signals(sections)
 
         compressible_project_ids = {
             project_id
@@ -488,25 +567,38 @@ def _format_financing(item: Financing) -> str:
         f"- {_format_date(item.announced_at)}",
         _CATEGORY_LABELS[Category.COMMERCIAL_SPACE_FINANCING],
         _safe_text(item.company),
+    ]
+    round_text = (
         (
             _safe_text(item.round_name)
             if item.round_name
-            else subtype_labels.get(item.financing_subtype, "轮次未披露")
-        ),
-        f"金额：{_financing_amount(item)}",
-        (
+            else subtype_labels.get(item.financing_subtype)
+        )
+    )
+    if round_text:
+        parts.append(round_text)
+    amount_text = _financing_amount(item)
+    if amount_text is not None:
+        parts.append(f"金额：{amount_text}")
+    if item.investors:
+        parts.append(
             f"投资方：{'、'.join(_safe_text(value) for value in sorted(item.investors))}"
-            if item.investors
-            else "投资方：未披露"
-        ),
-        (
-            f"领域：{_safe_text(item.business_area)}"
-            if item.business_area
-            else "领域：未披露"
-        ),
-    ]
+        )
+    if item.business_area:
+        parts.append(f"领域：{_safe_text(item.business_area)}")
     urls = sorted({item.source_url, *item.source_urls})
-    source_links = [_link(_source_label(item, url), url) for url in urls]
+    labels = [_source_label(item, url) for url in urls]
+    label_counts = {
+        label: labels.count(label)
+        for label in set(labels)
+    }
+    label_indexes: dict[str, int] = {}
+    source_links: list[str] = []
+    for url, label in zip(urls, labels, strict=True):
+        if label_counts[label] > 1:
+            label_indexes[label] = label_indexes.get(label, 0) + 1
+            label = f"{label}{label_indexes[label]}"
+        source_links.append(_link(label, url))
     if source_links:
         parts.append(" / ".join(source_links))
     return "｜".join(parts)
@@ -532,15 +624,29 @@ def _source_label(item: Financing, url: str) -> str:
     return "来源"
 
 
-def _financing_amount(item: Financing) -> str:
+def _financing_amount(item: Financing) -> str | None:
     if not item.amount_disclosed or item.amount_cny is None:
-        return "未披露"
+        if _explicitly_undisclosed_amount(item):
+            return "未披露"
+        return None
     amount = item.amount_cny
     if amount >= 100_000_000:
         return f"{amount / 100_000_000:.2f}亿元"
     if amount >= 10_000:
         return f"{amount / 10_000:.2f}万元"
     return f"{amount:.2f}元"
+
+
+def _explicitly_undisclosed_amount(item: Financing) -> bool:
+    markers = ("未披露", "未公布", "未透露")
+    return any(
+        (
+            "amount" in evidence.field.lower()
+            or "金额" in evidence.field
+        )
+        and any(marker in evidence.quote for marker in markers)
+        for evidence in item.evidence
+    )
 
 
 def _financing_latest_at(item: Financing) -> datetime:
@@ -734,16 +840,63 @@ def _category_candidate_lines(
 
 def _top_signal_lines(
     result: RunResult,
-    formal_lines: tuple[str, ...],
+    formal_groups: tuple[tuple[str, ...], ...],
 ) -> tuple[str, ...]:
-    selected = [line for line in formal_lines if line.startswith("- ")][:3]
-    if len(selected) >= 3:
+    selected_groups = list(formal_groups[:3])
+    selected = [
+        line
+        for group in selected_groups
+        for line in group
+    ]
+    if len(selected_groups) >= 3:
         return tuple(selected)
     diagnostic_lines, _ = _diagnostic_signal_lines(result, None)
-    selected.extend(diagnostic_lines[: 3 - len(selected)])
+    remaining = 3 - len(selected_groups)
+    added = 0
+    for line in diagnostic_lines:
+        if line.startswith("- "):
+            if added >= remaining:
+                break
+            added += 1
+        selected.append(line)
     if selected:
         return tuple(selected)
     return ("- 本轮未形成可展示的境内主题相关信息。",)
+
+
+def _deduplicate_section_signals(
+    sections: list[_Section],
+) -> list[_Section]:
+    """Keep each fully rendered event line in its first, highest-priority section."""
+
+    seen: set[str] = set()
+    deduplicated: list[_Section] = []
+    for section in sections:
+        kept: list[str] = []
+        skip_continuation = False
+        for line in section.lines:
+            if line.startswith("- "):
+                skip_continuation = False
+                signal_key = line if "](" in line else None
+                if signal_key is not None and signal_key in seen:
+                    skip_continuation = True
+                    continue
+                if signal_key is not None:
+                    seen.add(signal_key)
+                kept.append(line)
+                continue
+            if line.startswith("  - ") and skip_continuation:
+                continue
+            kept.append(line)
+        deduplicated.append(
+            _Section(
+                heading=section.heading,
+                lines=tuple(kept),
+                protected=section.protected,
+                project_ids=section.project_ids,
+            )
+        )
+    return deduplicated
 
 
 def _diagnostic_signal_lines(

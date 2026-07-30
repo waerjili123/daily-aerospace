@@ -3,25 +3,21 @@
 
 ## 今日最值得看
 - 2026-07-21｜激光通信｜星间激光通信终端采购｜采购单位：中国航天采购中心｜状态：开放报名｜金额：800万元｜截止：投标截止 2026-07-25 17:00｜[查看原始公告](https://official.example/open)
+  - 公告链：[招标公告](https://official.example/open)（2026-07-21）
 - 2026-07-21｜激光通信｜2026-04-22边界项目｜采购单位：中国航天采购中心｜状态：已中标｜金额：1.2亿元｜[查看原始公告](https://official.example/award)
+  - 公告链：[采购意向](https://official.example/intention)（2026-04-22） → [中标结果](https://official.example/award)（2026-07-21）
 - 2026-07-22｜商业航天融资｜星河动力｜A轮｜金额：1.00亿元｜投资方：未来基金、航天资本｜领域：商业运载火箭｜[企业公告](https://company.example/financing) / [权威媒体报道](https://media.example/financing)
 
 ## 过去24小时新增/变化
-- 2026-07-21｜激光通信｜星间激光通信终端采购｜采购单位：中国航天采购中心｜状态：开放报名｜金额：800万元｜截止：投标截止 2026-07-25 17:00｜[查看原始公告](https://official.example/open)
-  - 公告链：[招标公告](https://official.example/open)（2026-07-21）
-- 2026-07-21｜激光通信｜2026-04-22边界项目｜采购单位：中国航天采购中心｜状态：已中标｜金额：1.2亿元｜[查看原始公告](https://official.example/award)
-  - 公告链：[采购意向](https://official.example/intention)（2026-04-22） → [中标结果](https://official.example/award)（2026-07-21）
-- 2026-07-22｜商业航天融资｜星河动力｜A轮｜金额：1.00亿元｜投资方：未来基金、航天资本｜领域：商业运载火箭｜[企业公告](https://company.example/financing) / [权威媒体报道](https://media.example/financing)
+- 暂无已核实信息
+
+## 本轮新核实/历史补录
+- 暂无已核实信息
 
 ## 当前可报名及即将启动
-- 2026-07-21｜激光通信｜星间激光通信终端采购｜采购单位：中国航天采购中心｜状态：开放报名｜金额：800万元｜截止：投标截止 2026-07-25 17:00｜[查看原始公告](https://official.example/open)
-  - 公告链：[招标公告](https://official.example/open)（2026-07-21）
+- 暂无已核实信息
 
 ## 激光通信
-- 2026-07-21｜激光通信｜2026-04-22边界项目｜采购单位：中国航天采购中心｜状态：已中标｜金额：1.2亿元｜[查看原始公告](https://official.example/award)
-  - 公告链：[采购意向](https://official.example/intention)（2026-04-22） → [中标结果](https://official.example/award)（2026-07-21）
-- 2026-07-21｜激光通信｜星间激光通信终端采购｜采购单位：中国航天采购中心｜状态：开放报名｜金额：800万元｜截止：投标截止 2026-07-25 17:00｜[查看原始公告](https://official.example/open)
-  - 公告链：[招标公告](https://official.example/open)（2026-07-21）
 - 候选线索（未核实）｜2026-07-22｜近 7 天｜疑似同项目公告｜原因：疑似项目匹配｜[查看原始来源](https://pending.example/item)
   - 摘要（未核实）：搜索结果摘要，仅供人工复核。
 
@@ -33,7 +29,7 @@
 - 暂无已核实信息
 
 ## 商业航天融资
-- 2026-07-22｜商业航天融资｜星河动力｜A轮｜金额：1.00亿元｜投资方：未来基金、航天资本｜领域：商业运载火箭｜[企业公告](https://company.example/financing) / [权威媒体报道](https://media.example/financing)
+- 暂无已核实信息
 
 ## 今日重点跟进
 - 截止 2026-07-25 17:00｜星间激光通信终端采购｜状态：开放报名｜[查看原始公告](https://official.example/open)

@@ -208,7 +208,7 @@ def test_category_section_surfaces_selected_search_candidate_rejected_downstream
     assert item.title not in followup
 
 
-def test_high_confidence_pending_signal_renders_in_top_and_category_sections():
+def test_high_confidence_pending_signal_renders_once_in_top_section():
     diagnostic = CandidateDiagnostic(
         source_url="https://www.stcn.com/article/guangyou",
         title="光邮星空完成Pre-A轮融资",
@@ -240,9 +240,8 @@ def test_high_confidence_pending_signal_renders_in_top_and_category_sections():
 
     assert "高可信待核实" in top
     assert "光邮星空完成Pre-A轮融资" in top
-    assert "高可信待核实" in financing_section
-    assert "轮次：Pre-A轮" in financing_section
-    assert "暂无已核实信息" not in financing_section
+    assert "高可信待核实" not in financing_section
+    assert markdown.count("光邮星空完成Pre-A轮融资") == 1
 
 
 def test_backfill_candidate_uses_90_day_time_label():
@@ -612,19 +611,19 @@ def test_stage_links_and_latest_link_are_original_urls(run_result: RunResult) ->
 def test_changed_projects_render_status_deadline_chain_without_event_duplicate(
     run_result: RunResult,
 ) -> None:
-    daily = (
+    top = (
         ReportRenderer(18000)
         .render(run_result)
-        .markdown.split("## 过去24小时新增/变化", maxsplit=1)[1]
-        .split("## 当前可报名及即将启动", maxsplit=1)[0]
+        .markdown.split("## 今日最值得看", maxsplit=1)[1]
+        .split("## 过去24小时新增/变化", maxsplit=1)[0]
     )
 
-    assert "状态：开放报名" in daily
-    assert "截止：投标截止 2026-07-25 17:00" in daily
-    assert "[查看原始公告](https://official.example/open)" in daily
-    assert "公告链：[招标公告](https://official.example/open)（2026-07-21）" in daily
-    assert daily.count("星间激光通信终端采购") == 1
-    assert "｜招标公告｜星间激光通信终端采购｜" not in daily
+    assert "状态：开放报名" in top
+    assert "截止：投标截止 2026-07-25 17:00" in top
+    assert "[查看原始公告](https://official.example/open)" in top
+    assert "公告链：[招标公告](https://official.example/open)（2026-07-21）" in top
+    assert top.count("星间激光通信终端采购") == 1
+    assert "｜招标公告｜星间激光通信终端采购｜" not in top
 
 
 def test_announcement_chain_is_sorted_by_date_then_event_id(
@@ -777,22 +776,26 @@ def test_rolling_pool_uses_three_calendar_months(run_result: RunResult) -> None:
     assert "2026-04-21历史项目" not in text
 
 
-def test_new_financing_appears_in_24h_and_financing_module(
+def test_new_financing_appears_once_in_top_section(
     run_result: RunResult,
 ) -> None:
     text = ReportRenderer(18000).render(run_result).markdown
-    daily, rest = text.split("## 当前可报名及即将启动", maxsplit=1)
+    top = text.split("## 今日最值得看", maxsplit=1)[1].split(
+        "## 过去24小时新增/变化", maxsplit=1
+    )[0]
+    rest = text.split("## 当前可报名及即将启动", maxsplit=1)[1]
     financing_section = rest.split("## 商业航天融资", maxsplit=1)[1].split(
         "## 今日重点跟进", maxsplit=1
     )[0]
 
-    assert "星河动力" in daily
-    assert "星河动力" in financing_section
-    assert "[企业公告](https://company.example/financing)" in financing_section
-    assert "[权威媒体报道](https://media.example/financing)" in financing_section
+    assert "星河动力" in top
+    assert "星河动力" not in financing_section
+    assert text.count("星河动力") == 1
+    assert "[企业公告](https://company.example/financing)" in top
+    assert "[权威媒体报道](https://media.example/financing)" in top
 
 
-def test_old_late_discovered_financing_is_only_in_24h_module() -> None:
+def test_old_late_discovered_financing_is_only_in_top_module() -> None:
     late_discovery = financing(
         announced_at=dt(3, 1),
         source_published_at={
@@ -806,12 +809,19 @@ def test_old_late_discovered_financing_is_only_in_24h_module() -> None:
             changed_financing_ids=[late_discovery.financing_id],
         )
     ).markdown
-    daily, rest = text.split("## 当前可报名及即将启动", maxsplit=1)
+    top = text.split("## 今日最值得看", maxsplit=1)[1].split(
+        "## 过去24小时新增/变化", maxsplit=1
+    )[0]
+    daily = text.split("## 过去24小时新增/变化", maxsplit=1)[1].split(
+        "## 本轮新核实/历史补录", maxsplit=1
+    )[0]
+    rest = text.split("## 当前可报名及即将启动", maxsplit=1)[1]
     financing_section = rest.split("## 商业航天融资", maxsplit=1)[1].split(
         "## 今日重点跟进", maxsplit=1
     )[0]
 
-    assert "星河动力" in daily
+    assert "星河动力" in top
+    assert "星河动力" not in daily
     assert "星河动力" not in financing_section
 
 
@@ -878,6 +888,84 @@ def test_financing_source_label_ignores_unstructured_quote_text() -> None:
     assert f"[投资方公告]({url})" not in text
 
 
+def test_financing_omits_amount_when_source_does_not_disclose_or_deny_it() -> None:
+    item = financing().model_copy(
+        update={
+            "amount_cny": None,
+            "amount_disclosed": False,
+            "investors": [],
+            "business_area": None,
+            "evidence": [
+                Evidence(
+                    field="financing_round",
+                    quote="公司完成A轮融资",
+                    source_url="https://company.example/financing",
+                )
+            ],
+        }
+    )
+
+    text = ReportRenderer(18000).render(
+        make_result(
+            state=StateBundle(financings=[item]),
+            changed_financing_ids=[item.financing_id],
+        )
+    ).markdown
+
+    assert "金额：未披露" not in text
+    assert "投资方：未披露" not in text
+    assert "领域：未披露" not in text
+
+
+def test_financing_renders_amount_undisclosed_only_with_explicit_evidence() -> None:
+    item = financing().model_copy(
+        update={
+            "amount_cny": None,
+            "amount_disclosed": False,
+            "evidence": [
+                Evidence(
+                    field="amount",
+                    quote="具体融资金额未披露",
+                    source_url="https://company.example/financing",
+                )
+            ],
+        }
+    )
+
+    text = ReportRenderer(18000).render(
+        make_result(
+            state=StateBundle(financings=[item]),
+            changed_financing_ids=[item.financing_id],
+        )
+    ).markdown
+
+    assert "金额：未披露" in text
+
+
+def test_multiple_generic_financing_sources_are_numbered() -> None:
+    urls = [
+        "https://media-one.example/financing",
+        "https://media-two.example/financing",
+    ]
+    item = financing(
+        source_urls=urls,
+        evidence=[
+            Evidence(field="title", quote="融资报道一", source_url=urls[0]),
+            Evidence(field="title", quote="融资报道二", source_url=urls[1]),
+        ],
+    )
+
+    text = ReportRenderer(18000).render(
+        make_result(
+            state=StateBundle(financings=[item]),
+            changed_financing_ids=[item.financing_id],
+        )
+    ).markdown
+
+    assert f"[来源1]({urls[0]})" in text
+    assert f"[来源2]({urls[1]})" in text
+
+
 def test_report_has_no_html_or_markdown_table(run_result: RunResult) -> None:
     text = ReportRenderer(18000).render(run_result).markdown
 
@@ -924,7 +1012,7 @@ def test_trend_text_escapes_block_markers_without_creating_headings() -> None:
     text = ReportRenderer(18000).render(result).markdown
     heading_lines = [line for line in text.splitlines() if line.startswith("#")]
 
-    assert len(heading_lines) == 10
+    assert len(heading_lines) == 11
     assert heading_lines[0].startswith("# 中国激光与商业航天情报日报")
     assert all(line.startswith("## ") for line in heading_lines[1:])
     assert (
@@ -955,6 +1043,7 @@ def test_empty_sections_keep_all_headings_and_explicit_empty_notice() -> None:
     assert text.count("- 暂无已核实信息") >= 6
     for heading in (
         "## 过去24小时新增/变化",
+        "## 本轮新核实/历史补录",
         "## 当前可报名及即将启动",
         "## 激光通信",
         "## 激光武器/反无人机",
