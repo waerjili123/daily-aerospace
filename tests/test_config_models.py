@@ -88,6 +88,11 @@ def test_workflow_is_manual_bounded_and_defaults_to_dry_run():
     assert summary_step["shell"] == "python"
     assert "GITHUB_STEP_SUMMARY" in summary_step["run"]
     assert "data/run-result.json" in summary_step["run"]
+    assert "data/candidate-diagnostics.json" in summary_step["run"]
+    assert "Candidate verification diagnostics" in summary_step["run"]
+    assert "verification_event_key" in summary_step["run"]
+    assert "evidence_count" in summary_step["run"]
+    assert "urlsplit" in summary_step["run"]
     assert 'glob("*.md")' not in summary_step["run"]
     assert "DINGTALK" not in summary_step["run"]
     failure_summary = _workflow_step(

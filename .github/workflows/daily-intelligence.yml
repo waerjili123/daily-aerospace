@@ -89,6 +89,7 @@ jobs:
           import json
           import os
           from pathlib import Path
+          from urllib.parse import urlsplit
 
           workspace = Path.cwd().resolve()
           manifest_path = workspace / "data/run-result.json"
@@ -111,6 +112,48 @@ jobs:
 
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write(report_path.read_text(encoding="utf-8"))
+              diagnostics_path = workspace / "data/candidate-diagnostics.json"
+              if diagnostics_path.is_file():
+                  diagnostics = json.loads(
+                      diagnostics_path.read_text(encoding="utf-8")
+                  )
+                  summary.write("\n## Candidate verification diagnostics\n\n")
+                  shown = 0
+                  for row in diagnostics:
+                      if not isinstance(row, dict):
+                          continue
+                      if not (
+                          row.get("selected_for_report")
+                          or row.get("elastic_attempted")
+                      ):
+                          continue
+
+                      def inline(value):
+                          text = str(value or "unknown")
+                          return (
+                              text.replace("`", "'")
+                              .replace("\r", " ")
+                              .replace("\n", " ")
+                          )
+
+                      hostname = urlsplit(
+                          str(row.get("source_url") or "")
+                      ).hostname or "unknown"
+                      summary.write(
+                          "- "
+                          f"title=`{inline(row.get('title'))}`; "
+                          f"domain=`{inline(hostname)}`; "
+                          f"status=`{inline(row.get('status'))}`; "
+                          f"reason=`{inline(row.get('reason'))}`; "
+                          f"event_key=`{inline(row.get('verification_event_key'))}`; "
+                          f"evidence={int(row.get('evidence_count') or 0)}; "
+                          f"elastic_attempted={bool(row.get('elastic_attempted'))}\n"
+                      )
+                      shown += 1
+                      if shown >= 12:
+                          break
+                  if shown == 0:
+                      summary.write("- No report-selected or elastic candidates.\n")
 
       - name: Publish failure diagnostics summary
         if: failure()
