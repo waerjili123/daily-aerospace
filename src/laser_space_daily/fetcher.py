@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import ipaddress
 import json
 import re
 import socket
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,13 @@ from .models import Candidate, DomainModel
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+PublicationDateSource = Literal["metadata", "json_ld", "visible_header"]
+
+
+@dataclass(frozen=True)
+class PublicationDateEvidence:
+    quote: str
+    source: PublicationDateSource
 
 
 class FetchError(RuntimeError):
@@ -49,6 +57,8 @@ class FetchedPage(DomainModel):
     text: str
     fetched_at: datetime
     content_hash: str
+    publication_date_quote: str | None = None
+    publication_date_source: PublicationDateSource | None = None
 
 
 Resolver = Callable[..., Iterable[Any]]
@@ -228,7 +238,7 @@ class PageFetcher:
 
         soup = BeautifulSoup(html, "html.parser")
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
-        published_metadata = _extract_published_metadata(soup)
+        publication_date = _extract_publication_date_evidence(soup)
         try:
             extracted = trafilatura.extract(html)
         except Exception:
@@ -238,8 +248,8 @@ class PageFetcher:
                 element.decompose()
             extracted = soup.get_text("\n", strip=True)
         text = extracted.strip()
-        if published_metadata and published_metadata not in text:
-            text = f"{text}\n页面发布时间：{published_metadata}".strip()
+        if publication_date and publication_date.quote not in text:
+            text = f"{text}\n页面发布时间：{publication_date.quote}".strip()
 
         return FetchedPage(
             requested_url=requested_url,
@@ -249,16 +259,57 @@ class PageFetcher:
             text=text,
             fetched_at=datetime.now(BEIJING),
             content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            publication_date_quote=(
+                publication_date.quote if publication_date is not None else None
+            ),
+            publication_date_source=(
+                publication_date.source if publication_date is not None else None
+            ),
         )
 
 
 _PUBLISHED_DATE_VALUE = re.compile(
     r"20\d{2}(?:-|/|\.)\d{1,2}(?:-|/|\.)\d{1,2}"
+    r"(?:[T\s]\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)?"
     r"|20\d{2}年\d{1,2}月\d{1,2}日"
+    r"(?:\s*\d{1,2}:\d{2}(?::\d{2})?)?"
+)
+_VISIBLE_PUBLISH_LABEL = re.compile(
+    r"(?:发布日期|发布时间|发布于|刊发时间|Published\s*(?:at|on)?\s*[:：]?)",
+    flags=re.IGNORECASE,
+)
+_VISIBLE_MODIFIED_LABEL = re.compile(
+    r"(?:更新|修改|修订|最后更新|最后修改|updated|modified|last[-\s]?modified)",
+    flags=re.IGNORECASE,
+)
+_VISIBLE_CONTEXT_TOKENS = (
+    "publish",
+    "release",
+    "date",
+    "time",
+    "byline",
+    "author",
+    "article-info",
+    "article_info",
+    "article-meta",
+    "article_meta",
+    "detail-tags",
+    "detail_tags",
+    "header",
+)
+_VISIBLE_EXCLUDED_CONTEXT_TOKENS = (
+    "footer",
+    "related",
+    "recommend",
+    "history",
+    "archive",
+    "sidebar",
 )
 
 
-def _extract_published_metadata(soup: BeautifulSoup) -> str | None:
+def _extract_publication_date_evidence(
+    soup: BeautifulSoup,
+) -> PublicationDateEvidence | None:
     selectors_and_attributes = (
         ('meta[property="article:published_time"]', "content"),
         ('meta[property="og:published_time"]', "content"),
@@ -273,7 +324,7 @@ def _extract_published_metadata(soup: BeautifulSoup) -> str | None:
         if element is not None:
             value = str(element.get(attribute) or "").strip()
             if _is_published_date_value(value):
-                return value
+                return PublicationDateEvidence(value, "metadata")
 
     for element in soup.select('script[type="application/ld+json"]'):
         try:
@@ -282,8 +333,96 @@ def _extract_published_metadata(soup: BeautifulSoup) -> str | None:
             continue
         value = _find_json_date_published(payload)
         if value is not None and _is_published_date_value(value):
-            return value
+            return PublicationDateEvidence(value, "json_ld")
+
+    visible = _extract_visible_header_date(soup)
+    if visible is not None:
+        return PublicationDateEvidence(visible, "visible_header")
     return None
+
+
+def _extract_published_metadata(soup: BeautifulSoup) -> str | None:
+    """Compatibility wrapper returning the preferred publication-date quote."""
+    evidence = _extract_publication_date_evidence(soup)
+    return evidence.quote if evidence is not None else None
+
+
+def _extract_visible_header_date(soup: BeautifulSoup) -> str | None:
+    for label_node in soup.find_all(string=_VISIBLE_PUBLISH_LABEL):
+        element = label_node.parent
+        for _ in range(3):
+            if element is None:
+                break
+            text = element.get_text(" ", strip=True)
+            if (
+                text
+                and len(text) <= 240
+                and _visible_date_candidate(element, text)
+            ):
+                match = _PUBLISHED_DATE_VALUE.search(text)
+                if match is not None:
+                    return match.group(0).strip()
+            if _PUBLISHED_DATE_VALUE.search(text):
+                break
+            element = element.parent
+
+    selectors = (
+        "time",
+        ".releaseTime",
+        ".release-time",
+        ".detail-tags",
+        ".detail_tags",
+        '[class*="publish"]',
+        '[id*="publish"]',
+        '[class*="release"]',
+        '[id*="release"]',
+        '[class*="byline"]',
+        '[id*="byline"]',
+        '[class*="article-info"]',
+        '[class*="article_info"]',
+        '[class*="article-meta"]',
+        '[class*="article_meta"]',
+        '[class*="header"]',
+    )
+    seen: set[int] = set()
+    for element in soup.select(", ".join(selectors)):
+        identity = id(element)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        text = element.get_text(" ", strip=True)
+        if not text or len(text) > 240:
+            continue
+        if _visible_date_candidate(element, text):
+            match = _PUBLISHED_DATE_VALUE.search(text)
+            if match is not None:
+                return match.group(0).strip()
+    return None
+
+
+def _visible_date_candidate(element: Any, text: str) -> bool:
+    if _VISIBLE_MODIFIED_LABEL.search(text):
+        return False
+    if _PUBLISHED_DATE_VALUE.search(text) is None:
+        return False
+
+    semantic_parts: list[str] = []
+    current = element
+    for _ in range(4):
+        if current is None:
+            break
+        if getattr(current, "attrs", None):
+            semantic_parts.append(str(current.get("id") or ""))
+            classes = current.get("class") or ()
+            semantic_parts.extend(str(item) for item in classes)
+        current = current.parent
+    semantics = " ".join(semantic_parts).lower()
+    if any(token in semantics for token in _VISIBLE_EXCLUDED_CONTEXT_TOKENS):
+        return False
+    return bool(
+        _VISIBLE_PUBLISH_LABEL.search(text)
+        or any(token in semantics for token in _VISIBLE_CONTEXT_TOKENS)
+    )
 
 
 def _find_json_date_published(value: Any) -> str | None:

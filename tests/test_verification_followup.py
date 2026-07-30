@@ -116,6 +116,84 @@ def test_planner_distributes_three_queries_across_two_events_before_revisit():
     assert planned[2].allocation_reason == "retry_same_target"
 
 
+def test_planner_covers_three_distinct_events_before_any_retry():
+    first = target(url="https://www.stcn.com/article/first")
+    second = target(url="https://media.example/second", grade=SourceGrade.C)
+    second.analysis.organization = "谱星航天"
+    second.analysis.title = "谱星航天完成Pre-A轮融资"
+    second.analysis.financing_round = "Pre-A轮"
+    third = target(url="https://media.example/third", grade=SourceGrade.C)
+    third.analysis.organization = "微光启航"
+    third.analysis.title = "微光启航完成天使++轮融资"
+    third.analysis.financing_round = "天使++轮"
+
+    planned = planner(max_targets=3).plan(NOW, [first, second, third])
+
+    assert len(planned) == 3
+    assert {item.target_url for item in planned} == {
+        first.candidate.url,
+        second.candidate.url,
+        third.candidate.url,
+    }
+    assert len({item.target_key for item in planned}) == 3
+    assert [item.allocation_reason for item in planned[1:]] == [
+        "cover_distinct_target",
+        "cover_distinct_target",
+    ]
+
+
+def test_full_and_short_company_names_share_stable_event_key():
+    full = target(url="https://www.chinaventure.com.cn/news/guangyou")
+    full.analysis.organization = "北京光邮星空科技有限公司"
+    full.analysis.title = "光邮星空完成Pre-A轮融资"
+    full.analysis.financing_round = "Pre-A和Pre-A+轮"
+    short = target(
+        url="https://m.pedaily.cn/news/guangyou",
+        published_at=NOW - timedelta(days=2),
+    )
+    short.analysis.organization = "光邮星空"
+    short.analysis.title = "光邮星空完成Pre-A轮融资"
+    short.analysis.financing_round = "Pre-A轮"
+    followup = planner(max_targets=3)
+
+    full_key = followup.event_key(full, [short])
+    short_key = followup.event_key(short, [full])
+    planned = followup.plan(NOW, [full, short])
+
+    assert full_key == short_key
+    assert full_key.startswith("光邮星空|")
+    assert len({item.target_key for item in planned}) == 1
+
+
+def test_same_company_different_round_or_distant_date_stays_distinct():
+    first = target(
+        url="https://www.stcn.com/article/pre-a",
+        published_at=NOW - timedelta(days=20),
+    )
+    different_round = target(
+        url="https://www.stcn.com/article/a",
+        published_at=NOW - timedelta(days=20),
+    )
+    different_round.analysis.financing_round = "A轮"
+    different_round.analysis.title = "龙擎空天完成A轮融资"
+    distant_same_round = target(
+        url="https://www.stcn.com/article/pre-a-later",
+        published_at=NOW - timedelta(days=5),
+    )
+
+    round_plans = planner(
+        elastic_budget=2,
+        max_targets=2,
+    ).plan(NOW, [first, different_round])
+    date_plans = planner(
+        elastic_budget=2,
+        max_targets=2,
+    ).plan(NOW, [first, distant_same_round])
+
+    assert len({item.target_key for item in round_plans}) == 2
+    assert len({item.target_key for item in date_plans}) == 2
+
+
 def test_same_event_sources_do_not_crowd_out_a_second_event():
     first = target(url="https://www.stcn.com/article/first")
     first_copy = target(url="https://www.pedaily.cn/article/first-copy")
@@ -320,6 +398,32 @@ def test_run_no_new_count_stops_target_at_threshold():
     )
 
     assert planned is None
+
+
+def test_run_no_new_target_transfers_slot_to_next_distinct_event():
+    blocked = target(url="https://www.stcn.com/article/blocked")
+    alternatives = []
+    for index, organization in enumerate(("谱星航天", "微光启航", "星河动力"), 1):
+        item = target(
+            url=f"https://media.example/event-{index}",
+            grade=SourceGrade.C,
+            published_at=NOW - timedelta(days=index),
+        )
+        item.analysis.organization = organization
+        item.analysis.title = f"{organization}完成Pre-A轮融资"
+        item.analysis.financing_round = "Pre-A轮"
+        alternatives.append(item)
+    followup = planner(max_targets=3)
+    blocked_key = followup.event_key(blocked)
+
+    planned = followup.plan_next(
+        NOW,
+        [blocked, *alternatives],
+        no_new_counts={blocked_key: 2},
+    )
+
+    assert planned is not None
+    assert planned.target_url == alternatives[0].candidate.url
 
 
 def test_planner_prioritizes_existing_b_source_over_newer_c_source():

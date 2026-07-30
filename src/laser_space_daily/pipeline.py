@@ -21,7 +21,7 @@ from .discovery import (
     normalize_url,
     select_search_candidates,
 )
-from .fetcher import FetchError
+from .fetcher import FetchError, PublicationDateSource
 from .matching import (
     content_version_id,
     event_fingerprint,
@@ -70,6 +70,8 @@ class CandidateDiagnostic(DomainModel):
     elastic_ineligible_reason: str | None = None
     elastic_attempted: bool = False
     elastic_not_attempted_reason: str | None = None
+    publication_date_source: PublicationDateSource | None = None
+    verification_event_key: str | None = None
 
 
 class RunResult(DomainModel):
@@ -251,12 +253,18 @@ class Pipeline:
             self._researcher is not None
             and getattr(research, "mode", "daily") == "backfill"
         )
+        preferred_financing_domains = (
+            self._verification_followup.financing_b_domains
+            if self._verification_followup is not None
+            else ()
+        )
         selection = select_search_candidates(
             search_rows,
             now,
             minimum=40 if is_backfill else 5,
             maximum=40 if is_backfill else 10,
             fallback_max_days=90 if is_backfill else 30,
+            preferred_domains=preferred_financing_domains,
         )
         metrics.raw_search_count = selection.raw_search_count
         metrics.valid_shape_count = selection.valid_shape_count
@@ -351,6 +359,8 @@ class Pipeline:
         followup_target_urls: set[str] = set()
         run_no_new_by_target: dict[str, int] = {}
         followup_no_new_by_url: dict[str, int] = {}
+        diagnostic_followup_targets: list[FollowupTarget] = []
+        verification_event_key_by_url: dict[str, str] = {}
         prior_pending = {
             normalize_url(item.source_url): item
             for item in state.pending
@@ -476,6 +486,7 @@ class Pipeline:
                     minimum=followup_limit,
                     maximum=followup_limit,
                     fallback_max_days=self._verification_followup.pool_days,
+                    preferred_domains=preferred_financing_domains,
                 )
                 preferred_rows: list[Candidate] = []
                 for row in rows:
@@ -490,6 +501,7 @@ class Pipeline:
                         minimum=1,
                         maximum=1,
                         fallback_max_days=self._verification_followup.pool_days,
+                        preferred_domains=preferred_financing_domains,
                     )
                     if preferred_selection.candidates:
                         preferred_rows.extend(preferred_selection.candidates)
@@ -594,6 +606,15 @@ class Pipeline:
                     trace_item["stop_reason"] = "no_new_source_threshold"
                 research_trace.append(trace_item)
 
+            diagnostic_followup_targets = current_followup_targets()
+            for diagnostic_target in diagnostic_followup_targets:
+                verification_event_key_by_url[
+                    normalize_url(diagnostic_target.candidate.url)
+                ] = self._verification_followup.event_key(
+                    diagnostic_target,
+                    diagnostic_followup_targets,
+                )
+
         if followup_plans:
             metrics.verification_targets_count = len(followup_target_urls)
             metrics.elastic_trigger_reasons = list(
@@ -638,6 +659,34 @@ class Pipeline:
                     False,
                     f"{stage}_failed",
                 )
+            fetched_page = fetched_by_url.get(item.url)
+            publication_date_source = (
+                getattr(fetched_page, "publication_date_source", None)
+                if not isinstance(fetched_page, BaseException)
+                else None
+            )
+            verification_event_key = verification_event_key_by_url.get(
+                normalized_url
+            )
+            if (
+                verification_event_key is None
+                and self._verification_followup is not None
+                and analyzed is not None
+                and decision is not None
+                and analyzed.organization
+                and analyzed.category is not None
+                and analyzed.event_type is not None
+            ):
+                diagnostic_target = FollowupTarget(
+                    candidate=item,
+                    analysis=analyzed,
+                    decision=decision,
+                    pending=prior_pending.get(normalized_url),
+                )
+                verification_event_key = self._verification_followup.event_key(
+                    diagnostic_target,
+                    diagnostic_followup_targets,
+                )
             diagnostics_by_url[normalized_url] = CandidateDiagnostic(
                 source_url=_diagnostic_url(item.url),
                 title=item.title,
@@ -667,6 +716,8 @@ class Pipeline:
                     if eligibility.eligible and not attempted
                     else None
                 ),
+                publication_date_source=publication_date_source,
+                verification_event_key=verification_event_key,
             )
 
         for item in candidates:

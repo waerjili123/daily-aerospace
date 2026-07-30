@@ -584,6 +584,7 @@ def select_search_candidates(
     minimum: int = 5,
     maximum: int = 10,
     fallback_max_days: int = 30,
+    preferred_domains: Iterable[str] = (),
 ) -> CandidateSelection:
     """Apply the approved shape, relevance and date gates to web-search rows."""
     if now.tzinfo is None:
@@ -592,6 +593,19 @@ def select_search_candidates(
         raise ValueError("candidate bounds must satisfy 0 <= minimum <= maximum")
     if fallback_max_days < 8 or fallback_max_days > 90:
         raise ValueError("fallback_max_days must be between 8 and 90")
+    normalized_preferred_domains = tuple(
+        dict.fromkeys(
+            domain.strip().casefold().rstrip(".")
+            for domain in preferred_domains
+            if domain.strip()
+        )
+    )
+
+    def candidate_rank(item: tuple[Candidate, int]) -> tuple[object, ...]:
+        return _candidate_rank(
+            item,
+            preferred_domains=normalized_preferred_domains,
+        )
 
     input_rows = list(rows)
     valid: list[Candidate] = []
@@ -631,7 +645,7 @@ def select_search_candidates(
 
     # Rank before event-level grouping so an old repost can never hide a newer
     # source for the same event.
-    eligible.sort(key=_candidate_rank)
+    eligible.sort(key=candidate_rank)
     deduplicated: list[tuple[Candidate, int]] = []
     corroborating_by_primary: dict[str, list[tuple[Candidate, int]]] = {}
     event_duplicate_count = 0
@@ -669,9 +683,9 @@ def select_search_candidates(
         elif age <= timedelta(days=fallback_max_days):
             fallback.append((row, score))
 
-    recent.sort(key=_candidate_rank)
-    fallback.sort(key=_candidate_rank)
-    unknown.sort(key=_candidate_rank)
+    recent.sort(key=candidate_rank)
+    fallback.sort(key=candidate_rank)
+    unknown.sort(key=candidate_rank)
 
     selected = recent[:maximum]
     fallback_used: list[tuple[Candidate, int]] = []
@@ -689,7 +703,9 @@ def select_search_candidates(
         candidate
         for primary, _score in selected
         for candidate in _select_corroborating_candidates(
-            primary, corroborating_by_primary.get(primary.url, ())
+            primary,
+            corroborating_by_primary.get(primary.url, ()),
+            preferred_domains=normalized_preferred_domains,
         )
     )
     return CandidateSelection(
@@ -711,9 +727,16 @@ def _select_corroborating_candidates(
     candidates: Iterable[tuple[Candidate, int]],
     *,
     maximum: int = 2,
+    preferred_domains: Iterable[str] = (),
 ) -> tuple[Candidate, ...]:
     """Keep bounded alternate sources, preferring independent hostnames."""
-    ranked = sorted(candidates, key=_candidate_rank)
+    ranked = sorted(
+        candidates,
+        key=lambda item: _candidate_rank(
+            item,
+            preferred_domains=preferred_domains,
+        ),
+    )
     primary_host = (urlsplit(primary.url).hostname or "").casefold()
     selected: list[Candidate] = []
     selected_hosts = {primary_host} if primary_host else set()
@@ -1010,14 +1033,32 @@ def _term_hits(text: str, terms: Iterable[str]) -> int:
     return sum(1 for term in terms if term.casefold() in text)
 
 
-def _candidate_rank(item: tuple[Candidate, int]) -> tuple[object, ...]:
+def _candidate_rank(
+    item: tuple[Candidate, int],
+    *,
+    preferred_domains: Iterable[str] = (),
+) -> tuple[object, ...]:
     row, relevance_score = item
     published_at = row.source_published_at
     published_rank = (
         -published_at.astimezone(UTC).timestamp() if published_at is not None else 0
     )
-    official_rank = 0 if row.discovery_source.startswith("official:") else 1
-    return (published_rank, official_rank, -relevance_score, row.url)
+    if row.discovery_source.startswith("official:"):
+        source_rank = 0
+    elif _url_in_domains(row.url, preferred_domains):
+        source_rank = 1
+    else:
+        source_rank = 2
+    return (source_rank, published_rank, -relevance_score, row.url)
+
+
+def _url_in_domains(url: str, domains: Iterable[str]) -> bool:
+    host = (urlsplit(url).hostname or "").casefold().rstrip(".")
+    return any(
+        host == domain or host.endswith(f".{domain}")
+        for domain in domains
+        if domain
+    )
 
 
 _TRACKING_KEYS = frozenset({"spm", "from", "source"})

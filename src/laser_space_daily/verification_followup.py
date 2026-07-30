@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from urllib.parse import urlsplit
 
@@ -126,6 +127,22 @@ class VerificationFollowupPlanner:
     def stop_after_no_new(self) -> int:
         return self._stop_after_no_new
 
+    @property
+    def financing_b_domains(self) -> tuple[str, ...]:
+        return self._financing_b_domains
+
+    def event_key(
+        self,
+        target: FollowupTarget,
+        peers: Iterable[FollowupTarget] = (),
+    ) -> str:
+        group = [
+            item
+            for item in (target, *tuple(peers))
+            if _same_verification_event(target, item)
+        ]
+        return _verification_event_group_key(group)
+
     def plan(
         self,
         now: datetime,
@@ -161,37 +178,60 @@ class VerificationFollowupPlanner:
         if now.tzinfo is None:
             raise ValueError("verification planning time must include timezone")
         ranked = sorted(
-            (
-                target
-                for target in targets
-                if self._eligible(now, target, no_new_counts or {})
-            ),
+            (target for target in targets if self._eligible(now, target, {})),
             key=self._sort_key,
         )
-        eligible: list[FollowupTarget] = []
-        seen_target_keys: set[str] = set()
+        eligible_groups: list[tuple[FollowupTarget, str]] = []
+        grouped_targets: list[list[FollowupTarget]] = []
         for target in ranked:
-            target_key = self._target_key(target)
-            if target_key in seen_target_keys:
+            existing_group = next(
+                (
+                    group
+                    for group in grouped_targets
+                    if _same_verification_event(target, group[0])
+                ),
+                None,
+            )
+            if existing_group is not None:
+                existing_group.append(target)
                 continue
-            seen_target_keys.add(target_key)
-            eligible.append(target)
-            if len(eligible) >= self._max_targets:
-                break
-        if not eligible or self._elastic_budget == 0:
+            grouped_targets.append([target])
+        for group in grouped_targets:
+            target_key = _verification_event_group_key(group)
+            persisted_no_new = max(
+                (
+                    item.pending.consecutive_no_new_sources
+                    for item in group
+                    if item.pending is not None
+                ),
+                default=0,
+            )
+            effective_no_new = (no_new_counts or {}).get(
+                target_key,
+                persisted_no_new,
+            )
+            if effective_no_new < self._stop_after_no_new:
+                eligible_groups.append((group[0], target_key))
+                if len(eligible_groups) >= self._max_targets:
+                    break
+        if not eligible_groups or self._elastic_budget == 0:
             return None
 
         run_attempted = {_normalize_query(item) for item in attempted_queries}
         targeted = set(targeted_urls)
-        untried_targets = [
-            target
-            for target in eligible
-            if self._target_key(target) not in targeted
+        untried_groups = [
+            item
+            for item in eligible_groups
+            if item[1] not in targeted
         ]
-        prefer_distinct = bool(targeted) and len(targeted) < min(2, self._max_targets)
-        ordered = untried_targets if prefer_distinct and untried_targets else eligible
+        prefer_distinct = bool(targeted) and len(targeted) < self._max_targets
+        ordered = (
+            untried_groups
+            if prefer_distinct and untried_groups
+            else eligible_groups
+        )
 
-        for target in ordered:
+        for target, target_key in ordered:
             persisted_attempts = {
                 _normalize_query(item)
                 for item in (target.pending.attempted_queries if target.pending else ())
@@ -202,7 +242,6 @@ class VerificationFollowupPlanner:
                     continue
                 clue = self._official_search_clue(target)
                 missing_evidence_fields = _target_evidence_gaps(target)
-                target_key = self._target_key(target)
                 is_distinct = target_key not in targeted
                 is_switch = bool(targeted) and is_distinct
                 return PlannedFollowup(
@@ -316,8 +355,15 @@ class VerificationFollowupPlanner:
             SourceGrade.A: 1,
             SourceGrade.C: 2,
         }[target.decision.source_grade]
+        evidence_gaps = _target_evidence_gaps(target)
+        gap_rank = (
+            0
+            if target.decision.reason == "missing_required_fields:published_at"
+            else (1 if len(evidence_gaps) <= 1 else 2)
+        )
         return (
             0 if self._official_search_clue(target).domains else 1,
+            gap_rank,
             missing_fields,
             source_gap_rank,
             grade_rank,
@@ -415,14 +461,181 @@ class VerificationFollowupPlanner:
 
     @staticmethod
     def _target_key(target: FollowupTarget) -> str:
-        analysis = target.analysis
-        values = (
-            analysis.organization or target.candidate.title,
-            analysis.category.value if analysis.category else "",
-            analysis.event_type.value if analysis.event_type else "",
-            analysis.financing_round or "",
+        return _verification_event_group_key([target])
+
+
+_VERIFICATION_ROUND = re.compile(
+    r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
+    r"天使\+{0,2}|种子|战略投资|战略)"
+)
+_ORGANIZATION_LEGAL_SUFFIXES = (
+    "股份有限公司",
+    "有限责任公司",
+    "科技有限公司",
+    "有限公司",
+)
+_ORGANIZATION_LOCATION_PREFIXES = (
+    "北京",
+    "上海",
+    "深圳",
+    "广州",
+    "天津",
+    "重庆",
+    "合肥",
+    "西安",
+    "成都",
+    "武汉",
+    "南京",
+    "杭州",
+    "苏州",
+    "无锡",
+)
+
+
+def _same_verification_event(
+    left: FollowupTarget,
+    right: FollowupTarget,
+) -> bool:
+    left_analysis = left.analysis
+    right_analysis = right.analysis
+    if left_analysis.category is not right_analysis.category:
+        return False
+    if left_analysis.event_type is not right_analysis.event_type:
+        return False
+    if not (
+        _organization_aliases(
+            left_analysis.organization or left.candidate.title
         )
-        return "|".join(_normalize_name(value) for value in values)
+        & _organization_aliases(
+            right_analysis.organization or right.candidate.title
+        )
+    ):
+        return False
+
+    left_date = _verification_event_date(left)
+    right_date = _verification_event_date(right)
+    if left_date is None or right_date is None:
+        return False
+    if abs((left_date.date() - right_date.date()).days) > 7:
+        return False
+
+    left_rounds = _verification_rounds(left_analysis.financing_round)
+    right_rounds = _verification_rounds(right_analysis.financing_round)
+    if left_rounds and right_rounds:
+        return not left_rounds.isdisjoint(right_rounds)
+    return _verification_title(left) == _verification_title(right)
+
+
+def _verification_event_group_key(
+    targets: Iterable[FollowupTarget],
+) -> str:
+    rows = tuple(targets)
+    if not rows:
+        return ""
+    aliases = set().union(
+        *(
+            _organization_aliases(
+                item.analysis.organization or item.candidate.title
+            )
+            for item in rows
+        )
+    )
+    organization = min(aliases, key=lambda value: (len(value), value), default="")
+    categories = sorted(
+        {
+            item.analysis.category.value
+            for item in rows
+            if item.analysis.category is not None
+        }
+    )
+    event_types = sorted(
+        {
+            item.analysis.event_type.value
+            for item in rows
+            if item.analysis.event_type is not None
+        }
+    )
+    rounds = sorted(
+        set().union(
+            *(
+                _verification_rounds(item.analysis.financing_round)
+                for item in rows
+            )
+        )
+    )
+    dates = sorted(
+        value.date().isoformat()
+        for item in rows
+        if (value := _verification_event_date(item)) is not None
+    )
+    event_detail = ",".join(rounds)
+    if not event_detail:
+        event_detail = f"title:{min(_verification_title(item) for item in rows)}"
+    return "|".join(
+        (
+            organization,
+            ",".join(categories),
+            ",".join(event_types),
+            event_detail,
+            dates[0] if dates else "date:unknown",
+        )
+    )
+
+
+def _verification_event_date(target: FollowupTarget) -> datetime | None:
+    return target.analysis.published_at or target.candidate.source_published_at
+
+
+def _verification_rounds(value: str | None) -> frozenset[str]:
+    if not value:
+        return frozenset()
+    return frozenset(
+        re.sub(r"[\s-]+", "", matched.casefold())
+        for matched in _VERIFICATION_ROUND.findall(
+            unicodedata.normalize("NFKC", value)
+        )
+    )
+
+
+def _organization_aliases(value: str) -> frozenset[str]:
+    normalized = re.sub(
+        r"[\s·•（）()“”\"'，,：:丨|]+",
+        "",
+        unicodedata.normalize("NFKC", value).casefold(),
+    )
+    if not normalized:
+        return frozenset()
+    aliases = {normalized}
+    legal_core: str | None = None
+    for suffix in _ORGANIZATION_LEGAL_SUFFIXES:
+        normalized_suffix = suffix.casefold()
+        if normalized.endswith(normalized_suffix):
+            legal_core = normalized[: -len(normalized_suffix)]
+            aliases.add(legal_core)
+            break
+    if legal_core:
+        for prefix in _ORGANIZATION_LOCATION_PREFIXES:
+            normalized_prefix = prefix.casefold()
+            if not legal_core.startswith(normalized_prefix):
+                continue
+            short = legal_core[len(normalized_prefix) :]
+            if short:
+                aliases.add(short)
+                if short.endswith("科技") and len(short) > len("科技") + 1:
+                    aliases.add(short[: -len("科技")])
+            break
+    return frozenset(alias for alias in aliases if alias)
+
+
+def _verification_title(target: FollowupTarget) -> str:
+    return re.sub(
+        r"[\s*｜|_\-—:：·•（）()“”\"'，,]+",
+        "",
+        unicodedata.normalize(
+            "NFKC",
+            target.analysis.title or target.candidate.title,
+        ).casefold(),
+    )
 
 
 def _query_value(value: str) -> str:

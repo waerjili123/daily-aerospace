@@ -128,7 +128,12 @@ def test_committed_config_contains_no_secret_values():
                         "中关村科学城",
                     ]
                 },
-                "independent_media_domains": ["stcn.com", "pedaily.cn", "cls.cn"],
+                "independent_media_domains": [
+                    "stcn.com",
+                    "pedaily.cn",
+                    "chinaventure.com.cn",
+                    "cls.cn",
+                ],
         },
     }
     config = _base_yaml("config.yaml")
@@ -405,6 +410,7 @@ def test_production_financing_registry_is_explicit_and_used_by_pipeline(monkeypa
     assert settings.financing_sources.independent_media_domains == [
         "stcn.com",
         "pedaily.cn",
+        "chinaventure.com.cn",
         "cls.cn",
     ]
     assert settings.financing_sources.official_investor_domains[
@@ -417,6 +423,13 @@ def test_production_financing_registry_is_explicit_and_used_by_pipeline(monkeypa
     assert registry.grade_financing("https://news.landspace.com/a", "蓝箭航天") is SourceGrade.A
     assert registry.grade_financing("https://landspace.com/a", "无关航天公司") is SourceGrade.C
     assert registry.grade_financing("https://www.cls.cn/detail/1", "蓝箭航天") is SourceGrade.B
+    assert (
+        registry.grade_financing(
+            "https://www.chinaventure.com.cn/news/1",
+            "光邮星空",
+        )
+        is SourceGrade.B
+    )
     investor_evidence = [
         Evidence(
             field="investors",

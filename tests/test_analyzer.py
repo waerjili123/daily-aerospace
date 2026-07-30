@@ -764,6 +764,38 @@ def test_rule_fallback_extracts_grounded_financing_fields_from_realistic_article
     }.issubset({item.field for item in result.evidence})
 
 
+def test_rule_fallback_uses_event_subject_not_later_spacex_comparison():
+    page = make_page(
+        "2026年7月7日，北京微光启航科技有限公司宣布完成亿元级天使++轮融资。\n"
+        "公司将资金用于液体火箭和发动机研制，属于商业航天股权融资。\n"
+        "行业背景部分随后比较了美国SpaceX的可回收火箭路线。",
+        title="微光启航完成亿元级天使++轮融资",
+        url="https://www.chinaventure.com.cn/news/116-test.html",
+    )
+
+    result = RuleFallbackAnalyzer().analyze(page)
+
+    assert result.in_china is True
+    assert result.in_scope is True
+    assert result.category is Category.COMMERCIAL_SPACE_FINANCING
+    assert result.organization == "微光启航"
+
+
+def test_rule_fallback_keeps_foreign_subject_out_when_china_is_only_market():
+    page = make_page(
+        "美国SpaceX完成新一轮商业航天股权融资。\n"
+        "该公司随后表示将继续关注中国市场的发展机会。",
+        title="美国SpaceX完成新一轮融资",
+        url="https://media.example.cn/spacex-financing",
+    )
+
+    result = RuleFallbackAnalyzer().analyze(page)
+
+    assert result.in_china is False
+    assert result.in_scope is False
+    assert result.category is None
+
+
 def test_rule_fallback_marks_explicitly_undisclosed_financing_amount():
     page = make_page(
         "2026年7月16日，北京光邮星空科技有限公司宣布完成Pre-A轮融资，"

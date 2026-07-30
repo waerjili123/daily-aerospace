@@ -350,9 +350,11 @@ class RuleFallbackAnalyzer:
     def analyze(self, page: FetchedPage) -> AnalysisResult:
         text = f"{page.title}\n{page.text}"
         normalized = _normalize(text)
-        in_china = not _has_explicit_foreign_signal(text) and (
-            _has_domestic_signal(text)
-            or _is_approved_domestic_source(page.final_url)
+        subject_text = _event_subject_text(page.title, page.text)
+        in_china = _is_domestic_event_subject(
+            page.title,
+            subject_text,
+            approved_domestic_source=_is_approved_domestic_source(page.final_url),
         )
         category = self._category(normalized)
         if (
@@ -399,10 +401,12 @@ class RuleFallbackAnalyzer:
         )
         evidence: list[Evidence] = []
         if in_china:
-            country_quote = _domestic_subject_quote(text) or _first_line_matching(
-                page.text,
+            country_quote = _domestic_subject_quote(
+                subject_text
+            ) or _first_line_matching(
+                subject_text,
                 ("中国境内", "我国境内", "国内项目", "中国", "我国", "国内"),
-            ) or _first_domestic_line(page.text)
+            ) or _first_domestic_line(subject_text)
             evidence.append(
                 Evidence(
                     field="in_china",
@@ -860,6 +864,74 @@ def _first_domestic_line(text: str) -> str | None:
             and not _has_explicit_foreign_signal(line)
         ),
         None,
+    )
+
+
+def _event_subject_text(title: str, body: str) -> str:
+    selected: list[str] = []
+    total = 0
+    for raw in (title, *body.splitlines()):
+        for segment in re.split(r"(?<=[。！？!?；;])\s*", raw):
+            value = segment.strip()
+            if not value or value in selected:
+                continue
+            if len(value) > 600:
+                value = value[:600].rstrip()
+            selected.append(value)
+            total += len(value)
+            if len(selected) >= 8 or total >= 1_800:
+                return "\n".join(selected)
+    return "\n".join(selected)
+
+
+def _is_domestic_event_subject(
+    title: str,
+    subject_text: str,
+    *,
+    approved_domestic_source: bool,
+) -> bool:
+    if _has_strong_domestic_event_subject(title):
+        return True
+    if _has_foreign_event_subject(title):
+        return False
+    if _has_strong_domestic_event_subject(subject_text):
+        return True
+    if _has_foreign_event_subject(subject_text):
+        return False
+    return (
+        _has_domestic_signal(subject_text) or approved_domestic_source
+    ) and not _has_explicit_foreign_signal(subject_text)
+
+
+def _has_strong_domestic_event_subject(text: str) -> bool:
+    if not _has_event_action(text):
+        return False
+    if _domestic_subject_quote(text) is not None:
+        return True
+    return any(
+        cue in text
+        for cue in (
+            "中国境内",
+            "我国境内",
+            "国内项目",
+            "中国商业航天企业",
+            "国内商业航天企业",
+        )
+    )
+
+
+def _has_foreign_event_subject(text: str) -> bool:
+    return _has_explicit_foreign_signal(text) and _has_event_action(text)
+
+
+def _has_event_action(text: str) -> bool:
+    normalized = _normalize(text)
+    return _contains_any(
+        normalized,
+        (
+            *RuleFallbackAnalyzer._PROCUREMENT_TERMS,
+            *RuleFallbackAnalyzer._FINANCING_TERMS,
+        ),
     )
 
 

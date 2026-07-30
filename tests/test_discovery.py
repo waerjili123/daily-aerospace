@@ -520,6 +520,49 @@ def test_search_selection_merges_same_company_and_round_across_media(
     assert selection.event_duplicate_count == 1
 
 
+def test_search_selection_prefers_registered_b_sources_over_newer_c_repost(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title="光邮星空完成Pre-A轮融资",
+            summary="商业航天卫星激光通信公司光邮星空完成Pre-A轮股权融资。",
+            url="https://finance.example.com/new-repost",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now,
+        ),
+        _search_candidate(
+            title="光邮星空完成Pre-A轮融资",
+            summary="商业航天卫星激光通信公司光邮星空完成Pre-A轮股权融资。",
+            url="https://m.pedaily.cn/news/guangyou",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=1),
+        ),
+        _search_candidate(
+            title="光邮星空完成Pre-A轮融资",
+            summary="商业航天卫星激光通信公司光邮星空完成Pre-A轮股权融资。",
+            url="https://www.chinaventure.com.cn/news/guangyou",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=2),
+        ),
+    ]
+
+    selection = select_search_candidates(
+        rows,
+        fixed_now,
+        minimum=0,
+        preferred_domains=("pedaily.cn", "chinaventure.com.cn"),
+    )
+
+    assert [item.url for item in selection.candidates] == [
+        "https://m.pedaily.cn/news/guangyou"
+    ]
+    assert [item.url for item in selection.corroborating_candidates] == [
+        "https://www.chinaventure.com.cn/news/guangyou",
+        "https://finance.example.com/new-repost",
+    ]
+
+
 def test_search_selection_keeps_distinct_financing_rounds(fixed_now) -> None:
     rows = [
         _search_candidate(

@@ -301,18 +301,24 @@ def test_fetcher_falls_back_to_beautifulsoup_when_trafilatura_raises(monkeypatch
 
 
 @pytest.mark.parametrize(
-    "metadata",
+    ("metadata", "expected_source"),
     [
-        '<meta property="article:published_time" content="2026-07-21T14:02:00+08:00">',
-        '<meta itemprop="datePublished" content="2026-07-21">',
+        (
+            '<meta property="article:published_time" content="2026-07-21T14:02:00+08:00">',
+            "metadata",
+        ),
+        ('<meta itemprop="datePublished" content="2026-07-21">', "metadata"),
         (
             '<script type="application/ld+json">'
             '{"@type":"NewsArticle","datePublished":"2026-07-21T14:02:00+08:00"}'
-            "</script>"
+            "</script>",
+            "json_ld",
         ),
     ],
 )
-def test_fetcher_preserves_page_published_metadata_for_grounding(metadata):
+def test_fetcher_preserves_page_published_metadata_for_grounding(
+    metadata, expected_source
+):
     html = (
         f"<html><head><title>融资新闻</title>{metadata}</head>"
         "<body><main>光邮星空完成Pre-A轮融资。</main></body></html>"
@@ -327,6 +333,81 @@ def test_fetcher_preserves_page_published_metadata_for_grounding(metadata):
 
     assert "光邮星空完成Pre-A轮融资" in fetched.text
     assert "页面发布时间：2026-07-21" in fetched.text
+    assert fetched.publication_date_quote.startswith("2026-07-21")
+    assert fetched.publication_date_source == expected_source
+
+
+@pytest.mark.parametrize(
+    ("header", "expected_quote"),
+    [
+        (
+            '<div class="releaseTime">发布时间：2026-07-07 14:13:24</div>',
+            "2026-07-07 14:13:24",
+        ),
+        (
+            '<div class="detail-tags">所属地区：上海 发布日期:2026-07-03</div>',
+            "2026-07-03",
+        ),
+        (
+            '<div class="article-header flex items-center">'
+            "<span>来源：顶端新闻</span><span>2026-07-16 08:36</span></div>",
+            "2026-07-16 08:36",
+        ),
+    ],
+)
+def test_fetcher_preserves_conservative_visible_header_date(
+    header, expected_quote
+):
+    html = (
+        "<html><head><title>融资新闻</title></head><body>"
+        f"{header}<main>光邮星空完成Pre-A轮融资。</main></body></html>"
+    )
+
+    fetched = PageFetcher(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, text=html)
+        ),
+        resolver=public_resolver,
+    ).fetch(PUBLIC_CANDIDATE)
+
+    assert fetched.publication_date_quote == expected_quote
+    assert fetched.publication_date_source == "visible_header"
+    assert expected_quote in fetched.text
+
+
+@pytest.mark.parametrize(
+    "non_publication_date",
+    [
+        '<aside class="related"><span class="releaseTime">'
+        "发布日期：2026-07-03</span></aside>",
+        '<aside class="related"><div><span class="releaseTime">'
+        "发布日期：2026-07-04</span></div></aside>",
+        '<div class="article-header"><span class="update-time">'
+        "最后更新：2026-07-22 09:00</span></div>",
+        '<footer class="footer"><span class="byline">'
+        "2026-07-01 08:00</span></footer>",
+        "<main>该项目计划于2026-08-20投标。</main>",
+    ],
+)
+def test_fetcher_does_not_treat_related_updated_or_body_dates_as_publication(
+    non_publication_date,
+):
+    html = (
+        "<html><head><title>融资新闻</title></head><body>"
+        "<main>光邮星空完成Pre-A轮融资。</main>"
+        f"{non_publication_date}</body></html>"
+    )
+
+    fetched = PageFetcher(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, text=html)
+        ),
+        resolver=public_resolver,
+    ).fetch(PUBLIC_CANDIDATE)
+
+    assert fetched.publication_date_quote is None
+    assert fetched.publication_date_source is None
+    assert "页面发布时间：" not in fetched.text
 
 
 def test_fetcher_does_not_promote_modified_or_invalid_metadata_as_publication_date():
@@ -346,6 +427,8 @@ def test_fetcher_does_not_promote_modified_or_invalid_metadata_as_publication_da
 
     assert "页面发布时间" not in fetched.text
     assert "2026-07-22" not in fetched.text
+    assert fetched.publication_date_quote is None
+    assert fetched.publication_date_source is None
 
 
 def test_source_registry_uses_longest_registered_domain():
@@ -820,6 +903,97 @@ def test_two_independent_b_sources_verify_financing(
         [(financing_claim(second_media_page), second_media_page)],
     )
     assert decision.status == VerificationStatus.VERIFIED, decision.reason
+
+
+def test_chinaventure_single_b_stays_pending_but_pedaily_corroboration_verifies():
+    chinaventure_url = "https://www.chinaventure.com.cn/news/116-test.html"
+    pedaily_url = "https://m.pedaily.cn/news/566-test"
+    chinaventure_page = page(
+        chinaventure_url,
+        "微光启航完成亿元级人民币天使++轮融资\n"
+        "发布时间：2026-07-07 14:13:24\n"
+        "2026年7月7日，北京微光启航科技有限公司宣布完成亿元级人民币天使++轮融资。\n"
+        "资金将用于商业航天液体火箭和发动机研发。\n"
+        "行业背景随后比较了美国SpaceX的可回收火箭路线。",
+    )
+    pedaily_page = page(
+        pedaily_url,
+        "微光启航完成亿元级人民币天使++轮融资\n"
+        "页面发布时间：2026-07-07\n"
+        "2026年7月7日，北京微光启航科技有限公司完成亿元级人民币天使++轮融资。\n"
+        "本轮资金用于商业航天液体火箭、发动机及核心部件研发。",
+    )
+    chinaventure_analysis = RuleFallbackAnalyzer().analyze(chinaventure_page)
+    pedaily_analysis = RuleFallbackAnalyzer().analyze(pedaily_page)
+    verifier = RuleVerifier(
+        SourceRegistry(
+            {},
+            financing_b_domains=(
+                "chinaventure.com.cn",
+                "pedaily.cn",
+            ),
+        )
+    )
+
+    single = verifier.verify(chinaventure_analysis, chinaventure_page)
+    corroborated = verifier.verify(
+        chinaventure_analysis,
+        chinaventure_page,
+        [(pedaily_analysis, pedaily_page)],
+    )
+
+    assert single.status is VerificationStatus.PENDING
+    assert (
+        single.reason
+        == "financing_requires_official_or_two_independent_b_sources"
+    )
+    assert corroborated.status is VerificationStatus.VERIFIED
+    assert (
+        corroborated.reason
+        == "verified_financing_two_independent_sources"
+    )
+    assert {item.source_grade for item in corroborated.source_records} == {
+        SourceGrade.B
+    }
+    assert {item.source_url for item in corroborated.source_records} == {
+        chinaventure_url,
+        pedaily_url,
+    }
+
+
+def test_two_b_financing_sources_with_conflicting_amount_stay_pending():
+    chinaventure_url = "https://www.chinaventure.com.cn/news/conflict.html"
+    pedaily_url = "https://m.pedaily.cn/news/conflict"
+    primary = page(
+        chinaventure_url,
+        "2026年7月7日，北京微光启航科技有限公司宣布完成亿元级天使++轮融资。\n"
+        "公司属于商业航天液体火箭企业。",
+    )
+    conflicting = page(
+        pedaily_url,
+        "2026年7月7日，北京微光启航科技有限公司宣布完成数千万元天使++轮融资。\n"
+        "公司属于商业航天液体火箭企业。",
+    )
+    primary_analysis = RuleFallbackAnalyzer().analyze(primary)
+    conflicting_analysis = RuleFallbackAnalyzer().analyze(conflicting)
+    verifier = RuleVerifier(
+        SourceRegistry(
+            {},
+            financing_b_domains=(
+                "chinaventure.com.cn",
+                "pedaily.cn",
+            ),
+        )
+    )
+
+    decision = verifier.verify(
+        primary_analysis,
+        primary,
+        [(conflicting_analysis, conflicting)],
+    )
+
+    assert decision.status is VerificationStatus.PENDING
+    assert decision.reason == "financing_corroboration_conflict"
 
 
 def test_two_b_sources_on_same_registered_domain_are_not_independent(

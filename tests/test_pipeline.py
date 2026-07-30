@@ -7,7 +7,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from laser_space_daily.fetcher import FetchError, FetchedPage
-from laser_space_daily.analyzer import AnalyzerError, ResilientAnalyzer
+from laser_space_daily.analyzer import (
+    AnalyzerError,
+    ResilientAnalyzer,
+    RuleFallbackAnalyzer,
+)
 from laser_space_daily.agentic_discovery import (
     AgenticDiscoveryResult,
     ResearchTraceItem,
@@ -37,7 +41,11 @@ from laser_space_daily.models import (
 from laser_space_daily.pipeline import Pipeline
 from laser_space_daily.report import ReportRenderer
 from laser_space_daily.verification_followup import VerificationFollowupPlanner
-from laser_space_daily.verifier import VerificationDecision
+from laser_space_daily.verifier import (
+    RuleVerifier,
+    SourceRegistry,
+    VerificationDecision,
+)
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -403,6 +411,129 @@ def test_pipeline_fetches_event_duplicate_search_source_for_corroboration(deps) 
 
     assert set(deps.fetcher.calls) == {primary_url, corroborating_url}
     assert len(deps.verifier.corroborating_by_url[corroborating_url]) == 1
+
+
+def test_pipeline_strictly_verifies_consistent_chinaventure_and_pedaily_sources(
+    deps,
+) -> None:
+    announced_at = datetime(2026, 7, 7, tzinfo=BEIJING)
+    chinaventure_url = "https://www.chinaventure.com.cn/news/116-test.html"
+    pedaily_url = "https://m.pedaily.cn/news/566-test"
+    common_summary = (
+        "北京微光启航科技有限公司完成亿元级天使++轮股权融资，"
+        "资金用于商业航天液体火箭和发动机研发。"
+    )
+    chinaventure = candidate(
+        chinaventure_url,
+        source="search:bocha",
+        title="微光启航完成亿元级人民币天使++轮融资",
+        summary=common_summary,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=announced_at,
+    )
+    pedaily = candidate(
+        pedaily_url,
+        source="search:bocha",
+        title="微光启航完成亿元级人民币天使++轮融资",
+        summary=common_summary,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=announced_at,
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(chinaventure, pedaily),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    chinaventure_text = (
+        "微光启航完成亿元级人民币天使++轮融资\n"
+        "发布时间：2026-07-07 14:13:24\n"
+        "2026年7月7日，北京微光启航科技有限公司宣布完成亿元级人民币天使++轮融资。\n"
+        "资金将用于商业航天液体火箭和发动机研发。\n"
+        "行业背景随后比较了美国SpaceX的可回收火箭路线。"
+    )
+    pedaily_text = (
+        "微光启航完成亿元级人民币天使++轮融资\n"
+        "页面发布时间：2026-07-07\n"
+        "2026年7月7日，北京微光启航科技有限公司完成亿元级人民币天使++轮融资。\n"
+        "本轮资金用于商业航天液体火箭、发动机及核心部件研发。"
+    )
+    deps.fetcher.pages[chinaventure_url] = FetchedPage(
+        requested_url=chinaventure_url,
+        final_url=chinaventure_url,
+        status_code=200,
+        title=chinaventure.title,
+        text=chinaventure_text,
+        fetched_at=NOW,
+        content_hash="1" * 64,
+        publication_date_quote="2026-07-07 14:13:24",
+        publication_date_source="visible_header",
+    )
+    deps.fetcher.pages[pedaily_url] = FetchedPage(
+        requested_url=pedaily_url,
+        final_url=pedaily_url,
+        status_code=200,
+        title=pedaily.title,
+        text=pedaily_text,
+        fetched_at=NOW,
+        content_hash="2" * 64,
+        publication_date_quote="2026-07-07",
+        publication_date_source="metadata",
+    )
+    deps.official_collector.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["analyzer"] = RuleFallbackAnalyzer()
+    arguments["verifier"] = RuleVerifier(
+        SourceRegistry(
+            {},
+            financing_b_domains=(
+                "chinaventure.com.cn",
+                "pedaily.cn",
+            ),
+        )
+    )
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=(
+            "chinaventure.com.cn",
+            "pedaily.cn",
+        ),
+        elastic_budget=0,
+        pool_days=90,
+        max_targets=3,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert result.metrics.verified_count >= 1
+    assert len(result.state.financings) == 1
+    financing = result.state.financings[0]
+    assert financing.verification_status is VerificationStatus.VERIFIED
+    assert {record.source_url for record in financing.source_records} == {
+        chinaventure_url,
+        pedaily_url,
+    }
+    diagnostics = {
+        item.source_url: item for item in result.candidate_diagnostics
+    }
+    assert diagnostics[chinaventure_url].publication_date_source == "visible_header"
+    assert diagnostics[pedaily_url].publication_date_source == "metadata"
+    assert (
+        diagnostics[chinaventure_url].verification_event_key
+        == diagnostics[pedaily_url].verification_event_key
+    )
 
 
 def test_pipeline_persists_two_b_source_evidence_records(deps) -> None:
@@ -1362,6 +1493,103 @@ def test_pipeline_distributes_empty_followups_two_plus_one(deps):
     ]
     assert result.metrics.elastic_search_calls == 3
     assert result.metrics.verification_targets_count == 2
+    assert result.metrics.search_budget_used == 15
+
+
+def test_pipeline_covers_three_distinct_events_with_three_elastic_calls(deps):
+    rows = [
+        candidate(
+            "https://www.stcn.com/article/longqing",
+            source="search:bocha",
+            title="龙擎空天完成Pre-A+轮融资",
+            summary="龙擎空天完成Pre-A+轮融资并用于低轨卫星产品研发。",
+            category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+            source_published_at=NOW - timedelta(days=3),
+        ),
+        candidate(
+            "https://news.qq.com/article/puxing",
+            source="search:bocha",
+            title="谱星航天完成Pre-A轮融资",
+            summary="谱星航天完成Pre-A轮融资并用于商业航天卫星制造。",
+            category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+            source_published_at=NOW - timedelta(days=2),
+        ),
+        candidate(
+            "https://finance.ifeng.com/article/weiguang",
+            source="search:bocha",
+            title="微光启航完成天使++轮融资",
+            summary="微光启航完成天使++轮融资并用于商业航天液体火箭研发。",
+            category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+            source_published_at=NOW - timedelta(days=1),
+        ),
+    ]
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=tuple(rows),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    details = (
+        ("龙擎空天", "Pre-A+轮", SourceGrade.B),
+        ("谱星航天", "Pre-A轮", SourceGrade.C),
+        ("微光启航", "天使++轮", SourceGrade.C),
+    )
+    for row, (organization, round_name, grade) in zip(rows, details):
+        row_analysis = analysis(
+            row.url,
+            event_type=EventType.FINANCING,
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            title=row.title,
+            published_at=row.source_published_at,
+        )
+        row_analysis.organization = organization
+        row_analysis.financing_round = round_name
+        deps.analyzer.results[row.url] = row_analysis
+        deps.verifier.decisions[row.url] = VerificationDecision(
+            status=VerificationStatus.PENDING,
+            reason="financing_requires_official_or_two_independent_b_sources",
+            source_grade=grade,
+        )
+
+    deps.official_collector.rows = []
+    deps.search_provider.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert len(elastic_trace) == 3
+    assert {item["target_url"] for item in elastic_trace} == {
+        row.url for row in rows
+    }
+    assert [item["allocation_reason"] for item in elastic_trace[1:]] == [
+        "cover_distinct_target",
+        "cover_distinct_target",
+    ]
+    assert result.metrics.verification_targets_count == 3
     assert result.metrics.search_budget_used == 15
 
 

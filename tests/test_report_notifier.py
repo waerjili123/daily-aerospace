@@ -1254,6 +1254,8 @@ def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None
             "elastic_ineligible_reason": None,
             "elastic_attempted": False,
             "elastic_not_attempted_reason": None,
+            "publication_date_source": None,
+            "verification_event_key": None,
         }
     ]
     assert cli_deps.notifier.calls == 0
