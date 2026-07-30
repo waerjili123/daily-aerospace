@@ -12,7 +12,7 @@
 “有无信息”开发：已推送并创建 PR #5，尚未合并
 新版本真实 dry-run：已执行，搜索门槛通过但暴露候选展示缺陷
 候选展示缺陷：已修复并通过真实钉钉试发验证
-离线测试：465 passed
+离线测试：475 passed
 钉钉真实试发：已成功执行一次；一次性分支已恢复 dry-run
 定时任务：当前未启用 schedule
 仓库可见性：public，未修改
@@ -699,3 +699,45 @@ codex/verification-promotion-20260728
 - 未触发 Actions，未发送钉钉。
 - 未修改 Secrets、仓库可见性或 workflow 启停/定时配置。
 - 未合并任何 PR，未执行 `dry_run=false`。
+
+## 2026-07-30 Actions #24 失败诊断与产物隔离
+
+Actions #24（提交 `1b35fdc`，分支
+`codex/verification-promotion-20260728`）：
+
+- [x] 离线测试和 dry-run 分支保护步骤均已通过。
+- [x] `Run daily pipeline` 在运行约 2 分 35 秒后因 `TypeError` 退出，CLI
+  返回既有流水线错误码 4。
+- [x] Node.js 20 弃用提示和 checkout 后处理的 Git 128 是警告，不是本次
+  流水线失败的根因。
+- [x] 页面显示的 2026-07-26 日报摘要和 Artifact 中的旧报告/数据来自旧
+  workflow 的 `if: always()` 兜底上传，不是 #24 生成的新日报。
+- [x] 旧 CLI 只记录异常类型，未记录安全的阶段和代码位置，因此仅凭 #24
+  现有日志还不能确定 `TypeError` 的具体代码根因。
+
+本轮本地修复：
+
+- [x] CLI 在失败时原子写入脱敏的 `data/failure-diagnostics.json`，只包含稳定
+  阶段、异常类型、发生时间和仓库内 Python 栈帧，不包含异常消息、局部变量、
+  请求内容、模型输出或环境值。
+- [x] CLI 在成功时写入 `data/run-result.json`，明确记录本次实际生成的日报路径；
+  成功与失败元数据互斥，并在每次运行开始时清理旧元数据。
+- [x] workflow 成功时只按 `run-result.json` 展示本次日报并上传
+  `daily-intelligence-report`，不再扫描目录选取历史最新文件。
+- [x] workflow 失败时只展示脱敏诊断并上传
+  `daily-intelligence-failure-diagnostics`；若失败发生在诊断文件生成前，则明确提示
+  查看失败步骤日志，不回退到旧日报。
+- [x] 既有退出码保持不变：配置 2、通知 3、流水线 4。
+- [x] CLI 与 workflow 聚焦回归：101 passed。
+- [x] 完整离线测试：475 passed。
+- [ ] `TypeError` 的业务根因仍需在本修复推送后，通过下一次手动 dry-run 的阶段与
+  仓库栈帧继续定位；本轮没有把诊断增强误当作根因修复。
+
+安全边界保持不变：
+
+- workflow 仍仅有 `workflow_dispatch`，并强制 `--dry-run`、
+  `--discovery-mode daily`、`--max-queries 12`。
+- 日常基础 12、弹性最多 3、总硬上限 15 均未改变。
+- 本地开发期间未触发 Actions、未发送钉钉、未推送分支。
+- 未修改 Secrets、仓库可见性、workflow 启停/定时配置或 `dry_run` 策略。
+- 未合并任何 PR。
