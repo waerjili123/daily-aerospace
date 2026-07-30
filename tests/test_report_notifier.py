@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+import laser_space_daily.cli as cli_module
 from laser_space_daily.analyzer import DeepSeekAnalyzer, ResilientAnalyzer
 from laser_space_daily.cli import (
     CliDependencies,
@@ -1313,6 +1314,227 @@ def test_pipeline_failure_returns_four_and_does_not_push(cli_deps, tmp_path: Pat
     assert not (tmp_path / "reports").exists()
 
 
+def _failing_cli_dependencies(cli_deps, factory) -> CliDependencies:
+    return CliDependencies(
+        settings_loader=cli_deps.dependencies.settings_loader,
+        pipeline_factory=factory,
+        renderer_factory=cli_deps.dependencies.renderer_factory,
+        notifier_factory=cli_deps.dependencies.notifier_factory,
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "expected_stage", "expected_code"),
+    [
+        ("pipeline_build", "pipeline_build", 4),
+        ("pipeline_run", "pipeline_run", 4),
+        ("report_render", "report_render", 4),
+        ("report_write", "report_write", 4),
+        ("diagnostics_write", "diagnostics_write", 4),
+        ("notification", "notification", 3),
+    ],
+)
+def test_cli_failure_diagnostic_records_stable_stage(
+    cli_deps,
+    monkeypatch,
+    failure_point: str,
+    expected_stage: str,
+    expected_code: int,
+) -> None:
+    error = TypeError(
+        "https://example.invalid/?access_token=secret-query-token"
+    )
+    dependencies = cli_deps.dependencies
+    arguments = [
+        "--config",
+        str(cli_deps.config),
+        "--now",
+        "2026-07-22T07:30:00+08:00",
+    ]
+
+    if failure_point == "pipeline_build":
+        def failing_factory(settings):
+            del settings
+            raise error
+
+        dependencies = _failing_cli_dependencies(cli_deps, failing_factory)
+    elif failure_point == "pipeline_run":
+        cli_deps.pipeline.error = error
+    elif failure_point == "report_render":
+        cli_deps.renderer.error = error
+    elif failure_point == "report_write":
+        def failing_report_write(path, report):
+            del path, report
+            raise error
+
+        monkeypatch.setattr(
+            cli_module,
+            "_atomic_write_report",
+            failing_report_write,
+        )
+    elif failure_point == "diagnostics_write":
+        cli_deps.pipeline.result = cli_deps.pipeline.result.model_copy(
+            update={"research_trace": [{"round_index": 1}]}
+        )
+
+        def failing_trace_write(path, trace):
+            del path, trace
+            raise error
+
+        monkeypatch.setattr(
+            cli_module,
+            "_atomic_write_research_trace",
+            failing_trace_write,
+        )
+    else:
+        cli_deps.notifier.error = error
+
+    code = run_cli(arguments, dependencies=dependencies)
+
+    diagnostic_path = (
+        cli_deps.settings.data_dir / "failure-diagnostics.json"
+    )
+    payload = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    assert code == expected_code
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "failure"
+    assert payload["stage"] == expected_stage
+    assert payload["error_type"] == "TypeError"
+    assert payload["occurred_at"] == "2026-07-22T07:30:00+08:00"
+    assert payload["frames"]
+    assert all(
+        set(frame) == {"path", "line", "function"}
+        for frame in payload["frames"]
+    )
+    assert all(
+        not Path(str(frame["path"])).is_absolute()
+        for frame in payload["frames"]
+    )
+
+
+def test_cli_failure_diagnostic_and_log_exclude_exception_secrets(
+    cli_deps,
+    caplog,
+) -> None:
+    cli_deps.pipeline.error = TypeError(
+        "https://example.invalid/?access_token=secret-query-token"
+    )
+
+    with caplog.at_level(logging.ERROR):
+        code = run_cli(
+            [
+                "--config",
+                str(cli_deps.config),
+                "--now",
+                "2026-07-22T07:30:00+08:00",
+            ],
+            dependencies=cli_deps.dependencies,
+        )
+
+    diagnostic_path = (
+        cli_deps.settings.data_dir / "failure-diagnostics.json"
+    )
+    serialized = (
+        diagnostic_path.read_text(encoding="utf-8") + caplog.text
+    )
+    assert code == 4
+    assert "pipeline_run" in caplog.text
+    assert "secret-query-token" not in serialized
+    assert "access_token" not in serialized
+
+
+def test_cli_diagnostic_write_failure_preserves_primary_exit_code(
+    cli_deps,
+    monkeypatch,
+    caplog,
+) -> None:
+    cli_deps.pipeline.error = TypeError("primary-secret")
+
+    def failing_json_write(path, payload):
+        del path, payload
+        raise OSError("diagnostic-secret")
+
+    monkeypatch.setattr(cli_module, "_atomic_write_json", failing_json_write)
+
+    with caplog.at_level(logging.ERROR):
+        code = run_cli(
+            [
+                "--config",
+                str(cli_deps.config),
+                "--now",
+                "2026-07-22T07:30:00+08:00",
+            ],
+            dependencies=cli_deps.dependencies,
+        )
+
+    assert code == 4
+    assert "diagnostic_write_failed error=OSError" in caplog.text
+    assert "primary-secret" not in caplog.text
+    assert "diagnostic-secret" not in caplog.text
+
+
+def test_successful_dry_run_replaces_stale_metadata_with_run_result(
+    cli_deps,
+) -> None:
+    data_dir = cli_deps.settings.data_dir
+    data_dir.mkdir(parents=True)
+    (data_dir / "failure-diagnostics.json").write_text(
+        '{"status":"stale"}\n',
+        encoding="utf-8",
+    )
+    (data_dir / "run-result.json").write_text(
+        '{"status":"stale"}\n',
+        encoding="utf-8",
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--dry-run",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    assert code == 0
+    assert not (data_dir / "failure-diagnostics.json").exists()
+    payload = json.loads(
+        (data_dir / "run-result.json").read_text(encoding="utf-8")
+    )
+    assert payload == {
+        "schema_version": 1,
+        "status": "success",
+        "occurred_at": "2026-07-22T07:30:00+08:00",
+        "report_path": "reports/2026-07-22.md",
+    }
+
+
+def test_failed_run_removes_stale_success_manifest(cli_deps) -> None:
+    data_dir = cli_deps.settings.data_dir
+    data_dir.mkdir(parents=True)
+    (data_dir / "run-result.json").write_text(
+        '{"status":"stale"}\n',
+        encoding="utf-8",
+    )
+    cli_deps.pipeline.error = TypeError("failure")
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    assert code == 4
+    assert not (data_dir / "run-result.json").exists()
+    assert (data_dir / "failure-diagnostics.json").exists()
+
+
 def test_config_failure_returns_two_without_secrets_in_output(
     cli_deps, caplog, capsys
 ) -> None:
@@ -1391,6 +1613,7 @@ def test_atomic_report_write_uses_same_directory_and_leaves_no_temp_file(
     assert {target for _source, target in replacements} == {
         report_dir / "2026-07-22.md",
         data_dir / "candidate-diagnostics.json",
+        data_dir / "run-result.json",
     }
     assert list(report_dir.glob("*.tmp")) == []
     assert list(data_dir.glob("*.tmp")) == []

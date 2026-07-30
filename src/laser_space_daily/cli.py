@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import traceback
 from typing import Any, NoReturn
 from zoneinfo import ZoneInfo
 
@@ -37,6 +38,9 @@ from .verification_followup import VerificationFollowupPlanner
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 LOGGER = logging.getLogger(__name__)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_FAILURE_DIAGNOSTICS_NAME = "failure-diagnostics.json"
+_RUN_RESULT_NAME = "run-result.json"
 
 
 class ConfigurationError(ValueError):
@@ -310,8 +314,104 @@ def _mark_test_report(report: RenderedReport) -> RenderedReport:
     return report.model_copy(update={"title": title, "markdown": markdown})
 
 
-def _log_failure(code: str, error: BaseException) -> None:
-    LOGGER.error("cli_failure code=%s error=%s", code, type(error).__name__)
+def _safe_traceback_frames(
+    error: BaseException,
+) -> list[dict[str, str | int]]:
+    frames: list[dict[str, str | int]] = []
+    for frame in traceback.extract_tb(error.__traceback__):
+        path = Path(frame.filename).resolve()
+        try:
+            relative = path.relative_to(_PROJECT_ROOT)
+        except ValueError:
+            continue
+        if relative.suffix != ".py":
+            continue
+        frames.append(
+            {
+                "path": relative.as_posix(),
+                "line": frame.lineno,
+                "function": frame.name,
+            }
+        )
+    return frames
+
+
+def _log_failure(
+    code: str,
+    stage: str,
+    error: BaseException,
+) -> None:
+    LOGGER.error(
+        "cli_failure code=%s error=%s stage=%s frames=%s",
+        code,
+        type(error).__name__,
+        stage,
+        json.dumps(_safe_traceback_frames(error), ensure_ascii=True),
+    )
+
+
+def _write_failure_diagnostic(
+    settings: Settings,
+    stage: str,
+    error: BaseException,
+    now: datetime,
+) -> None:
+    _atomic_write_json(
+        settings.data_dir / _FAILURE_DIAGNOSTICS_NAME,
+        {
+            "schema_version": 1,
+            "status": "failure",
+            "stage": stage,
+            "error_type": type(error).__name__,
+            "occurred_at": now.isoformat(),
+            "frames": _safe_traceback_frames(error),
+        },
+    )
+
+
+def _record_failure(
+    settings: Settings,
+    *,
+    code: str,
+    stage: str,
+    error: BaseException,
+    now: datetime,
+) -> None:
+    _log_failure(code, stage, error)
+    try:
+        (settings.data_dir / _RUN_RESULT_NAME).unlink(missing_ok=True)
+        _write_failure_diagnostic(settings, stage, error, now)
+    except Exception as diagnostic_error:
+        LOGGER.error(
+            "diagnostic_write_failed error=%s",
+            type(diagnostic_error).__name__,
+        )
+
+
+def _clear_run_metadata(settings: Settings) -> None:
+    for name in (_FAILURE_DIAGNOSTICS_NAME, _RUN_RESULT_NAME):
+        (settings.data_dir / name).unlink(missing_ok=True)
+
+
+def _write_run_result(
+    settings: Settings,
+    report_path: Path,
+    now: datetime,
+) -> None:
+    report_reference = (
+        report_path.resolve()
+        .relative_to(settings.report_dir.parent.resolve())
+        .as_posix()
+    )
+    _atomic_write_json(
+        settings.data_dir / _RUN_RESULT_NAME,
+        {
+            "schema_version": 1,
+            "status": "success",
+            "occurred_at": now.isoformat(),
+            "report_path": report_reference,
+        },
+    )
 
 
 def _configure_logging(level: str) -> None:
@@ -326,22 +426,51 @@ def _run_locked_cycle(
     now: datetime,
 ) -> int:
     try:
-        pipeline = selected.pipeline_factory(settings)
-    except ConfigurationError as error:
-        _log_failure("configuration", error)
-        return 2
+        _clear_run_metadata(settings)
     except Exception as error:
-        _log_failure("pipeline", error)
+        _record_failure(
+            settings,
+            code="pipeline",
+            stage="diagnostics_write",
+            error=error,
+            now=now,
+        )
         return 4
 
     try:
+        stage = "pipeline_build"
+        pipeline = selected.pipeline_factory(settings)
+    except ConfigurationError as error:
+        _record_failure(
+            settings,
+            code="configuration",
+            stage=stage,
+            error=error,
+            now=now,
+        )
+        return 2
+    except Exception as error:
+        _record_failure(
+            settings,
+            code="pipeline",
+            stage=stage,
+            error=error,
+            now=now,
+        )
+        return 4
+
+    try:
+        stage = "pipeline_run"
         result = pipeline.run(now)
+        stage = "report_render"
         renderer = selected.renderer_factory(settings)
         report = renderer.render(result)
         if arguments.test_label:
             report = _mark_test_report(report)
         report_path = settings.report_dir / f"{now.date().isoformat()}.md"
+        stage = "report_write"
         _atomic_write_report(report_path, report)
+        stage = "diagnostics_write"
         if result.research_trace:
             _atomic_write_research_trace(
                 settings.data_dir / "research-trace.json",
@@ -355,16 +484,50 @@ def _run_locked_cycle(
             ],
         )
     except Exception as error:
-        _log_failure("pipeline", error)
+        _record_failure(
+            settings,
+            code="pipeline",
+            stage=stage,
+            error=error,
+            now=now,
+        )
         return 4
 
     if arguments.dry_run:
+        try:
+            _write_run_result(settings, report_path, now)
+        except Exception as error:
+            _record_failure(
+                settings,
+                code="pipeline",
+                stage="diagnostics_write",
+                error=error,
+                now=now,
+            )
+            return 4
         return 0
     try:
         selected.notifier_factory(settings).send(report)
     except Exception as error:
-        _log_failure("notification", error)
+        _record_failure(
+            settings,
+            code="notification",
+            stage="notification",
+            error=error,
+            now=now,
+        )
         return 3
+    try:
+        _write_run_result(settings, report_path, now)
+    except Exception as error:
+        _record_failure(
+            settings,
+            code="pipeline",
+            stage="diagnostics_write",
+            error=error,
+            now=now,
+        )
+        return 4
     return 0
 
 
@@ -400,14 +563,14 @@ def run_cli(
                 }
             )
     except Exception as error:
-        _log_failure("configuration", error)
+        _log_failure("configuration", "configuration", error)
         return 2
 
     try:
         with _LocalRunLock(settings.data_dir):
             return _run_locked_cycle(arguments, selected, settings, now)
     except RunAlreadyActive as error:
-        _log_failure("pipeline", error)
+        _log_failure("pipeline", "pipeline_lock", error)
         return 4
 
 
