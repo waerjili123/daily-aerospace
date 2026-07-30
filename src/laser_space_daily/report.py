@@ -15,6 +15,7 @@ from .models import (
     EventType,
     Financing,
     Project,
+    SourceGrade,
     VerificationStatus,
 )
 from .pipeline import RunResult
@@ -225,6 +226,7 @@ class ReportRenderer:
             + tuple(_format_event(event) for event in changed_events)
             + tuple(_format_financing(item) for item in changed_financings)
         )
+        top_lines = _top_signal_lines(result, daily_lines)
 
         open_projects = sorted(
             (
@@ -242,6 +244,11 @@ class ReportRenderer:
         )
 
         sections: list[_Section] = [
+            _Section(
+                heading="今日最值得看",
+                lines=top_lines,
+                protected=True,
+            ),
             _Section(
                 heading="过去24小时新增/变化",
                 lines=daily_lines,
@@ -282,8 +289,6 @@ class ReportRenderer:
                 )
             )
             candidate_lines = _category_candidate_lines(result, category)
-            if candidate_lines and not lines:
-                lines = ("- 暂无已核实信息",)
             lines = (*lines, *candidate_lines)
             sections.append(
                 _Section(
@@ -584,6 +589,7 @@ def _followup_lines(
         (
             item
             for item in result.state.pending
+            if item.category_hint is None
             if result.window_start
             <= _as_beijing(item.discovered_at)
             <= result.window_end
@@ -632,14 +638,25 @@ def _followup_lines(
 def _formal_and_candidate_lines(
     formal_lines: tuple[str, ...], candidate_lines: tuple[str, ...]
 ) -> tuple[str, ...]:
-    if candidate_lines and not formal_lines:
-        return ("- 暂无已核实信息", *candidate_lines)
     return (*formal_lines, *candidate_lines)
 
 
 def _category_candidate_lines(
     result: RunResult, category: Category
 ) -> tuple[str, ...]:
+    diagnostic_lines, diagnostic_urls = _diagnostic_signal_lines(result, category)
+    pending_rows = sorted(
+        (
+            item
+            for item in result.state.pending
+            if item.category_hint is category
+            and item.source_url not in diagnostic_urls
+            and result.window_start
+            <= _as_beijing(item.discovered_at)
+            <= result.window_end
+        ),
+        key=lambda item: _pending_sort_key(item, result.window_end),
+    )
     surfaced_urls = {
         item.source_url for item in result.state.pending
     } | {
@@ -652,10 +669,39 @@ def _category_candidate_lines(
     candidates = [
         item
         for item in result.discovery_candidates
-        if item.category_hint is category and item.url not in surfaced_urls
+        if item.category_hint is category
+        and item.url not in surfaced_urls
+        and item.url not in diagnostic_urls
     ]
-    lines: list[str] = []
-    for item in candidates[:10]:
+    lines: list[str] = list(diagnostic_lines)
+    for item in pending_rows[: max(0, 5 - len(lines))]:
+        source_date = (
+            _format_date(item.source_published_at)
+            if item.source_published_at is not None
+            else "发布日期未知"
+        )
+        lines.append(
+            "｜".join(
+                (
+                    "- 候选线索（未核实）",
+                    source_date,
+                    _pending_time_label(
+                        item.source_published_at,
+                        result.window_end,
+                        result.metrics.fallback_window_days,
+                    ),
+                    _safe_text(item.title),
+                    f"原因：{_pending_reason_text(item.reason)}",
+                    _link("查看原始来源", item.source_url),
+                )
+            )
+        )
+        if item.summary.strip():
+            lines.append(
+                f"  - 摘要（未核实）：{_safe_text(item.summary[:180])}"
+            )
+    remaining = max(0, 5 - len([line for line in lines if line.startswith("- ")]))
+    for item in candidates[:remaining]:
         source_date = (
             _format_date(item.source_published_at)
             if item.source_published_at is not None
@@ -681,9 +727,120 @@ def _category_candidate_lines(
             lines.append(
                 f"  - 搜索摘要（未核实）：{_safe_text(item.summary[:240])}"
             )
-    if len(candidates) > 10:
-        lines.append(f"- 另有 {len(candidates) - 10} 条候选线索未展开")
+    if len(candidates) > remaining:
+        lines.append(f"- 另有 {len(candidates) - remaining} 条候选线索未展开")
     return tuple(lines)
+
+
+def _top_signal_lines(
+    result: RunResult,
+    formal_lines: tuple[str, ...],
+) -> tuple[str, ...]:
+    selected = [line for line in formal_lines if line.startswith("- ")][:3]
+    if len(selected) >= 3:
+        return tuple(selected)
+    diagnostic_lines, _ = _diagnostic_signal_lines(result, None)
+    selected.extend(diagnostic_lines[: 3 - len(selected)])
+    if selected:
+        return tuple(selected)
+    return ("- 本轮未形成可展示的境内主题相关信息。",)
+
+
+def _diagnostic_signal_lines(
+    result: RunResult,
+    category: Category | None,
+) -> tuple[tuple[str, ...], set[str]]:
+    candidates_by_url = {
+        item.url: item for item in result.discovery_candidates
+    }
+    groups: dict[str, list[object]] = {}
+    for item in result.candidate_diagnostics:
+        if item.status != "pending":
+            continue
+        if category is not None and item.category_hint is not category:
+            continue
+        if (
+            not item.selected_for_report
+            and item.source_grade not in {SourceGrade.A, SourceGrade.B}
+        ):
+            continue
+        key = item.verification_event_key or "|".join(
+            (
+                item.category_hint.value if item.category_hint else "",
+                item.organization or "",
+                item.financing_round or "",
+                item.title,
+            )
+        )
+        groups.setdefault(key, []).append(item)
+
+    ranked = sorted(
+        groups.values(),
+        key=lambda rows: (
+            0 if _high_confidence_group(rows) else 1,
+            -max(
+                (
+                    _as_beijing(item.published_at).timestamp()
+                    if item.published_at is not None
+                    else 0
+                )
+                for item in rows
+            ),
+            min(item.source_url for item in rows),
+        ),
+    )
+    lines: list[str] = []
+    urls: set[str] = set()
+    for rows in ranked[:5]:
+        representative = max(
+            rows,
+            key=lambda item: (
+                item.evidence_count,
+                1 if item.source_grade in {SourceGrade.A, SourceGrade.B} else 0,
+                item.source_url,
+            ),
+        )
+        label = (
+            "高可信待核实"
+            if _high_confidence_group(rows)
+            else "候选线索（未核实）"
+        )
+        parts = [f"- {label}"]
+        if representative.published_at is not None:
+            parts.append(_format_date(representative.published_at))
+        if representative.organization:
+            parts.append(_safe_text(representative.organization))
+        parts.append(_safe_text(representative.title))
+        if representative.financing_round:
+            parts.append(f"轮次：{_safe_text(representative.financing_round)}")
+        if representative.amount:
+            parts.append(f"明确金额：{_safe_text(representative.amount)}")
+        source_urls = sorted({item.source_url for item in rows})
+        urls.update(source_urls)
+        for index, source_url in enumerate(source_urls[:2], start=1):
+            label_text = "查看原始来源" if len(source_urls) == 1 else f"来源 {index}"
+            parts.append(_link(label_text, source_url))
+        lines.append("｜".join(parts))
+        candidate = candidates_by_url.get(representative.source_url)
+        summary = representative.summary or (
+            candidate.summary if candidate is not None else ""
+        )
+        if summary.strip():
+            lines.append(
+                f"  - 摘要（未核实）：{_safe_text(summary[:180])}"
+            )
+    return tuple(lines), urls
+
+
+def _high_confidence_group(rows: list[object]) -> bool:
+    source_urls = {item.source_url for item in rows}
+    if len(source_urls) >= 2:
+        return True
+    return any(
+        item.source_grade in {SourceGrade.A, SourceGrade.B}
+        and item.evidence_count >= 5
+        for item in rows
+    )
 
 
 def _trend_lines(result: RunResult) -> tuple[str, ...]:

@@ -664,6 +664,15 @@ class ResilientAnalyzer:
             supplemental_evidence_fields.update(
                 {"in_china", "in_scope", "category", "event_type"}
             )
+        if (
+            primary.published_at is not None
+            and fallback.published_at is not None
+            and primary.published_at.date() == fallback.published_at.date()
+        ):
+            # The deterministic fallback reads the publication date extracted
+            # from page metadata/JSON-LD/visible headers. Preserve that quote as
+            # evidence even when the model already supplied the same date.
+            supplemental_evidence_fields.add("published_at")
         evidence_changed = False
         for item in fallback.evidence:
             if (
@@ -987,6 +996,9 @@ _FINANCING_COMPANY_ACTION = re.compile(
 _FINANCING_COMPANY_PREFIXES = (
     "商业航天企业",
     "商业航天公司",
+    "星地激光通信企业",
+    "空间激光通信企业",
+    "激光通信企业",
     "火箭新锐公司",
     "航天新锐公司",
     "卫星公司",
@@ -1033,6 +1045,23 @@ _FINANCING_COMPANY_TRAILING_MODIFIERS = (
     "再",
     "已",
 )
+_FINANCING_COMPANY_TRAILING_DESCRIPTORS = (
+    "商业航天企业",
+    "商业航天公司",
+    "商业航天",
+    "星地激光通信企业",
+    "空间激光通信企业",
+    "激光通信企业",
+    "激光通信",
+)
+_FINANCING_COMPANY_INVALID_TOKENS = (
+    "资本加持",
+    "融资消息",
+    "融资事件",
+    "投资消息",
+    "完成融资",
+    "获得融资",
+)
 _FINANCING_ROUND_PATTERN = re.compile(
     r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
     r"天使\+{0,2}|种子|战略投资|战略)\s*轮"
@@ -1051,31 +1080,62 @@ _UNDISCLOSED_AMOUNT_PATTERN = re.compile(
 
 
 def _extract_financing_organization(text: str) -> tuple[str | None, str | None]:
+    candidates: list[tuple[tuple[int, int, int], str, str]] = []
     for line in (item.strip() for item in text.splitlines() if item.strip()):
-        matched = _FINANCING_COMPANY_ACTION.search(line)
-        if not matched:
-            continue
-        company = matched.group("company").strip(" ，,：:丨|")
-        company = _FINANCING_COMPANY_LEADING_CONTEXT.sub("", company)
-        for prefix in _FINANCING_COMPANY_PREFIXES:
-            if company.startswith(prefix):
-                company = company[len(prefix) :]
-                break
-        for suffix in _FINANCING_COMPANY_SUFFIXES:
-            if company.endswith(suffix):
-                company = company[: -len(suffix)]
-                break
-        for prefix in _DOMESTIC_LOCATION_PREFIXES:
-            if company.startswith(prefix):
-                company = company[len(prefix) :]
-                break
-        for modifier in _FINANCING_COMPANY_TRAILING_MODIFIERS:
-            if company.endswith(modifier):
-                company = company[: -len(modifier)]
-                break
-        company = company.strip(" ，,：:丨|")
-        if 2 <= len(company) <= 40:
-            return company, line
+        for matched in _FINANCING_COMPANY_ACTION.finditer(line):
+            raw_company = matched.group("company").strip(" ，,：:丨|")
+            company = _FINANCING_COMPANY_LEADING_CONTEXT.sub("", raw_company)
+            changed = True
+            while changed:
+                changed = False
+                for prefix in _FINANCING_COMPANY_PREFIXES:
+                    if company.startswith(prefix):
+                        company = company[len(prefix) :]
+                        changed = True
+                        break
+            had_legal_suffix = False
+            for suffix in _FINANCING_COMPANY_SUFFIXES:
+                if company.endswith(suffix):
+                    company = company[: -len(suffix)]
+                    had_legal_suffix = True
+                    break
+            for prefix in _DOMESTIC_LOCATION_PREFIXES:
+                if company.startswith(prefix):
+                    company = company[len(prefix) :]
+                    break
+            changed = True
+            while changed:
+                changed = False
+                for modifier in (
+                    *_FINANCING_COMPANY_TRAILING_MODIFIERS,
+                    *_FINANCING_COMPANY_TRAILING_DESCRIPTORS,
+                ):
+                    if company.endswith(modifier):
+                        company = company[: -len(modifier)]
+                        changed = True
+                        break
+            company = company.strip(" ，,：:丨|")
+            if not 2 <= len(company) <= 40:
+                continue
+            if (
+                company.startswith(("再获", "获", "获得", "完成"))
+                or any(token in company for token in _FINANCING_COMPANY_INVALID_TOKENS)
+            ):
+                continue
+            candidates.append(
+                (
+                    (
+                        0 if had_legal_suffix else 1,
+                        0 if len(company) <= 16 else 1,
+                        matched.start(),
+                    ),
+                    company,
+                    line,
+                )
+            )
+    if candidates:
+        _, company, quote = min(candidates, key=lambda item: item[0])
+        return company, quote
     return None, None
 
 

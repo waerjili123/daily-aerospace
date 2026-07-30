@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 import re
@@ -58,9 +59,15 @@ from .verifier import financing_evidence_gaps
 class CandidateDiagnostic(DomainModel):
     source_url: str
     title: str
+    summary: str = ""
     discovery_source: str
     selected_for_report: bool = False
     category_hint: Category | None = None
+    organization: str | None = None
+    published_at: datetime | None = None
+    amount: str | None = None
+    financing_round: str | None = None
+    evidence_count: int = Field(default=0, ge=0)
     stage: str
     status: str
     reason: str
@@ -155,6 +162,7 @@ class Pipeline:
         logger: Any,
         researcher: Any | None = None,
         verification_followup: Any | None = None,
+        checkpoint_writer: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._repository = repository
         self._planner = planner
@@ -168,6 +176,7 @@ class Pipeline:
         self._logger = logger
         self._researcher = researcher
         self._verification_followup = verification_followup
+        self._checkpoint_writer = checkpoint_writer
 
     def run(self, now: datetime) -> RunResult:
         deepseek_usage = _usage_snapshot(
@@ -354,6 +363,15 @@ class Pipeline:
                     metrics.model_coverage_degraded = True
             except _CANDIDATE_ERRORS as error:
                 analyzed_by_url[item.url] = error
+
+        if self._checkpoint_writer is not None:
+            try:
+                self._checkpoint_writer(
+                    _candidate_checkpoint(now, candidates, analyzed_by_url)
+                )
+            except Exception as error:
+                errors.append(f"checkpoint:{type(error).__name__}")
+                self._safe_log("checkpoint_write_failed", error, None)
 
         followup_plans = []
         followup_target_urls: set[str] = set()
@@ -690,11 +708,27 @@ class Pipeline:
             diagnostics_by_url[normalized_url] = CandidateDiagnostic(
                 source_url=_diagnostic_url(item.url),
                 title=item.title,
+                summary=item.summary,
                 discovery_source=item.discovery_source,
                 selected_for_report=normalized_url in selected_report_urls,
                 category_hint=(
                     item.category_hint
                     or (analyzed.category if analyzed is not None else None)
+                ),
+                organization=(
+                    analyzed.organization if analyzed is not None else None
+                ),
+                published_at=(
+                    analyzed.published_at
+                    if analyzed is not None
+                    else item.source_published_at
+                ),
+                amount=analyzed.amount if analyzed is not None else None,
+                financing_round=(
+                    analyzed.financing_round if analyzed is not None else None
+                ),
+                evidence_count=(
+                    len(analyzed.evidence) if analyzed is not None else 0
                 ),
                 stage=stage,
                 status=status,
@@ -1056,6 +1090,60 @@ class Pipeline:
         self._logger.warning(
             f"pipeline_warning code={code} error={type(error).__name__} host={hostname}"
         )
+
+
+def _candidate_checkpoint(
+    now: datetime,
+    candidates: list[Candidate],
+    analyzed_by_url: dict[str, Any],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        analysis = analyzed_by_url.get(candidate.url)
+        if not isinstance(analysis, AnalysisResult):
+            continue
+        rows.append(
+            {
+                "title": candidate.title,
+                "summary": candidate.summary,
+                "source_url": normalize_url(candidate.url),
+                "discovery_source": candidate.discovery_source,
+                "category": (
+                    analysis.category.value
+                    if analysis.category is not None
+                    else (
+                        candidate.category_hint.value
+                        if candidate.category_hint is not None
+                        else None
+                    )
+                ),
+                "organization": analysis.organization,
+                "published_at": (
+                    analysis.published_at or candidate.source_published_at
+                ).isoformat()
+                if analysis.published_at is not None
+                or candidate.source_published_at is not None
+                else None,
+                "amount": analysis.amount,
+                "financing_round": analysis.financing_round,
+                "in_china": analysis.in_china,
+                "in_scope": analysis.in_scope,
+                "evidence_count": len(analysis.evidence),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "status": "analyzed",
+        "occurred_at": now.isoformat(),
+        "candidates": sorted(
+            rows,
+            key=lambda item: (
+                str(item.get("category") or ""),
+                str(item.get("published_at") or ""),
+                str(item.get("source_url") or ""),
+            ),
+        ),
+    }
 
 
 def _make_event(result: AnalysisResult, decision: Any, candidate: Any, page: Any) -> Event:

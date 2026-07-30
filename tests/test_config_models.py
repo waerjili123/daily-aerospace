@@ -32,7 +32,7 @@ def _workflow_step(steps: list[dict], name: str) -> dict:
     return next(step for step in steps if step.get("name") == name)
 
 
-def test_workflow_is_restored_to_manual_bounded_dry_run():
+def test_workflow_is_manual_bounded_and_defaults_to_dry_run():
     workflow_path = ".github/workflows/daily-intelligence.yml"
     workflow = _repository_file(workflow_path).read_text(encoding="utf-8")
     document = _base_yaml(workflow_path)
@@ -40,8 +40,8 @@ def test_workflow_is_restored_to_manual_bounded_dry_run():
     assert set(document["on"]) == {"workflow_dispatch"}
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert "BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}" in workflow
-    assert "secrets.DINGTALK_WEBHOOK" not in workflow
-    assert "secrets.DINGTALK_SECRET" not in workflow
+    assert "secrets.DINGTALK_WEBHOOK" in workflow
+    assert "secrets.DINGTALK_SECRET" in workflow
     assert "concurrency:" in workflow
     assert document["on"]["workflow_dispatch"]["inputs"]["max_queries"] == {
         "description": "Bocha hard query budget (daily <=12, backfill <=40)",
@@ -55,6 +55,12 @@ def test_workflow_is_restored_to_manual_bounded_dry_run():
         "options": ["daily", "backfill"],
         "default": "daily",
     }
+    assert document["on"]["workflow_dispatch"]["inputs"]["delivery_mode"] == {
+        "description": "Generate only, or send one test-labeled DingTalk report",
+        "type": "choice",
+        "options": ["dry_run", "dingtalk_test"],
+        "default": "dry_run",
+    }
     assert document["concurrency"] == {
         "group": "laser-space-daily",
         "cancel-in-progress": "false",
@@ -64,18 +70,19 @@ def test_workflow_is_restored_to_manual_bounded_dry_run():
     )
     assert pipeline_step["id"] == "daily_pipeline"
     assert "--dry-run" in pipeline_step["run"]
-    assert "--test-label" not in pipeline_step["run"]
-    assert "--discovery-mode daily" in pipeline_step["run"]
-    assert "--max-queries 12" in pipeline_step["run"]
+    assert "--test-label" in pipeline_step["run"]
+    assert '"${{ inputs.discovery_mode }}"' in pipeline_step["run"]
+    assert '"${{ inputs.max_queries }}"' in pipeline_step["run"]
+    assert pipeline_step["env"]["DELIVERY_MODE"] == "${{ inputs.delivery_mode }}"
     guard_step = _workflow_step(
-        document["jobs"]["run"]["steps"], "Guard verification dry-run branch"
+        document["jobs"]["run"]["steps"], "Guard verification branch"
     )
     assert guard_step["run"] == (
         'test "${GITHUB_REF}" = '
         '"refs/heads/codex/verification-promotion-20260728"'
     )
     summary_step = _workflow_step(
-        document["jobs"]["run"]["steps"], "Publish dry-run report summary"
+        document["jobs"]["run"]["steps"], "Publish report summary"
     )
     assert summary_step["if"] == "success()"
     assert summary_step["shell"] == "python"
@@ -232,9 +239,7 @@ def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
     assert failure_artifact["with"]["name"] == (
         "daily-intelligence-failure-diagnostics"
     )
-    assert failure_artifact["with"]["path"] == (
-        "data/failure-diagnostics.json"
-    )
+    assert failure_artifact["with"]["path"].splitlines() == ["reports/", "data/"]
     assert all(step.get("name") != "Commit state and report" for step in steps)
     assert "git add data reports" not in workflow
     assert "git push origin" not in workflow
@@ -278,7 +283,7 @@ def test_readme_documents_schema_migration_and_single_writer_lock() -> None:
         assert required in readme
 
 
-def test_restored_workflow_cannot_schedule_notify_or_commit() -> None:
+def test_workflow_cannot_schedule_or_commit_and_send_is_explicit() -> None:
     document = _base_yaml(".github/workflows/daily-intelligence.yml")
     workflow = _repository_file(
         ".github/workflows/daily-intelligence.yml"
@@ -287,7 +292,10 @@ def test_restored_workflow_cannot_schedule_notify_or_commit() -> None:
 
     assert set(document["on"]) == {"workflow_dispatch"}
     assert "--dry-run" in _workflow_step(steps, "Run daily pipeline")["run"]
-    assert "secrets.DINGTALK" not in workflow
+    assert "inputs.delivery_mode == 'dingtalk_test'" in workflow
+    assert document["on"]["workflow_dispatch"]["inputs"]["delivery_mode"][
+        "default"
+    ] == "dry_run"
     assert all(step.get("name") != "Commit state and report" for step in steps)
 
 
@@ -303,8 +311,8 @@ def test_readme_documents_required_setup_and_dry_run():
         "BOCHA_API_KEY",
         "DINGTALK_WEBHOOK",
         "DINGTALK_SECRET",
-        "dry_run=true",
-        "dry_run=false",
+        "delivery_mode=dry_run",
+        "dingtalk_test",
         "07:30",
         "artifact",
         "A/B/C",

@@ -208,6 +208,43 @@ def test_category_section_surfaces_selected_search_candidate_rejected_downstream
     assert item.title not in followup
 
 
+def test_high_confidence_pending_signal_renders_in_top_and_category_sections():
+    diagnostic = CandidateDiagnostic(
+        source_url="https://www.stcn.com/article/guangyou",
+        title="光邮星空完成Pre-A轮融资",
+        summary="报道明确披露融资轮次和投资方。",
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization="光邮星空",
+        published_at=dt(7, 16),
+        financing_round="Pre-A轮",
+        evidence_count=6,
+        stage="persisted",
+        status="pending",
+        reason="financing_requires_official_or_two_independent_b_sources",
+        source_grade=SourceGrade.B,
+        verification_event_key="光邮星空|financing|Pre-A",
+    )
+    result = make_result().model_copy(
+        update={"candidate_diagnostics": [diagnostic]}
+    )
+
+    markdown = ReportRenderer().render(result).markdown
+    top = markdown.split("## 今日最值得看", 1)[1].split(
+        "## 过去24小时新增/变化", 1
+    )[0]
+    financing_section = markdown.split("## 商业航天融资", 1)[1].split(
+        "## 今日重点跟进", 1
+    )[0]
+
+    assert "高可信待核实" in top
+    assert "光邮星空完成Pre-A轮融资" in top
+    assert "高可信待核实" in financing_section
+    assert "轮次：Pre-A轮" in financing_section
+    assert "暂无已核实信息" not in financing_section
+
+
 def test_backfill_candidate_uses_90_day_time_label():
     item = Candidate(
         title="商业航天企业完成A轮融资",
@@ -575,9 +612,12 @@ def test_stage_links_and_latest_link_are_original_urls(run_result: RunResult) ->
 def test_changed_projects_render_status_deadline_chain_without_event_duplicate(
     run_result: RunResult,
 ) -> None:
-    daily = ReportRenderer(18000).render(run_result).markdown.split(
-        "## 当前可报名及即将启动", maxsplit=1
-    )[0]
+    daily = (
+        ReportRenderer(18000)
+        .render(run_result)
+        .markdown.split("## 过去24小时新增/变化", maxsplit=1)[1]
+        .split("## 当前可报名及即将启动", maxsplit=1)[0]
+    )
 
     assert "状态：开放报名" in daily
     assert "截止：投标截止 2026-07-25 17:00" in daily
@@ -884,7 +924,7 @@ def test_trend_text_escapes_block_markers_without_creating_headings() -> None:
     text = ReportRenderer(18000).render(result).markdown
     heading_lines = [line for line in text.splitlines() if line.startswith("#")]
 
-    assert len(heading_lines) == 9
+    assert len(heading_lines) == 10
     assert heading_lines[0].startswith("# 中国激光与商业航天情报日报")
     assert all(line.startswith("## ") for line in heading_lines[1:])
     assert (
@@ -1156,11 +1196,12 @@ class _CliRenderer:
 class _CliNotifier:
     def __init__(self) -> None:
         self.calls = 0
+        self.reports: list[RenderedReport] = []
         self.error: BaseException | None = None
 
     def send(self, report: RenderedReport) -> None:
-        del report
         self.calls += 1
+        self.reports.append(report)
         if self.error is not None:
             raise self.error
 
@@ -1240,12 +1281,18 @@ def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None
     diagnostics_path = tmp_path / "data" / "candidate-diagnostics.json"
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     assert diagnostics == [
-        {
-            "source_url": "https://news.example/item",
-            "title": "微光启航完成融资",
-            "discovery_source": "search:bocha",
-            "selected_for_report": True,
-            "category_hint": "commercial_space_financing",
+            {
+                "source_url": "https://news.example/item",
+                "title": "微光启航完成融资",
+                "summary": "",
+                "discovery_source": "search:bocha",
+                "selected_for_report": True,
+                "category_hint": "commercial_space_financing",
+                "organization": None,
+                "published_at": None,
+                "amount": None,
+                "financing_round": None,
+                "evidence_count": 0,
             "stage": "persisted",
             "status": "pending",
             "reason": "missing_required_fields:published_at",
@@ -1259,6 +1306,11 @@ def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None
             "verification_event_key": None,
         }
     ]
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert delivery["status"] == "skipped"
+    assert delivery["report_kind"] == "standard"
     assert cli_deps.notifier.calls == 0
 
 
@@ -1301,7 +1353,9 @@ def test_push_failure_keeps_report_and_returns_three(cli_deps, tmp_path: Path) -
     assert cli_deps.notifier.calls == 1
 
 
-def test_pipeline_failure_returns_four_and_does_not_push(cli_deps, tmp_path: Path) -> None:
+def test_pipeline_failure_returns_four_and_sends_anomaly_alert(
+    cli_deps, tmp_path: Path
+) -> None:
     cli_deps.pipeline.error = RuntimeError("pipeline exploded")
 
     code = run_cli(
@@ -1310,8 +1364,78 @@ def test_pipeline_failure_returns_four_and_does_not_push(cli_deps, tmp_path: Pat
     )
 
     assert code == 4
-    assert cli_deps.notifier.calls == 0
-    assert not (tmp_path / "reports").exists()
+    assert cli_deps.notifier.calls == 1
+    assert (tmp_path / "reports" / "2026-07-22-degraded.md").exists()
+    manifest = json.loads(
+        (tmp_path / "data" / "run-result.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "degraded"
+    assert manifest["failure_stage"] == "pipeline_run"
+
+
+def test_failure_after_checkpoint_sends_test_labeled_degraded_intelligence(
+    cli_deps, tmp_path: Path
+) -> None:
+    class FailingWithCheckpoint:
+        def run(self, now):
+            cli_deps.settings.data_dir.mkdir(parents=True, exist_ok=True)
+            (cli_deps.settings.data_dir / "candidate-checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "analyzed",
+                        "occurred_at": now.isoformat(),
+                        "candidates": [
+                            {
+                                "title": "光邮星空完成Pre-A轮融资",
+                                "summary": "公司披露融资轮次和投资方。",
+                                "source_url": "https://www.stcn.com/article/1",
+                                "category": "commercial_space_financing",
+                                "organization": "光邮星空",
+                                "published_at": "2026-07-16T00:00:00+08:00",
+                                "amount": None,
+                                "financing_round": "Pre-A轮",
+                                "in_china": True,
+                                "in_scope": True,
+                                "evidence_count": 6,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            raise RuntimeError("failure after checkpoint")
+
+    dependencies = CliDependencies(
+        settings_loader=cli_deps.dependencies.settings_loader,
+        pipeline_factory=lambda loaded: FailingWithCheckpoint(),
+        renderer_factory=cli_deps.dependencies.renderer_factory,
+        notifier_factory=cli_deps.dependencies.notifier_factory,
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--test-label",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=dependencies,
+    )
+
+    assert code == 4
+    assert cli_deps.notifier.calls == 1
+    report = cli_deps.notifier.reports[0]
+    assert report.title.startswith("# 【测试】【降级】")
+    assert "光邮星空完成Pre-A轮融资" in report.markdown
+    assert "均未通过最终严格核验" in report.markdown
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert delivery["status"] == "accepted"
+    assert delivery["report_kind"] == "degraded"
 
 
 def _failing_cli_dependencies(cli_deps, factory) -> CliDependencies:
@@ -1511,7 +1635,9 @@ def test_successful_dry_run_replaces_stale_metadata_with_run_result(
     }
 
 
-def test_failed_run_removes_stale_success_manifest(cli_deps) -> None:
+def test_failed_run_replaces_stale_success_manifest_with_degraded_result(
+    cli_deps,
+) -> None:
     data_dir = cli_deps.settings.data_dir
     data_dir.mkdir(parents=True)
     (data_dir / "run-result.json").write_text(
@@ -1531,7 +1657,11 @@ def test_failed_run_removes_stale_success_manifest(cli_deps) -> None:
     )
 
     assert code == 4
-    assert not (data_dir / "run-result.json").exists()
+    payload = json.loads(
+        (data_dir / "run-result.json").read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "degraded"
+    assert payload["failure_stage"] == "pipeline_run"
     assert (data_dir / "failure-diagnostics.json").exists()
 
 
@@ -1614,6 +1744,7 @@ def test_atomic_report_write_uses_same_directory_and_leaves_no_temp_file(
         report_dir / "2026-07-22.md",
         data_dir / "candidate-diagnostics.json",
         data_dir / "run-result.json",
+        data_dir / "delivery-status.json",
     }
     assert list(report_dir.glob("*.tmp")) == []
     assert list(data_dir.glob("*.tmp")) == []
@@ -1667,7 +1798,7 @@ def test_atomic_report_write_normalizes_all_newlines_to_lf(cli_deps, tmp_path: P
     assert raw == b"# title\n\nbody\nend\n"
 
 
-def test_report_too_long_returns_four_and_does_not_push(cli_deps) -> None:
+def test_report_too_long_returns_four_and_sends_anomaly_alert(cli_deps) -> None:
     cli_deps.renderer.error = ReportTooLong("protected content")
 
     code = run_cli(
@@ -1676,7 +1807,7 @@ def test_report_too_long_returns_four_and_does_not_push(cli_deps) -> None:
     )
 
     assert code == 4
-    assert cli_deps.notifier.calls == 0
+    assert cli_deps.notifier.calls == 1
 
 
 def test_cli_parser_exposes_exact_public_arguments() -> None:

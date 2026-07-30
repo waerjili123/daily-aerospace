@@ -2,7 +2,9 @@
 
 这是一个面向激光通信与商业航天产业的日度情报管道：收集公开线索、核验来源、关联历史项目，并生成可追溯的 Markdown 报告。它只处理本项目范围内的产业与采购情报，**独立于 AI日报**，不包含任何 AI 新闻内容。
 
-> 当前处于智能多轮检索验收阶段。工作流只允许手动 `dry_run=true` 验收，不自动发送钉钉、不提交状态，也不包含定时入口。
+> 当前处于智能多轮检索验收阶段。工作流仅允许手动触发、默认
+> `delivery_mode=dry_run`，不提交状态且不包含定时入口；只有显式选择
+> `dingtalk_test` 才会使用现有 Secrets 发送标题含“【测试】”的消息。
 
 ## 架构与目录
 
@@ -46,7 +48,11 @@ laser-space-daily --config config.yaml --dry-run --discovery-mode backfill --max
 
 DeepSeek 通过受控的 `search_web` Tool Calling 提出后续查询。本地预算守卫负责执行博查调用，模型不能突破日常 12 次或回填 40 次的硬上限。研究轨迹写入 `data/research-trace.json`，不包含密钥、认证头、完整网页正文或模型隐藏推理。
 
-请检查 `reports/` 中的报告与每条来源链接，再决定是否进行真实推送。不要把密钥写入 `config.yaml`、日志或问题反馈中。
+正常运行会写入 `data/run-result.json` 和脱敏的
+`data/delivery-status.json`。若分析后续阶段失败，本轮候选检查点会生成明确标注的
+“【降级】”快报；检查点产生前失败时只生成“【异常】”告警，绝不回退到旧日报。
+请检查 `reports/` 中的报告与每条来源链接，再决定是否进行真实推送。不要把密钥写入
+`config.yaml`、日志或问题反馈中。
 
 ## 上线验收边界
 
@@ -66,11 +72,13 @@ DeepSeek 通过受控的 `search_web` Tool Calling 提出后续查询。本地�
 
 1. 保持自动 workflow 暂停，先合并 `data.webPages.value` 解析修复。
 2. 重新启用不含 `schedule` 的仅手动工作流。
-3. 日常验证选择 `daily` 与 12 次查询；历史回填选择 `backfill` 与 40 次查询。命令固定包含 `--dry-run`，无法从页面关闭。
+3. 日常验证选择 `daily`、12 次查询和默认 `dry_run`；历史回填选择
+   `backfill`、40 次查询并保持 `dry_run`。只有一次性钉钉验收才选择
+   `dingtalk_test`。
 4. 下载包含 `reports/` 与 `data/` 的 artifact，确认候选数大于 0、原始链接存在，并核对 `research-trace.json` 中的预算、轮次、查询和停止原因。
 
 自动运行不在本阶段启用。真实信息采集验收通过后，才修复并验证北京时间 07:30 调度；受控钉钉验证只能从名称明确的一次性测试分支人工触发。
-除该一次性测试分支外，不开放一般性的 `dry_run=false` 入口。
+`dingtalk_test` 只开放于受保护的验收分支，不能启用定时发送。
 
 同一个 `data_dir` 必须遵守**单写入者**约束。Actions 的 `concurrency` 组负责串行化云端任务；CLI 同时持有 `data/.laser-space-daily.lock` 操作系统锁，本地第二个进程会直接以退出码 4 结束。锁文件可以保留，进程退出或崩溃时操作系统会释放锁；不要用不同工作目录绕过同一份状态的串行要求。
 

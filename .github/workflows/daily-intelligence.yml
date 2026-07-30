@@ -18,6 +18,13 @@ on:
           - "12"
           - "40"
         default: "12"
+      delivery_mode:
+        description: "Generate only, or send one test-labeled DingTalk report"
+        type: choice
+        options:
+          - "dry_run"
+          - "dingtalk_test"
+        default: "dry_run"
 
 concurrency:
   group: laser-space-daily
@@ -50,7 +57,7 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Guard verification dry-run branch
+      - name: Guard verification branch
         run: test "${GITHUB_REF}" = "refs/heads/codex/verification-promotion-20260728"
 
       - name: Run daily pipeline
@@ -58,16 +65,24 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}
-          DINGTALK_WEBHOOK: https://example.invalid/manual-dry-run
-          DINGTALK_SECRET: unused-manual-dry-run-secret
-        run: >-
-          laser-space-daily
-          --config config.yaml
-          --dry-run
-          --discovery-mode daily
-          --max-queries 12
+          DINGTALK_WEBHOOK: ${{ inputs.delivery_mode == 'dingtalk_test' && secrets.DINGTALK_WEBHOOK || 'https://example.invalid/manual-dry-run' }}
+          DINGTALK_SECRET: ${{ inputs.delivery_mode == 'dingtalk_test' && secrets.DINGTALK_SECRET || 'unused-manual-dry-run-secret' }}
+          DELIVERY_MODE: ${{ inputs.delivery_mode }}
+        shell: bash
+        run: |
+          args=(
+            --config config.yaml
+            --discovery-mode "${{ inputs.discovery_mode }}"
+            --max-queries "${{ inputs.max_queries }}"
+          )
+          if [[ "${DELIVERY_MODE}" == "dry_run" ]]; then
+            args+=(--dry-run)
+          else
+            args+=(--test-label)
+          fi
+          laser-space-daily "${args[@]}"
 
-      - name: Publish dry-run report summary
+      - name: Publish report summary
         if: success()
         shell: python
         run: |
@@ -164,5 +179,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daily-intelligence-failure-diagnostics
-          path: data/failure-diagnostics.json
+          path: |
+            reports/
+            data/
           if-no-files-found: warn

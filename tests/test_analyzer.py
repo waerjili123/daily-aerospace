@@ -428,6 +428,114 @@ def test_resilient_analyzer_enriches_valid_but_incomplete_financing_result():
     }.issubset({item.field for item in result.evidence})
 
 
+def test_resilient_analyzer_bridges_matching_page_publication_date_evidence():
+    page = make_page(
+        "中国境内商业航天企业光邮星空完成Pre-A轮融资，"
+        "面向星地激光通信。\n"
+        "页面发布时间：2026-07-16",
+        title="光邮星空完成Pre-A轮融资",
+        url="https://www.stcn.com/article/date-bridge",
+    )
+    primary_result = AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        event_type=EventType.FINANCING,
+        title=page.title,
+        organization="光邮星空",
+        published_at=datetime(
+            2026, 7, 16, tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+        financing_round="Pre-A轮",
+        source_url=page.final_url,
+    )
+
+    class Primary:
+        def analyze(self, _page):
+            return primary_result
+
+    fallback_result = primary_result.model_copy(
+        update={
+            "evidence": [
+                Evidence(
+                    field="published_at",
+                    quote="2026-07-16",
+                    source_url=page.final_url,
+                )
+            ]
+        }
+    )
+
+    class Fallback:
+        def analyze(self, _page):
+            return fallback_result
+
+    result = ResilientAnalyzer(Primary(), Fallback()).analyze(page)
+
+    assert any(
+        item.field == "published_at"
+        and item.quote == "2026-07-16"
+        and item.source_url == page.final_url
+        for item in result.evidence
+    )
+
+
+def test_resilient_analyzer_does_not_bridge_conflicting_page_date():
+    page = make_page(
+        "中国境内商业航天企业光邮星空完成Pre-A轮融资，"
+        "面向星地激光通信。\n"
+        "页面发布时间：2026-07-16",
+        title="光邮星空完成Pre-A轮融资",
+        url="https://www.stcn.com/article/date-conflict",
+    )
+    primary_result = AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        event_type=EventType.FINANCING,
+        title=page.title,
+        organization="光邮星空",
+        published_at=datetime(
+            2026, 7, 17, tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+        financing_round="Pre-A轮",
+        source_url=page.final_url,
+    )
+
+    class Primary:
+        def analyze(self, _page):
+            return primary_result
+
+    result = ResilientAnalyzer(Primary(), RuleFallbackAnalyzer()).analyze(page)
+
+    assert not any(item.field == "published_at" for item in result.evidence)
+
+
+@pytest.mark.parametrize(
+    ("sentence", "expected"),
+    [
+        (
+            "星地激光通信企业光邮星空完成Pre-A轮融资，服务商业航天星座。",
+            "光邮星空",
+        ),
+        (
+            "微光启航商业航天完成亿元级天使++轮融资，推进液体火箭研制。",
+            "微光启航",
+        ),
+    ],
+)
+def test_rule_fallback_strips_financing_company_descriptors(sentence, expected):
+    page = make_page(
+        f"中国境内项目。\n2026年7月16日，{sentence}",
+        title=sentence,
+        url="https://www.stcn.com/article/company-cleaning",
+    )
+
+    result = RuleFallbackAnalyzer().analyze(page)
+
+    assert result.organization == expected
+
+
 def test_resilient_analyzer_adds_grounded_classification_evidence_without_overwriting_claims():
     page = make_page(
         "2026年7月21日，北京光邮星空科技有限公司聚焦高速星地激光通信领域。\n"

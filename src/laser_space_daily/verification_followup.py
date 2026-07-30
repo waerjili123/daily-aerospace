@@ -394,11 +394,39 @@ class VerificationFollowupPlanner:
                 f" site:{official_domains[0]}" if official_domains else ""
             )
             gap_terms = _gap_query_terms(_target_evidence_gaps(target))
-            raw = [
-                f"{event_terms} {gap_terms} 官网 投资机构 官方披露{official_suffix}",
-                f"{event_terms} {gap_terms} {investor_terms}",
-                f"{event_terms} {gap_terms} 新闻 报道",
+            used_domains = {
+                domain
+                for source_url in (
+                    target.candidate.url,
+                    analysis.source_url,
+                    *(item.source_url for item in analysis.evidence),
+                )
+                if (domain := _registered_source_domain(
+                    source_url, self._financing_b_domains
+                ))
+            }
+            untried_b_domains = [
+                domain
+                for domain in self._financing_b_domains
+                if domain not in used_domains
             ]
+            raw = []
+            if official_domains:
+                raw.append(
+                    f"{event_terms} {gap_terms} 官网 投资机构 官方披露"
+                    f"{official_suffix}"
+                )
+            raw.extend(
+                f"{event_terms} {gap_terms} {investor_terms} site:{domain}"
+                for domain in untried_b_domains
+            )
+            raw.extend(
+                (
+                    f"{event_terms} {gap_terms} {investor_terms}",
+                    f"{event_terms} {gap_terms} 新闻 报道",
+                    f"{event_terms} {gap_terms} 权威媒体 融资公告",
+                )
+            )
         else:
             title = _query_value(analysis.title)
             event_terms = " ".join(value for value in (organization, title) if value)
@@ -490,6 +518,24 @@ _ORGANIZATION_LOCATION_PREFIXES = (
     "苏州",
     "无锡",
 )
+_ORGANIZATION_LEADING_DESCRIPTORS = (
+    "商业航天企业",
+    "商业航天公司",
+    "星地激光通信企业",
+    "空间激光通信企业",
+    "激光通信企业",
+    "火箭新锐公司",
+    "航天新锐公司",
+)
+_ORGANIZATION_TRAILING_DESCRIPTORS = (
+    "商业航天企业",
+    "商业航天公司",
+    "商业航天",
+    "星地激光通信企业",
+    "空间激光通信企业",
+    "激光通信企业",
+    "激光通信",
+)
 
 
 def _same_verification_event(
@@ -516,11 +562,20 @@ def _same_verification_event(
     right_date = _verification_event_date(right)
     if left_date is None or right_date is None:
         return False
-    if abs((left_date.date() - right_date.date()).days) > 7:
-        return False
-
     left_rounds = _verification_rounds(left_analysis.financing_round)
     right_rounds = _verification_rounds(right_analysis.financing_round)
+    maximum_gap_days = 7
+    if (
+        left_analysis.category is Category.COMMERCIAL_SPACE_FINANCING
+        and left_rounds
+        and right_rounds
+        and not left_rounds.isdisjoint(right_rounds)
+        and _financing_claims_compatible(left_analysis, right_analysis)
+    ):
+        maximum_gap_days = 30
+    if abs((left_date.date() - right_date.date()).days) > maximum_gap_days:
+        return False
+
     if left_rounds and right_rounds:
         return not left_rounds.isdisjoint(right_rounds)
     return _verification_title(left) == _verification_title(right)
@@ -603,6 +658,24 @@ def _organization_aliases(value: str) -> frozenset[str]:
         "",
         unicodedata.normalize("NFKC", value).casefold(),
     )
+    changed = True
+    while changed:
+        changed = False
+        for descriptor in _ORGANIZATION_LEADING_DESCRIPTORS:
+            normalized_descriptor = descriptor.casefold()
+            if normalized.startswith(normalized_descriptor):
+                normalized = normalized[len(normalized_descriptor) :]
+                changed = True
+                break
+    changed = True
+    while changed:
+        changed = False
+        for descriptor in _ORGANIZATION_TRAILING_DESCRIPTORS:
+            normalized_descriptor = descriptor.casefold()
+            if normalized.endswith(normalized_descriptor):
+                normalized = normalized[: -len(normalized_descriptor)]
+                changed = True
+                break
     if not normalized:
         return frozenset()
     aliases = {normalized}
@@ -625,6 +698,40 @@ def _organization_aliases(value: str) -> frozenset[str]:
                     aliases.add(short[: -len("科技")])
             break
     return frozenset(alias for alias in aliases if alias)
+
+
+def _financing_claims_compatible(
+    left: AnalysisResult,
+    right: AnalysisResult,
+) -> bool:
+    left_amount = _normalize_name(left.amount or "")
+    right_amount = _normalize_name(right.amount or "")
+    if left_amount and right_amount and left_amount != right_amount:
+        return False
+    left_investors = {
+        _normalize_name(value) for value in left.investors if _normalize_name(value)
+    }
+    right_investors = {
+        _normalize_name(value) for value in right.investors if _normalize_name(value)
+    }
+    if left_investors and right_investors and left_investors.isdisjoint(right_investors):
+        return False
+    return True
+
+
+def _registered_source_domain(
+    source_url: str,
+    registered_domains: Iterable[str],
+) -> str | None:
+    hostname = (urlsplit(source_url).hostname or "").lower().rstrip(".")
+    return next(
+        (
+            domain
+            for domain in registered_domains
+            if hostname == domain or hostname.endswith(f".{domain}")
+        ),
+        None,
+    )
 
 
 def _verification_title(target: FollowupTarget) -> str:

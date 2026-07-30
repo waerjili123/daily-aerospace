@@ -741,3 +741,32 @@ Actions #24（提交 `1b35fdc`，分支
 - 本地开发期间未触发 Actions、未发送钉钉、未推送分支。
 - 未修改 Secrets、仓库可见性、workflow 启停/定时配置或 `dry_run` 策略。
 - 未合并任何 PR。
+
+## 2026-07-31 可直接钉钉推送版本
+
+已批准设计：
+
+- `docs/superpowers/specs/2026-07-31-dingtalk-ready-intelligence-report-design.md`
+- `docs/superpowers/plans/2026-07-31-dingtalk-ready-intelligence-report.md`
+
+本轮实现：
+
+- [x] 模型日期与页面元数据、JSON-LD 或可见页头日期一致时，补入逐字
+  `published_at` 证据；冲突时不覆盖。
+- [x] 融资主体清洗行业前后缀和新闻话术，避免描述性短语成为企业名称。
+- [x] 同一融资主体、相容轮次及事实在 30 天内归为同一核验事件；其他事件继续使用
+  7 天窗口。
+- [x] 弹性核验优先搜索尚未使用的注册 B 级媒体域名；基础 12、弹性 3、总上限
+  15 不变。
+- [x] 日报新增“今日最值得看”，分类板块直接显示严格已核实、高可信待核实和普通
+  候选，并按核验事件键去重。
+- [x] 分析完成后原子写入本轮候选检查点；后续失败生成“【降级】”快报，检查点前
+  失败只生成“【异常】”告警。
+- [x] `delivery-status.json` 只记录 `skipped`、`accepted` 或 `failed` 及报告类型，
+  不包含 webhook、签名和 Secret。
+- [x] 手动 workflow 增加 `delivery_mode`，默认 `dry_run`；只有
+  `dingtalk_test` 使用现有 Secrets 并添加“【测试】”标题。
+- [x] workflow 仍仅含 `workflow_dispatch`，不提交状态，不启用定时任务。
+- [x] 完整离线测试扩展到 482 项。
+- [ ] 推送分支并执行真实 dry-run。
+- [ ] dry-run 达到至少 1 条严格已核实后，执行一次真实钉钉测试推送。

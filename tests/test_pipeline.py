@@ -281,6 +281,24 @@ def test_pipeline_requests_rolling_three_month_trend_window(deps) -> None:
     ]
 
 
+def test_pipeline_writes_current_run_candidate_checkpoint_after_analysis(deps) -> None:
+    checkpoints: list[dict] = []
+
+    Pipeline(
+        **deps.as_kwargs(),
+        checkpoint_writer=checkpoints.append,
+    ).run(NOW)
+
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["status"] == "analyzed"
+    assert checkpoints[0]["occurred_at"] == NOW.isoformat()
+    assert checkpoints[0]["candidates"][0]["source_url"] == OFFICIAL_URL
+    assert checkpoints[0]["candidates"][0]["organization"] == "Space Institute"
+    assert checkpoints[0]["candidates"][0]["published_at"].startswith(
+        "2026-07-21"
+    )
+
+
 class FakeLogger:
     def __init__(self) -> None:
         self.messages: list[str] = []

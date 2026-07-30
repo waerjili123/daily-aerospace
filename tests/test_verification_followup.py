@@ -87,10 +87,9 @@ def test_planner_spends_three_elastic_queries_on_top_financing_target():
 
     assert len(planned) == 3
     assert all(item.target_url.endswith("/primary") for item in planned)
-    assert "官网 投资机构 官方披露" in planned[0].query.text
-    assert "九合创投 同创伟业 投资方" in planned[1].query.text
-    assert "新闻 报道" in planned[2].query.text
-    assert all("site:" not in item.query.text for item in planned)
+    assert "site:pedaily.cn" in planned[0].query.text
+    assert "site:cls.cn" in planned[1].query.text
+    assert "九合创投 同创伟业 投资方" in planned[2].query.text
     assert all(item.query.kind == "project_followup" for item in planned)
 
 
@@ -165,7 +164,7 @@ def test_full_and_short_company_names_share_stable_event_key():
     assert len({item.target_key for item in planned}) == 1
 
 
-def test_same_company_different_round_or_distant_date_stays_distinct():
+def test_same_company_same_round_inside_30_days_is_one_event():
     first = target(
         url="https://www.stcn.com/article/pre-a",
         published_at=NOW - timedelta(days=20),
@@ -191,7 +190,7 @@ def test_same_company_different_round_or_distant_date_stays_distinct():
     ).plan(NOW, [first, distant_same_round])
 
     assert len({item.target_key for item in round_plans}) == 2
-    assert len({item.target_key for item in date_plans}) == 2
+    assert len({item.target_key for item in date_plans}) == 1
 
 
 def test_same_event_sources_do_not_crowd_out_a_second_event():
@@ -383,7 +382,7 @@ def test_unregistered_candidate_name_does_not_trigger_site_query():
         },
     ).plan(NOW, [item])
 
-    assert all("site:" not in row.query.text for row in planned)
+    assert "site:pedaily.cn" in planned[0].query.text
     assert all(row.preferred_domains == () for row in planned)
 
 
@@ -489,9 +488,9 @@ def test_planner_does_not_repeat_persisted_query():
 
     planned = planner().plan(NOW, [target(pending=existing)])
 
-    assert len(planned) == 2
+    assert len(planned) == 3
     assert all(item.query.text != first_query for item in planned)
-    assert "新闻 报道" in planned[-1].query.text
+    assert "site:pedaily.cn" in planned[0].query.text
 
 
 def test_planner_skips_target_b_domain_with_www_or_subdomain():
@@ -502,17 +501,23 @@ def test_planner_skips_target_b_domain_with_www_or_subdomain():
         planned = planner().plan(NOW, [target(url=url)])
 
         assert len(planned) == 3
-        assert all("site:" not in item.query.text for item in planned)
+        current_domain = "pedaily.cn" if "pedaily.cn" in url else "stcn.com"
+        assert all(f"site:{current_domain}" not in item.query.text for item in planned)
+        assert any("site:" in item.query.text for item in planned)
 
 
-def test_planner_uses_open_queries_for_non_b_target():
+def test_planner_uses_registered_b_queries_for_non_b_target():
     planned = planner().plan(
         NOW,
         [target(url="https://finance.ifeng.com/article/1", grade=SourceGrade.C)],
     )
 
     assert len(planned) == 3
-    assert all("site:" not in item.query.text for item in planned)
+    assert [item.query.text.split("site:", 1)[1].split()[0] for item in planned] == [
+        "stcn.com",
+        "pedaily.cn",
+        "cls.cn",
+    ]
 
 
 def test_planner_uses_investor_placeholders_when_investors_are_unknown():
@@ -525,7 +530,7 @@ def test_planner_uses_investor_placeholders_when_investors_are_unknown():
     assert "领投方 投资方" in planned[1].query.text
 
 
-def test_planner_does_not_depend_on_configured_b_domains():
+def test_planner_falls_back_to_open_queries_after_registered_b_domain_is_used():
     planned = planner(
         financing_b_domains=["stcn.com"],
         elastic_budget=3,

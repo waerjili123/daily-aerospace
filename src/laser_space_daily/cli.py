@@ -41,6 +41,8 @@ LOGGER = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _FAILURE_DIAGNOSTICS_NAME = "failure-diagnostics.json"
 _RUN_RESULT_NAME = "run-result.json"
+_CANDIDATE_CHECKPOINT_NAME = "candidate-checkpoint.json"
+_DELIVERY_STATUS_NAME = "delivery-status.json"
 
 
 class ConfigurationError(ValueError):
@@ -194,6 +196,10 @@ def build_pipeline(settings: Settings) -> Pipeline:
         )
         if settings.discovery.mode == "daily"
         else None,
+        checkpoint_writer=lambda payload: _atomic_write_json(
+            settings.data_dir / _CANDIDATE_CHECKPOINT_NAME,
+            payload,
+        ),
     )
 
 
@@ -389,7 +395,12 @@ def _record_failure(
 
 
 def _clear_run_metadata(settings: Settings) -> None:
-    for name in (_FAILURE_DIAGNOSTICS_NAME, _RUN_RESULT_NAME):
+    for name in (
+        _FAILURE_DIAGNOSTICS_NAME,
+        _RUN_RESULT_NAME,
+        _CANDIDATE_CHECKPOINT_NAME,
+        _DELIVERY_STATUS_NAME,
+    ):
         (settings.data_dir / name).unlink(missing_ok=True)
 
 
@@ -397,21 +408,207 @@ def _write_run_result(
     settings: Settings,
     report_path: Path,
     now: datetime,
+    *,
+    status: str = "success",
+    failure_stage: str | None = None,
 ) -> None:
     report_reference = (
         report_path.resolve()
         .relative_to(settings.report_dir.parent.resolve())
         .as_posix()
     )
-    _atomic_write_json(
-        settings.data_dir / _RUN_RESULT_NAME,
-        {
-            "schema_version": 1,
-            "status": "success",
-            "occurred_at": now.isoformat(),
-            "report_path": report_reference,
-        },
-    )
+    payload = {
+        "schema_version": 1,
+        "status": status,
+        "occurred_at": now.isoformat(),
+        "report_path": report_reference,
+    }
+    if failure_stage is not None:
+        payload["failure_stage"] = failure_stage
+    _atomic_write_json(settings.data_dir / _RUN_RESULT_NAME, payload)
+
+
+def _write_delivery_status(
+    settings: Settings,
+    *,
+    status: str,
+    now: datetime,
+    report_kind: str,
+    error: BaseException | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "status": status,
+        "occurred_at": now.isoformat(),
+        "report_kind": report_kind,
+    }
+    if error is not None:
+        payload["error_type"] = type(error).__name__
+    _atomic_write_json(settings.data_dir / _DELIVERY_STATUS_NAME, payload)
+
+
+def _safe_recovery_text(value: object, limit: int = 180) -> str:
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+    for character in ("\\", "`", "*", "_", "[", "]", "<", ">", "|"):
+        text = text.replace(character, "")
+    return text[:limit]
+
+
+def _safe_recovery_link(url: object) -> str:
+    value = str(url or "").strip()
+    return value if value.startswith(("https://", "http://")) else ""
+
+
+def _recovery_report(
+    settings: Settings,
+    *,
+    now: datetime,
+    stage: str,
+    test_label: bool,
+) -> tuple[RenderedReport, bool]:
+    checkpoint_path = settings.data_dir / _CANDIDATE_CHECKPOINT_NAME
+    candidates: list[dict[str, Any]] = []
+    if checkpoint_path.is_file():
+        try:
+            payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            raw_candidates = payload.get("candidates")
+            if isinstance(raw_candidates, list):
+                candidates = [
+                    item for item in raw_candidates if isinstance(item, dict)
+                ]
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            candidates = []
+
+    date_text = now.astimezone(BEIJING).date().isoformat()
+    if candidates:
+        title = f"# 【降级】中国激光与商业航天情报快报｜{date_text}"
+        lines = [
+            title,
+            "",
+            (
+                f"运行在 `{_safe_recovery_text(stage, 60)}` 阶段失败；"
+                "以下仅为本轮已抓取并完成结构分析的线索，"
+                "均未通过最终严格核验。"
+            ),
+            "",
+            "## 本轮可用线索",
+            "",
+        ]
+        visible = [
+            item
+            for item in candidates
+            if item.get("in_china") is True and item.get("in_scope") is True
+        ][:5]
+        if not visible:
+            lines.append("- 本轮检查点中没有境内且主题相关的可用线索。")
+        for item in visible:
+            parts = ["- 候选线索（未核实）"]
+            category = _safe_recovery_text(item.get("category"), 40)
+            published_at = _safe_recovery_text(item.get("published_at"), 32)
+            organization = _safe_recovery_text(item.get("organization"), 80)
+            title_text = _safe_recovery_text(item.get("title"), 140)
+            amount = _safe_recovery_text(item.get("amount"), 40)
+            if category:
+                parts.append(category)
+            if published_at:
+                parts.append(published_at[:10])
+            if organization:
+                parts.append(organization)
+            parts.append(title_text)
+            if amount:
+                parts.append(f"明确金额：{amount}")
+            source_url = _safe_recovery_link(item.get("source_url"))
+            if source_url:
+                parts.append(f"[查看原始来源]({source_url})")
+            lines.append("｜".join(parts))
+            summary = _safe_recovery_text(item.get("summary"), 180)
+            if summary:
+                lines.append(f"  - 摘要（未核实）：{summary}")
+        lines.extend(
+            (
+                "",
+                "## 状态说明",
+                "",
+                "- 本消息不包含任何“已核实”结论。",
+                "- Actions 仍会显示失败，请以失败诊断和后续修复为准。",
+            )
+        )
+        has_intelligence = bool(visible)
+    else:
+        title = f"# 【异常】情报日报运行告警｜{date_text}"
+        lines = [
+            title,
+            "",
+            (
+                f"运行在 `{_safe_recovery_text(stage, 60)}` 阶段失败，"
+                "且尚未形成本轮候选检查点。"
+            ),
+            "",
+            "- 本消息不包含情报内容。",
+            "- 未使用历史日报或推测性信息进行填充。",
+        ]
+        has_intelligence = False
+
+    report = RenderedReport(title=title, markdown="\n".join(lines).strip() + "\n")
+    if test_label:
+        report = _mark_test_report(report)
+    return report, has_intelligence
+
+
+def _recover_failed_run(
+    arguments: Any,
+    selected: CliDependencies,
+    settings: Settings,
+    *,
+    now: datetime,
+    stage: str,
+) -> None:
+    try:
+        report, has_intelligence = _recovery_report(
+            settings,
+            now=now,
+            stage=stage,
+            test_label=arguments.test_label,
+        )
+        report_path = settings.report_dir / f"{now.date().isoformat()}-degraded.md"
+        _atomic_write_report(report_path, report)
+        _write_run_result(
+            settings,
+            report_path,
+            now,
+            status="degraded",
+            failure_stage=stage,
+        )
+        if arguments.dry_run:
+            _write_delivery_status(
+                settings,
+                status="skipped",
+                now=now,
+                report_kind="degraded" if has_intelligence else "alert",
+            )
+            return
+        try:
+            selected.notifier_factory(settings).send(report)
+        except Exception as error:
+            _write_delivery_status(
+                settings,
+                status="failed",
+                now=now,
+                report_kind="degraded" if has_intelligence else "alert",
+                error=error,
+            )
+        else:
+            _write_delivery_status(
+                settings,
+                status="accepted",
+                now=now,
+                report_kind="degraded" if has_intelligence else "alert",
+            )
+    except Exception as recovery_error:
+        LOGGER.error(
+            "recovery_report_failed error=%s",
+            type(recovery_error).__name__,
+        )
 
 
 def _configure_logging(level: str) -> None:
@@ -435,6 +632,13 @@ def _run_locked_cycle(
             error=error,
             now=now,
         )
+        _recover_failed_run(
+            arguments,
+            selected,
+            settings,
+            now=now,
+            stage="diagnostics_write",
+        )
         return 4
 
     try:
@@ -448,6 +652,13 @@ def _run_locked_cycle(
             error=error,
             now=now,
         )
+        _recover_failed_run(
+            arguments,
+            selected,
+            settings,
+            now=now,
+            stage=stage,
+        )
         return 2
     except Exception as error:
         _record_failure(
@@ -456,6 +667,13 @@ def _run_locked_cycle(
             stage=stage,
             error=error,
             now=now,
+        )
+        _recover_failed_run(
+            arguments,
+            selected,
+            settings,
+            now=now,
+            stage=stage,
         )
         return 4
 
@@ -491,11 +709,24 @@ def _run_locked_cycle(
             error=error,
             now=now,
         )
+        _recover_failed_run(
+            arguments,
+            selected,
+            settings,
+            now=now,
+            stage=stage,
+        )
         return 4
 
     if arguments.dry_run:
         try:
             _write_run_result(settings, report_path, now)
+            _write_delivery_status(
+                settings,
+                status="skipped",
+                now=now,
+                report_kind="standard",
+            )
         except Exception as error:
             _record_failure(
                 settings,
@@ -509,6 +740,19 @@ def _run_locked_cycle(
     try:
         selected.notifier_factory(settings).send(report)
     except Exception as error:
+        try:
+            _write_delivery_status(
+                settings,
+                status="failed",
+                now=now,
+                report_kind="standard",
+                error=error,
+            )
+        except Exception as status_error:
+            LOGGER.error(
+                "delivery_status_write_failed error=%s",
+                type(status_error).__name__,
+            )
         _record_failure(
             settings,
             code="notification",
@@ -519,6 +763,12 @@ def _run_locked_cycle(
         return 3
     try:
         _write_run_result(settings, report_path, now)
+        _write_delivery_status(
+            settings,
+            status="accepted",
+            now=now,
+            report_kind="standard",
+        )
     except Exception as error:
         _record_failure(
             settings,
