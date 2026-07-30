@@ -371,6 +371,19 @@ def test_date_followup_requires_candidate_date_inside_pool():
     assert eligibility.reason == "published_at_outside_pool"
 
 
+def test_naive_publication_date_is_interpreted_in_planning_timezone():
+    item = target(
+        published_at=datetime(2026, 7, 23, 8, 0),
+    )
+
+    eligibility = planner().eligibility(NOW, item)
+    planned = planner().plan(NOW, [item])
+
+    assert eligibility.eligible is True
+    assert eligibility.reason == "eligible"
+    assert len(planned) == 3
+
+
 def test_unregistered_candidate_name_does_not_trigger_site_query():
     item = target()
     item.analysis.investors = []

@@ -18,6 +18,7 @@ from .models import (
     SourceGrade,
     VerificationStatus,
 )
+from .timebox import BEIJING_TIMEZONE
 from .verifier import VerificationDecision, financing_evidence_gaps
 
 
@@ -38,6 +39,7 @@ _ELIGIBLE_REASONS = frozenset(
         "classification_rule_disagreement",
     }
 )
+_PLANNING_REFERENCE = datetime(2000, 1, 1, tzinfo=BEIJING_TIMEZONE)
 
 
 def pending_reason_allows_followup(reason: str) -> bool:
@@ -291,6 +293,8 @@ class VerificationFollowupPlanner:
         target: FollowupTarget,
         no_new_counts: Mapping[str, int] | None = None,
     ) -> FollowupEligibility:
+        if now.tzinfo is None:
+            raise ValueError("verification planning time must include timezone")
         analysis = target.analysis
         if target.decision.status is not VerificationStatus.PENDING:
             return FollowupEligibility(False, "status_not_pending")
@@ -305,7 +309,10 @@ class VerificationFollowupPlanner:
             return FollowupEligibility(False, "classification_incomplete")
         if not analysis.organization:
             return FollowupEligibility(False, "organization_missing")
-        published_at = analysis.published_at or target.candidate.source_published_at
+        published_at = _planning_datetime(
+            analysis.published_at or target.candidate.source_published_at,
+            now,
+        )
         if (
             published_at is None
             or published_at < now - timedelta(days=self._pool_days)
@@ -368,7 +375,9 @@ class VerificationFollowupPlanner:
             source_gap_rank,
             grade_rank,
             attempts,
-            -published_at.timestamp() if published_at is not None else 0,
+            -_planning_datetime(published_at, _PLANNING_REFERENCE).timestamp()
+            if published_at is not None
+            else 0,
             target.candidate.url,
         )
 
@@ -496,6 +505,19 @@ _VERIFICATION_ROUND = re.compile(
     r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
     r"天使\+{0,2}|种子|战略投资|战略)"
 )
+
+
+def _planning_datetime(
+    value: datetime | None,
+    reference: datetime,
+) -> datetime | None:
+    if value is None:
+        return None
+    if reference.tzinfo is None:
+        raise ValueError("planning datetime reference must include timezone")
+    if value.tzinfo is None:
+        return value.replace(tzinfo=reference.tzinfo)
+    return value.astimezone(reference.tzinfo)
 _ORGANIZATION_LEGAL_SUFFIXES = (
     "股份有限公司",
     "有限责任公司",
