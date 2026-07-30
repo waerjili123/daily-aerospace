@@ -26,9 +26,9 @@ from .config import Settings, load_settings
 from .discovery import BochaProvider, OfficialSeed, OfficialSeedCollector, QueryPlanner
 from .fetcher import PageFetcher
 from .matching import ProjectMatcher
-from .models import SourceGrade
+from .models import SourceGrade, VerificationStatus
 from .notifier import DingTalkNotifier, suppress_secret_bearing_http_logs
-from .pipeline import Pipeline
+from .pipeline import Pipeline, RunResult
 from .report import RenderedReport, ReportRenderer
 from .repository import StateRepository
 from .timebox import beijing_now
@@ -51,6 +51,10 @@ class ConfigurationError(ValueError):
 
 class RunAlreadyActive(RuntimeError):
     """Raised when another local process owns the configured data directory."""
+
+
+class DeliveryGateError(RuntimeError):
+    """Raised when a real test delivery does not meet the current-run gate."""
 
 
 class _LocalRunLock:
@@ -447,6 +451,58 @@ def _write_delivery_status(
     _atomic_write_json(settings.data_dir / _DELIVERY_STATUS_NAME, payload)
 
 
+def _validate_test_delivery(
+    result: RunResult,
+    report: RenderedReport,
+) -> None:
+    changed_event_ids = set(result.changed_event_ids)
+    changed_financing_ids = set(result.changed_financing_ids)
+    changed_project_ids = set(result.changed_project_ids)
+    verified_event_ids = {
+        item.event_id
+        for item in result.state.events
+        if item.formal_record
+        and item.verification_status is VerificationStatus.VERIFIED
+    }
+    current_verified = len(changed_event_ids & verified_event_ids)
+    current_verified += sum(
+        item.financing_id in changed_financing_ids
+        and item.verification_status is VerificationStatus.VERIFIED
+        for item in result.state.financings
+    )
+    current_verified += sum(
+        project.project_id in changed_project_ids
+        and bool(set(project.event_ids) & verified_event_ids)
+        for project in result.state.projects
+    )
+    if current_verified < 1:
+        raise DeliveryGateError("current_run_has_no_strict_verified_item")
+
+    category_headings = (
+        "激光通信",
+        "激光武器/反无人机",
+        "光电转塔/吊舱",
+        "商业航天融资",
+    )
+    category_has_content = False
+    for heading in category_headings:
+        marker = f"## {heading}\n"
+        if marker not in report.markdown:
+            continue
+        body = report.markdown.split(marker, maxsplit=1)[1]
+        body = body.split("\n## ", maxsplit=1)[0]
+        if any(
+            line.startswith("- ")
+            and "](" in line
+            and "暂无已核实信息" not in line
+            for line in body.splitlines()
+        ):
+            category_has_content = True
+            break
+    if not category_has_content:
+        raise DeliveryGateError("category_sections_have_no_sourced_content")
+
+
 def _safe_recovery_text(value: object, limit: int = 180) -> str:
     text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
     for character in ("\\", "`", "*", "_", "[", "]", "<", ">", "|"):
@@ -737,6 +793,32 @@ def _run_locked_cycle(
             )
             return 4
         return 0
+    if arguments.test_label:
+        try:
+            _validate_test_delivery(result, report)
+        except DeliveryGateError as error:
+            try:
+                _write_delivery_status(
+                    settings,
+                    status="failed",
+                    now=now,
+                    report_kind="standard",
+                    error=error,
+                )
+                _write_run_result(settings, report_path, now)
+            except Exception as status_error:
+                LOGGER.error(
+                    "delivery_gate_status_write_failed error=%s",
+                    type(status_error).__name__,
+                )
+            _record_failure(
+                settings,
+                code="notification",
+                stage="delivery_gate",
+                error=error,
+                now=now,
+            )
+            return 3
     try:
         selected.notifier_factory(settings).send(report)
     except Exception as error:

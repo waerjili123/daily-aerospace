@@ -1490,6 +1490,88 @@ def test_push_failure_keeps_report_and_returns_three(cli_deps, tmp_path: Path) -
     assert cli_deps.notifier.calls == 1
 
 
+def test_test_delivery_gate_blocks_run_without_current_strict_item(
+    cli_deps, tmp_path: Path
+) -> None:
+    cli_deps.pipeline.result = make_result()
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--test-label",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert code == 3
+    assert cli_deps.notifier.calls == 0
+    assert delivery["status"] == "failed"
+    assert delivery["error_type"] == "DeliveryGateError"
+
+
+def test_test_delivery_gate_requires_sourced_category_content(
+    cli_deps, tmp_path: Path
+) -> None:
+    cli_deps.renderer.report = RenderedReport(
+        title="# 中国激光与商业航天情报日报｜2026-07-22",
+        markdown=(
+            "# 中国激光与商业航天情报日报｜2026-07-22\n\n"
+            "## 激光通信\n- 暂无已核实信息\n\n"
+            "## 激光武器/反无人机\n- 暂无已核实信息\n\n"
+            "## 光电转塔/吊舱\n- 暂无已核实信息\n\n"
+            "## 商业航天融资\n- 暂无已核实信息\n"
+        ),
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--test-label",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert code == 3
+    assert cli_deps.notifier.calls == 0
+    assert delivery["status"] == "failed"
+    assert delivery["error_type"] == "DeliveryGateError"
+
+
+def test_test_delivery_gate_allows_qualified_report(cli_deps, tmp_path: Path) -> None:
+    cli_deps.renderer.report = ReportRenderer().render(cli_deps.pipeline.result)
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--test-label",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert cli_deps.notifier.calls == 1
+    assert cli_deps.notifier.reports[0].title.startswith("# 【测试】")
+    assert delivery["status"] == "accepted"
+
+
 def test_pipeline_failure_returns_four_and_sends_anomaly_alert(
     cli_deps, tmp_path: Path
 ) -> None:
