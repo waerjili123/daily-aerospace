@@ -691,51 +691,51 @@ class RuleVerifier:
         if not cls._field_has_quote_containing(
             analysis.evidence, "organization", analysis.organization or ""
         ):
-            return "evidence_not_grounded"
+            return "financing_source_organization_evidence_invalid"
         if analysis.published_at is None or not cls._field_has_date(
             analysis.evidence, analysis.published_at
         ):
-            return "evidence_not_grounded"
+            return "financing_source_publication_date_evidence_invalid"
         if subtype == "round_equity":
             if not analysis.financing_round or not any(
                 item.field == "financing_round"
                 and cls._contains_round(item.quote, analysis.financing_round)
                 for item in analysis.evidence
             ):
-                return "evidence_not_grounded"
+                return "financing_source_round_evidence_invalid"
         elif not any(
             item.field == "financing_subtype"
             and cls._financing_subtype_supported(item.quote, subtype)
             for item in analysis.evidence
         ):
-            return "evidence_not_grounded"
+            return "financing_source_subtype_evidence_invalid"
         if analysis.amount:
             if analysis.amount_disclosed is False or not any(
                 item.field == "amount"
                 and cls._amount_key(item.quote) == cls._amount_key(analysis.amount)
                 for item in analysis.evidence
             ):
-                return "evidence_not_grounded"
+                return "financing_source_amount_evidence_invalid"
         elif analysis.amount_disclosed is False and not any(
             item.field == "amount" and cls._is_undisclosed(item.quote)
             for item in analysis.evidence
         ):
-            return "evidence_not_grounded"
+            return "financing_source_amount_evidence_invalid"
         for investor in analysis.investors:
             if not cls._field_has_quote_containing(
                 analysis.evidence, "investors", investor
             ):
-                return "evidence_not_grounded"
+                return "financing_source_investor_evidence_invalid"
         if analysis.business_area and not cls._field_has_quote_containing(
             analysis.evidence, "business_area", analysis.business_area
         ):
-            return "evidence_not_grounded"
+            return "financing_source_business_area_evidence_invalid"
         if not any(
             item.field == "event_type"
             and cls._contains_any(item.quote, _event_type_terms(EventType.FINANCING))
             for item in analysis.evidence
         ):
-            return "evidence_not_grounded"
+            return "financing_source_action_evidence_invalid"
         return None
 
     @classmethod
