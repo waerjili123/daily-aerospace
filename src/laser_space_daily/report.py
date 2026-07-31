@@ -972,6 +972,7 @@ def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
                 identity=f"candidate:{item.url}",
             )
         )
+    signals = _merge_short_financing_signals(signals)
     signals.sort(
         key=lambda item: (
             0 if item.label == "高可信待核实" else 1,
@@ -984,6 +985,114 @@ def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
         )
     )
     return signals
+
+
+def _merge_short_financing_signals(
+    signals: list[_ShortSignal],
+) -> list[_ShortSignal]:
+    merged: list[_ShortSignal] = []
+    for signal in signals:
+        if signal.category is not Category.COMMERCIAL_SPACE_FINANCING:
+            merged.append(signal)
+            continue
+        match_index = next(
+            (
+                index
+                for index, existing in enumerate(merged)
+                if _same_short_financing_event(existing, signal)
+            ),
+            None,
+        )
+        if match_index is None:
+            merged.append(signal)
+            continue
+        merged[match_index] = _combine_short_financing_signals(
+            merged[match_index],
+            signal,
+        )
+    return merged
+
+
+def _same_short_financing_event(
+    left: _ShortSignal,
+    right: _ShortSignal,
+) -> bool:
+    if (
+        left.category is not Category.COMMERCIAL_SPACE_FINANCING
+        or right.category is not Category.COMMERCIAL_SPACE_FINANCING
+    ):
+        return False
+    left_subject = _identity_text(left.organization or left.title)
+    right_subject = _identity_text(right.organization or right.title)
+    if not left_subject or not right_subject:
+        return False
+    if left_subject not in right_subject and right_subject not in left_subject:
+        return False
+    left_round = _round_identity(left.round_name or left.title)
+    right_round = _round_identity(right.round_name or right.title)
+    if not left_round or not right_round or left_round != right_round:
+        return False
+    if left.amount and right.amount:
+        if _identity_text(left.amount) != _identity_text(right.amount):
+            return False
+    if left.published_at is not None and right.published_at is not None:
+        left_date = _as_beijing(left.published_at).date()
+        right_date = _as_beijing(right.published_at).date()
+        if abs((left_date - right_date).days) > 45:
+            return False
+    return True
+
+
+def _combine_short_financing_signals(
+    left: _ShortSignal,
+    right: _ShortSignal,
+) -> _ShortSignal:
+    source_urls = tuple(sorted({*left.source_urls, *right.source_urls}))
+    representative = max(
+        (left, right),
+        key=lambda item: (
+            1 if item.label == "高可信待核实" else 0,
+            len(item.organization),
+            (
+                _as_beijing(item.published_at).timestamp()
+                if item.published_at is not None
+                else 0
+            ),
+            len(item.title),
+        ),
+    )
+    published_at = max(
+        (
+            value
+            for value in (left.published_at, right.published_at)
+            if value is not None
+        ),
+        key=lambda value: _as_beijing(value).timestamp(),
+        default=None,
+    )
+    organization = max(
+        (left.organization, right.organization),
+        key=len,
+    )
+    round_name = max((left.round_name, right.round_name), key=len)
+    label = (
+        "高可信待核实"
+        if len(source_urls) >= 2
+        or "高可信待核实" in {left.label, right.label}
+        else "候选线索"
+    )
+    return _ShortSignal(
+        category=representative.category,
+        label=label,
+        title=representative.title,
+        organization=organization,
+        published_at=published_at,
+        amount=representative.amount or left.amount or right.amount,
+        round_name=round_name,
+        summary=representative.summary or left.summary or right.summary,
+        source_urls=source_urls,
+        identity=f"{left.identity}||{right.identity}",
+    )
 
 
 def _short_signal_item(

@@ -722,6 +722,54 @@ def test_short_report_keeps_financing_and_tender_candidates_in_separate_sections
     assert "采购电话" not in text
 
 
+def test_short_report_merges_same_pending_financing_across_media_sources() -> None:
+    first = CandidateDiagnostic(
+        source_url="https://www.chinaventure.com.cn/guangyou",
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        summary="光邮星空宣布连续完成Pre-A和Pre-A+轮融资。",
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization="北京光邮星空科技有限公司",
+        published_at=dt(7, 16),
+        financing_round="Pre-A和Pre-A+轮",
+        evidence_count=6,
+        stage="persisted",
+        status="pending",
+        reason="financing_missing_required_evidence",
+        source_grade=SourceGrade.B,
+        verification_event_key="光邮星空|financing|prea,prea+|2026-07-16",
+    )
+    second = first.model_copy(
+        update={
+            "source_url": "https://m.pedaily.cn/news/guangyou",
+            "title": "光邮星空连续完成Pre-A和Pre-A+轮融资，聚焦星地激光通信",
+            "organization": "光邮星空",
+            "published_at": dt(7, 2),
+            "verification_event_key": (
+                "光邮星空|financing|prea,prea+|2026-07-02"
+            ),
+        }
+    )
+    result = make_result().model_copy(
+        update={"candidate_diagnostics": [first, second]}
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+
+    assert financing_section.count("**【高可信待核实】") == 1
+    assert "企业：北京光邮星空科技有限公司" in financing_section
+    assert "[来源1](https://m.pedaily.cn/news/guangyou)" in financing_section
+    assert (
+        "[来源2](https://www.chinaventure.com.cn/guangyou)"
+        in financing_section
+    )
+    assert "待核实线索 1 条" in text
+
+
 def test_short_report_hides_empty_followup_and_technical_diagnostics() -> None:
     metrics = RunMetrics(
         started_at=WINDOW_END,
