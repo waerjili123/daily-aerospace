@@ -686,7 +686,26 @@ class RuleVerifier:
             required.add("financing_round")
         else:
             required.add("financing_subtype")
-        if subtype is None or not required.issubset(evidence_fields):
+        if subtype is None:
+            return "financing_source_event_evidence_missing"
+        missing_required = required - evidence_fields
+        missing_reason = {
+            "organization": "financing_source_organization_evidence_invalid",
+            "published_at": (
+                "financing_source_publication_date_evidence_invalid"
+            ),
+            "financing_round": "financing_source_round_evidence_invalid",
+            "financing_subtype": "financing_source_subtype_evidence_invalid",
+        }
+        for field in (
+            "organization",
+            "published_at",
+            "financing_round",
+            "financing_subtype",
+        ):
+            if field in missing_required:
+                return missing_reason[field]
+        if missing_required:
             return "financing_source_event_evidence_missing"
         if not cls._field_has_quote_containing(
             analysis.evidence, "organization", analysis.organization or ""

@@ -1415,6 +1415,45 @@ def test_two_b_event_matrix_allows_omitted_attributes_and_compatible_rounds():
     )
 
 
+@pytest.mark.parametrize(
+    ("missing_field", "expected_reason"),
+    [
+        (
+            "organization",
+            "financing_source_organization_evidence_invalid",
+        ),
+        (
+            "published_at",
+            "financing_source_publication_date_evidence_invalid",
+        ),
+        (
+            "financing_round",
+            "financing_source_round_evidence_invalid",
+        ),
+    ],
+)
+def test_financing_event_matrix_reports_missing_required_evidence_field(
+    missing_field, expected_reason
+):
+    source = page(
+        "https://media.example.cn/report/missing-field",
+        "China commercial space company Orbit Corp completed Series B financing.",
+    )
+    analysis = financing_matrix_claim(
+        source,
+        organization="Orbit Corp",
+        published_at="2026-07-21T00:00:00+08:00",
+        round_name="Series B",
+    )
+    analysis.evidence = [
+        item for item in analysis.evidence if item.field != missing_field
+    ]
+
+    reason = RuleVerifier._financing_source_event_failure(analysis)
+
+    assert reason == expected_reason
+
+
 def test_two_b_financing_requires_independent_analysis_and_persists_both_records():
     primary = page(
         "https://media.example.cn/report/independent",
