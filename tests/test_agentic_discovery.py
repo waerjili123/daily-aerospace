@@ -138,6 +138,43 @@ def test_executes_four_seed_queries_before_agent_followups():
     assert all(call[2] == 10 for call in provider.calls)
 
 
+def test_daily_twelve_query_budget_reserves_five_financing_seed_searches():
+    provider = FakeSearchProvider()
+    subject = AgenticSearchOrchestrator(
+        client=FakeClient([response()]),
+        search_provider=provider,
+        fallback_planner=QueryPlanner(
+            max_queries=8,
+            financing_domains=(
+                "company.example",
+                "investor.example",
+                "media-one.example",
+                "media-two.example",
+            ),
+        ),
+        model="deepseek-v4-pro",
+        mode="daily",
+        search_budget=12,
+        max_agent_rounds=4,
+        max_results_per_call=10,
+        stop_after_no_new_rounds=2,
+    )
+
+    result = subject.discover(NOW, [])
+
+    assert result.budget_used == 8
+    assert len(provider.calls) == 8
+    assert sum(
+        call[0].category is Category.COMMERCIAL_SPACE_FINANCING
+        for call in provider.calls
+    ) == 5
+    assert all(
+        "采购" not in call[0].text
+        for call in provider.calls
+        if call[0].category is Category.COMMERCIAL_SPACE_FINANCING
+    )
+
+
 def test_duplicate_agent_query_is_rejected_without_spending_budget():
     duplicate = "某激光通信项目 采购方 公告编号"
     subject, provider = orchestrator(

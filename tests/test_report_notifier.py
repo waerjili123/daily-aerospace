@@ -22,6 +22,7 @@ from laser_space_daily.cli import (
     CliDependencies,
     RunAlreadyActive,
     _LocalRunLock,
+    _build_renderer,
     _build_parser,
     _mark_test_report,
     build_pipeline,
@@ -50,6 +51,7 @@ from laser_space_daily.models import (
 from laser_space_daily.notifier import DingTalkNotifier, NotificationError
 from laser_space_daily.pipeline import CandidateDiagnostic, RunResult
 from laser_space_daily.report import (
+    DingTalkShortReportRenderer,
     RenderedReport,
     ReportRenderer,
     ReportTooLong,
@@ -603,6 +605,146 @@ def test_report_matches_snapshot(run_result: RunResult, snapshot_text: str) -> N
     ]
     positions = [report.markdown.index(f"## {heading}") for heading in headings]
     assert positions == sorted(positions)
+
+
+def test_production_renderer_uses_separated_dingtalk_short_report(
+    cli_deps,
+) -> None:
+    renderer = _build_renderer(cli_deps.settings)
+
+    assert isinstance(renderer, DingTalkShortReportRenderer)
+
+
+def test_short_report_separates_financing_before_procurement_and_keeps_links(
+    run_result: RunResult,
+) -> None:
+    text = DingTalkShortReportRenderer().render(run_result).markdown
+    financing = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+    procurement = text.split("## 二、招标采购情况", 1)[1].split(
+        "## 三、其他行业动态", 1
+    )[0]
+
+    assert text.index("## 一、商业航天融资新闻") < text.index(
+        "## 二、招标采购情况"
+    )
+    assert "星河动力" in financing
+    assert "星间激光通信终端采购" not in financing
+    assert "星间激光通信终端采购" in procurement
+    assert "星河动力" not in procurement
+    assert "[企业公告](https://company.example/financing)" in financing
+    assert "[权威媒体报道](https://media.example/financing)" in financing
+    assert "[官方原始公告](https://official.example/open)" in procurement
+    assert "融资统计：已核实" in financing
+    assert "招标统计：已核实" in procurement
+    assert 600 <= len(text) <= 1200
+
+
+def test_short_report_compacts_items_before_raising_length_error(
+    run_result: RunResult,
+) -> None:
+    compact = DingTalkShortReportRenderer(max_chars=900).render(run_result)
+
+    assert len(compact.markdown) <= 900
+    assert "## 一、商业航天融资新闻" in compact.markdown
+    assert "## 二、招标采购情况" in compact.markdown
+    with pytest.raises(ReportTooLong):
+        DingTalkShortReportRenderer(max_chars=200).render(run_result)
+
+
+def test_short_report_marks_changed_old_financing_as_historical_backfill() -> None:
+    item = financing(announced_at=dt(7, 7))
+    result = make_result(
+        state=StateBundle(financings=[item]),
+        changed_financing_ids=[item.financing_id],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+
+    assert "【已核实·历史补录】星河动力完成A轮" in text
+    assert "历史补录 1 条" in text
+    assert "过去24小时融资新增 0 条" in text
+    assert "本轮新核实/历史补录" not in text
+
+
+def test_short_report_keeps_financing_and_tender_candidates_in_separate_sections() -> None:
+    financing_diagnostic = CandidateDiagnostic(
+        source_url="https://www.stcn.com/article/guangyou",
+        title="光邮星空完成Pre-A轮融资",
+        summary=(
+            "光邮星空宣布完成Pre-A轮融资，投资方包括中关村科学城、"
+            "九合创投和同创伟业，具体金额未披露。"
+        ),
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization="光邮星空",
+        published_at=dt(7, 16),
+        financing_round="Pre-A轮",
+        evidence_count=6,
+        stage="persisted",
+        status="pending",
+        reason="financing_requires_official_or_two_independent_b_sources",
+        source_grade=SourceGrade.B,
+        verification_event_key="光邮星空|financing|Pre-A",
+    )
+    tender = Candidate(
+        title="无人机激光反制设备采购成交结果",
+        url="https://shanghai.jianyu360.cn/item",
+        summary=(
+            "本条项目信息由聚合站提供。采购单位为上海市公安局黄浦分局，"
+            "候选中标方为上海纬稳科技。采购联系人 张三 采购电话 123456"
+        ),
+        discovered_at=WINDOW_END,
+        discovery_source="bocha",
+        category_hint=Category.LASER_WEAPON,
+        source_published_at=dt(7, 3),
+    )
+    result = make_result(discovery_candidates=[tender]).model_copy(
+        update={"candidate_diagnostics": [financing_diagnostic]}
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+    tender_section = text.split("## 二、招标采购情况", 1)[1].split(
+        "## 三、其他行业动态", 1
+    )[0]
+
+    assert "光邮星空完成Pre-A轮融资" in financing_section
+    assert "无人机激光反制设备" not in financing_section
+    assert "无人机激光反制设备" in tender_section
+    assert "光邮星空" not in tender_section
+    assert "[聚合线索](https://shanghai.jianyu360.cn/item)" in tender_section
+    assert "采购联系人" not in text
+    assert "采购电话" not in text
+
+
+def test_short_report_hides_empty_followup_and_technical_diagnostics() -> None:
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        raw_search_count=84,
+        final_candidate_count=4,
+        search_budget=12,
+        search_budget_used=15,
+        elastic_search_calls=3,
+        agent_stop_reason="budget_exhausted",
+        elastic_trigger_reasons=["missing_required_fields:published_at"],
+    )
+
+    text = DingTalkShortReportRenderer().render(
+        make_result(metrics=metrics)
+    ).markdown
+
+    assert "## 四、重点跟进" not in text
+    assert "系统状态：检索 84 条，形成 4 条候选" in text
+    assert "budget_exhausted" not in text
+    assert "missing_required_fields" not in text
+    assert "采集漏斗" not in text
+    assert "模型轮次" not in text
+    assert "失败域" not in text
 
 
 def test_currently_open_section_requires_supported_nonexpired_deadline() -> None:
@@ -1522,10 +1664,8 @@ def test_test_delivery_gate_requires_sourced_category_content(
         title="# 中国激光与商业航天情报日报｜2026-07-22",
         markdown=(
             "# 中国激光与商业航天情报日报｜2026-07-22\n\n"
-            "## 激光通信\n- 暂无已核实信息\n\n"
-            "## 激光武器/反无人机\n- 暂无已核实信息\n\n"
-            "## 光电转塔/吊舱\n- 暂无已核实信息\n\n"
-            "## 商业航天融资\n- 暂无已核实信息\n"
+            "## 一、商业航天融资新闻\n- 暂无可展示信息\n\n"
+            "## 二、招标采购情况\n- 暂无可展示信息\n"
         ),
     )
 
@@ -1550,7 +1690,9 @@ def test_test_delivery_gate_requires_sourced_category_content(
 
 
 def test_test_delivery_gate_allows_qualified_report(cli_deps, tmp_path: Path) -> None:
-    cli_deps.renderer.report = ReportRenderer().render(cli_deps.pipeline.result)
+    cli_deps.renderer.report = DingTalkShortReportRenderer().render(
+        cli_deps.pipeline.result
+    )
 
     code = run_cli(
         [

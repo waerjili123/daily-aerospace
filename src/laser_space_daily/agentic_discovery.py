@@ -42,6 +42,8 @@ _QUERY_NOISE_TERMS = (
 _SYSTEM_PROMPT = """你是中国激光与商业航天情报检索规划器。
 你只能使用 search_web 工具提出后续搜索，不得声称自己已经访问网页。
 四个范围是激光通信采购、激光武器/反无人机采购、光电转塔/吊舱采购和商业航天股权融资。
+商业航天融资是独立新闻通道，不得把项目预算、中标金额或采购合同解释为融资。
+日常基础预算中已为商业航天融资保留五次种子检索，其余调用优先追查高价值项目。
 优先追查具体项目名、采购方、公告编号、招标/中标/变更状态、企业融资轮次和第二独立来源。
 排除行业研究报告销售页、股市行情、荐股、泛化券商观点和没有具体主体的趋势评论。
 已有信息足够或没有高价值追查方向时停止调用工具。"""
@@ -128,9 +130,20 @@ class AgenticSearchOrchestrator:
         budget_used = 0
         duplicate_query_count = 0
 
-        seed_queries = self._fallback_planner.plan(now, projects)[
-            : min(4, self._search_budget)
-        ]
+        planned_queries = self._fallback_planner.plan(now, projects)
+        seed_queries = planned_queries[: min(4, self._search_budget)]
+        if self._mode == "daily" and self._search_budget >= 12:
+            financing_seed_count = sum(
+                query.category is Category.COMMERCIAL_SPACE_FINANCING
+                for query in seed_queries
+            )
+            financing_seed_slots = max(0, 5 - financing_seed_count)
+            financing_seeds = [
+                query
+                for query in planned_queries[len(seed_queries) :]
+                if query.category is Category.COMMERCIAL_SPACE_FINANCING
+            ][:financing_seed_slots]
+            seed_queries.extend(financing_seeds)
         for query in seed_queries:
             scoped = _validated_query(
                 query.text,

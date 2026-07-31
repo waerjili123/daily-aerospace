@@ -18,6 +18,11 @@
 
 来源按 A/B/C 分级；`pending` 表示线索尚待核验，不能被当作已确认的正式记录。
 
+钉钉与 `reports/` 使用业务短报：固定先展示“商业航天融资新闻”，再展示
+“招标采购情况”，融资金额与项目预算/中标金额互不混算。短报只保留可信状态、
+关键事实和可点击来源；采集漏斗、缺失字段、失败域、研究轨迹等完整技术诊断继续
+保存在 `data/` Artifact。
+
 ## 本地运行
 
 安装 Python 3.13，创建虚拟环境后安装开发依赖：
@@ -34,7 +39,9 @@ python -m pip install -c constraints.txt -e ".[dev]"
 laser-space-daily --config config.yaml --dry-run
 ```
 
-日常增量最多执行 12 次博查搜索：
+日常增量最多执行 12 次博查搜索。标准 12 次预算会先覆盖三类招标和一条融资
+综合查询，再使用四个已注册融资来源进行定向种子检索，因此商业航天融资至少
+获得 5 次基础覆盖；剩余预算用于模型追查：
 
 ```bash
 laser-space-daily --config config.yaml --dry-run --discovery-mode daily --max-queries 12

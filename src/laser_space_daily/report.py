@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from .deadlines import deadline_is_current
 from .models import (
@@ -45,6 +45,31 @@ class _ProjectEntry:
     project: Project
     latest_at: datetime
     completed: bool
+
+
+@dataclass(frozen=True)
+class _ShortSignal:
+    category: Category
+    label: str
+    title: str
+    organization: str
+    published_at: datetime | None
+    amount: str
+    round_name: str
+    summary: str
+    source_urls: tuple[str, ...]
+    identity: str
+
+
+@dataclass(frozen=True)
+class _ShortItem:
+    lines: tuple[str, ...]
+    category: Category
+    status: str
+    strict: bool
+    daily: bool
+    historical: bool
+    followup: str | None = None
 
 
 _CATEGORY_LABELS = {
@@ -500,6 +525,657 @@ class ReportRenderer:
                 )
             )
         return tuple(entries)
+
+
+class DingTalkShortReportRenderer:
+    """Render the business-only report sent to DingTalk and stored as the report."""
+
+    def __init__(self, max_chars: int = 18000) -> None:
+        if max_chars <= 0:
+            raise ValueError("max_chars must be positive")
+        self.max_chars = max_chars
+
+    def render(self, result: RunResult) -> RenderedReport:
+        attempts = (
+            (3, 80, True),
+            (2, 50, True),
+            (1, 0, False),
+        )
+        for max_items, summary_limit, include_followups in attempts:
+            markdown = _render_short_document(
+                result,
+                max_items=max_items,
+                summary_limit=summary_limit,
+                include_followups=include_followups,
+            )
+            if len(markdown) <= self.max_chars:
+                return RenderedReport(
+                    title=ReportRenderer._title(result),
+                    markdown=markdown,
+                )
+        raise ReportTooLong(
+            f"protected short report content exceeds max_chars={self.max_chars}"
+        )
+
+
+def _render_short_document(
+    result: RunResult,
+    *,
+    max_items: int,
+    summary_limit: int,
+    include_followups: bool,
+) -> str:
+    candidate_signals = _short_candidate_signals(result)
+    financing_candidates = [
+        signal
+        for signal in candidate_signals
+        if signal.category is Category.COMMERCIAL_SPACE_FINANCING
+    ]
+    procurement_candidates = [
+        signal
+        for signal in candidate_signals
+        if signal.category in _ROLLING_CATEGORIES
+    ]
+
+    financing_items = [
+        *_short_verified_financings(result),
+        *(
+            _short_signal_item(signal, summary_limit=summary_limit)
+            for signal in financing_candidates
+        ),
+    ][:max_items]
+    procurement_items = [
+        *_short_verified_procurements(result),
+        *(
+            _short_signal_item(signal, summary_limit=summary_limit)
+            for signal in procurement_candidates
+        ),
+    ][:max_items]
+
+    displayed = [*financing_items, *procurement_items]
+    daily_financing = sum(
+        item.strict and item.daily for item in financing_items
+    )
+    daily_procurement = sum(
+        item.strict and item.daily for item in procurement_items
+    )
+    historical = sum(item.strict and item.historical for item in displayed)
+    pending = sum(not item.strict for item in displayed)
+
+    title = ReportRenderer._title(result)
+    end_text = _format_datetime(result.window_end)
+    blocks = [
+        "\n".join(
+            (
+                title,
+                f"统计截至：北京时间 {end_text}",
+                (
+                    f"概览：过去24小时融资新增 {daily_financing} 条；"
+                    f"招标变化 {daily_procurement} 条；历史补录 {historical} 条；"
+                    f"待核实线索 {pending} 条。"
+                ),
+            )
+        ),
+        _short_section(
+            "一、商业航天融资新闻",
+            financing_items,
+            empty_text="过去24小时及滚动池内暂无可展示的融资信息。",
+            statistics_label="融资统计",
+        ),
+        _short_section(
+            "二、招标采购情况",
+            procurement_items,
+            empty_text="过去24小时及滚动池内暂无可展示的招标采购信息。",
+            statistics_label="招标统计",
+        ),
+        _short_other_dynamics(procurement_items),
+    ]
+    if include_followups:
+        followups = _short_followups(
+            result,
+            financing_items=financing_items,
+            procurement_items=procurement_items,
+        )
+        if followups:
+            blocks.append("## 四、重点跟进\n" + "\n".join(followups))
+    blocks.append(_short_system_status(result, displayed))
+    return "\n\n".join(blocks) + "\n"
+
+
+def _short_verified_financings(result: RunResult) -> list[_ShortItem]:
+    changed_ids = set(result.changed_financing_ids)
+    rows = sorted(
+        (
+            item
+            for item in result.state.financings
+            if item.verification_status is VerificationStatus.VERIFIED
+            and _in_window(
+                _financing_latest_at(item),
+                result.rolling_start,
+                result.window_end,
+            )
+        ),
+        key=lambda item: (
+            0 if item.financing_id in changed_ids else 1,
+            -_as_beijing(_financing_latest_at(item)).timestamp(),
+            item.financing_id,
+        ),
+    )
+    items: list[_ShortItem] = []
+    for item in rows:
+        latest_at = _financing_latest_at(item)
+        daily = _in_window(
+            latest_at,
+            result.window_start,
+            result.window_end,
+        )
+        historical = not daily and item.financing_id in changed_ids
+        if daily:
+            label = "已核实·今日新增"
+        elif historical:
+            label = "已核实·历史补录"
+        else:
+            label = "已核实·滚动池"
+        round_text = _safe_text(
+            item.round_name
+            or {
+                "strategic": "战略融资",
+                "capital_increase": "产业基金增资",
+                "merger_acquisition": "并购融资",
+            }.get(item.financing_subtype, "融资")
+        )
+        headline = f"- **【{label}】{_safe_text(item.company)}完成{round_text}**"
+        details = [f"时间：{_format_date(item.announced_at)}"]
+        amount_text = _financing_amount(item)
+        if amount_text is not None:
+            details.append(f"金额：{amount_text}")
+        if item.investors:
+            details.append(
+                "投资方："
+                + "、".join(
+                    _safe_text(value) for value in sorted(item.investors)
+                )
+            )
+        if item.business_area:
+            details.append(f"业务方向：{_safe_text(item.business_area)}")
+        lines = [headline, "  - " + "；".join(details)]
+        source_links = _short_financing_source_links(item)
+        if source_links:
+            lines.append("  - 来源：" + "｜".join(source_links))
+        items.append(
+            _ShortItem(
+                lines=tuple(lines),
+                category=Category.COMMERCIAL_SPACE_FINANCING,
+                status="strict",
+                strict=True,
+                daily=daily,
+                historical=historical,
+            )
+        )
+    return items
+
+
+def _short_verified_procurements(result: RunResult) -> list[_ShortItem]:
+    event_by_id = {event.event_id: event for event in result.state.events}
+    changed_project_ids = set(result.changed_project_ids)
+    changed_event_ids = set(result.changed_event_ids)
+    rows: list[tuple[datetime, str, Project | Event]] = []
+    covered_event_ids: set[str] = set()
+
+    for project in result.state.projects:
+        if project.category not in _ROLLING_CATEGORIES:
+            continue
+        latest = _latest_project_event(project, event_by_id)
+        latest_at = _project_latest_at(project, event_by_id)
+        if (
+            latest is None
+            or latest_at is None
+            or latest.verification_status is not VerificationStatus.VERIFIED
+            or not _in_window(latest_at, result.rolling_start, result.window_end)
+        ):
+            continue
+        rows.append((latest_at, project.project_id, project))
+        covered_event_ids.update(project.event_ids)
+
+    for event in result.state.events:
+        if (
+            event.event_id in covered_event_ids
+            or event.category not in _ROLLING_CATEGORIES
+            or event.verification_status is not VerificationStatus.VERIFIED
+            or not event.formal_record
+            or not _in_window(
+                event.published_at,
+                result.rolling_start,
+                result.window_end,
+            )
+        ):
+            continue
+        rows.append((event.published_at, event.event_id, event))
+
+    rows.sort(
+        key=lambda row: (
+            0
+            if (
+                isinstance(row[2], Project)
+                and row[2].project_id in changed_project_ids
+            )
+            or (
+                isinstance(row[2], Event)
+                and row[2].event_id in changed_event_ids
+            )
+            else 1,
+            -_as_beijing(row[0]).timestamp(),
+            row[1],
+        )
+    )
+    items: list[_ShortItem] = []
+    for published_at, _, value in rows:
+        daily = _in_window(
+            published_at,
+            result.window_start,
+            result.window_end,
+        )
+        changed = (
+            value.project_id in changed_project_ids
+            if isinstance(value, Project)
+            else value.event_id in changed_event_ids
+        )
+        historical = not daily and changed
+        if daily:
+            label = "已核实·今日新增"
+        elif historical:
+            label = "已核实·历史补录"
+        else:
+            label = "已核实·滚动池"
+        if isinstance(value, Project):
+            latest = _latest_project_event(value, event_by_id)
+            source_url = value.latest_source_url or (
+                latest.source_url if latest is not None else ""
+            )
+            details = [
+                f"时间：{_format_date(published_at)}",
+                f"方向：{_CATEGORY_LABELS[value.category]}",
+                f"采购方：{_safe_text(value.organization)}",
+                (
+                    "状态："
+                    + _STATUS_LABELS.get(
+                        value.status,
+                        _safe_text(value.status),
+                    )
+                ),
+            ]
+            if value.amount:
+                details.append(f"金额：{_safe_text(value.amount)}")
+            deadline = _deadline_text(value)
+            if deadline:
+                details.append(f"截止：{deadline}")
+            title = value.name
+            category = value.category
+        else:
+            source_url = value.source_url
+            details = [
+                f"时间：{_format_date(value.published_at)}",
+                f"方向：{_CATEGORY_LABELS[value.category]}",
+                f"采购方：{_safe_text(value.organization)}",
+                f"状态：{_EVENT_LABELS[value.event_type]}",
+            ]
+            if value.analysis and value.analysis.amount:
+                details.append(f"金额：{_safe_text(value.analysis.amount)}")
+            title = value.title
+            category = value.category
+        lines = [
+            f"- **【{label}】{_safe_text(title)}**",
+            "  - " + "；".join(details),
+        ]
+        if source_url:
+            lines.append(
+                "  - 来源：" + _link("官方原始公告", source_url)
+            )
+        items.append(
+            _ShortItem(
+                lines=tuple(lines),
+                category=category,
+                status="strict",
+                strict=True,
+                daily=daily,
+                historical=historical,
+            )
+        )
+    return items
+
+
+def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
+    candidates_by_url = {
+        item.url: item for item in result.discovery_candidates
+    }
+    groups: dict[str, list[object]] = {}
+    for item in result.candidate_diagnostics:
+        if item.status != "pending" or item.category_hint is None:
+            continue
+        if _overlaps_verified_financing(
+            result,
+            category=item.category_hint,
+            title=item.title,
+            organization=item.organization or "",
+            round_name=item.financing_round or "",
+            published_at=item.published_at,
+        ):
+            continue
+        key = item.verification_event_key or "|".join(
+            (
+                item.category_hint.value,
+                item.organization or "",
+                item.financing_round or "",
+                item.title,
+            )
+        )
+        groups.setdefault(key, []).append(item)
+
+    signals: list[_ShortSignal] = []
+    surfaced_urls: set[str] = set()
+    for key, rows in groups.items():
+        representative = max(
+            rows,
+            key=lambda item: (
+                item.evidence_count,
+                1 if item.source_grade in {SourceGrade.A, SourceGrade.B} else 0,
+                item.source_url,
+            ),
+        )
+        source_urls = tuple(
+            sorted({item.source_url for item in rows})
+        )
+        surfaced_urls.update(source_urls)
+        candidate = candidates_by_url.get(representative.source_url)
+        signals.append(
+            _ShortSignal(
+                category=representative.category_hint,
+                label=(
+                    "高可信待核实"
+                    if _high_confidence_group(rows)
+                    else "候选线索"
+                ),
+                title=representative.title,
+                organization=representative.organization or "",
+                published_at=representative.published_at,
+                amount=representative.amount or "",
+                round_name=representative.financing_round or "",
+                summary=representative.summary or (
+                    candidate.summary if candidate is not None else ""
+                ),
+                source_urls=source_urls,
+                identity=key,
+            )
+        )
+
+    pending_urls = {
+        item.source_url for item in result.state.pending
+    }
+    for item in sorted(
+        result.state.pending,
+        key=lambda row: _pending_sort_key(row, result.window_end),
+    ):
+        if item.category_hint is None or item.source_url in surfaced_urls:
+            continue
+        if _overlaps_verified_financing(
+            result,
+            category=item.category_hint,
+            title=item.title,
+            organization="",
+            round_name="",
+            published_at=item.source_published_at,
+        ):
+            continue
+        surfaced_urls.add(item.source_url)
+        signals.append(
+            _ShortSignal(
+                category=item.category_hint,
+                label="候选线索",
+                title=item.title,
+                organization="",
+                published_at=item.source_published_at,
+                amount="",
+                round_name="",
+                summary=item.summary,
+                source_urls=(item.source_url,),
+                identity=f"pending:{item.item_id}",
+            )
+        )
+
+    for item in result.discovery_candidates:
+        if (
+            item.category_hint is None
+            or item.url in surfaced_urls
+            or item.url in pending_urls
+            or _overlaps_verified_financing(
+                result,
+                category=item.category_hint,
+                title=item.title,
+                organization="",
+                round_name="",
+                published_at=item.source_published_at,
+            )
+        ):
+            continue
+        surfaced_urls.add(item.url)
+        signals.append(
+            _ShortSignal(
+                category=item.category_hint,
+                label="候选线索",
+                title=item.title,
+                organization="",
+                published_at=item.source_published_at,
+                amount="",
+                round_name="",
+                summary=item.summary,
+                source_urls=(item.url,),
+                identity=f"candidate:{item.url}",
+            )
+        )
+    signals.sort(
+        key=lambda item: (
+            0 if item.label == "高可信待核实" else 1,
+            -(
+                _as_beijing(item.published_at).timestamp()
+                if item.published_at is not None
+                else 0
+            ),
+            item.identity,
+        )
+    )
+    return signals
+
+
+def _short_signal_item(
+    signal: _ShortSignal,
+    *,
+    summary_limit: int,
+) -> _ShortItem:
+    financing = signal.category is Category.COMMERCIAL_SPACE_FINANCING
+    title = _safe_text(signal.title)
+    lines = [f"- **【{signal.label}】{title}**"]
+    details: list[str] = []
+    if signal.published_at is not None:
+        details.append(f"时间：{_format_date(signal.published_at)}")
+    if financing:
+        if signal.organization:
+            details.append(f"企业：{_safe_text(signal.organization)}")
+        if signal.round_name:
+            details.append(f"轮次：{_safe_text(signal.round_name)}")
+    else:
+        details.append(f"方向：{_CATEGORY_LABELS[signal.category]}")
+        if signal.organization:
+            details.append(f"采购方：{_safe_text(signal.organization)}")
+    if signal.amount:
+        details.append(f"明确金额：{_safe_text(signal.amount)}")
+    summary = _short_summary(signal.summary, summary_limit)
+    if summary:
+        details.append(summary)
+    if details:
+        lines.append("  - " + "；".join(details))
+    source_links = _short_signal_source_links(signal)
+    if source_links:
+        lines.append("  - 来源：" + "｜".join(source_links))
+    subject = signal.organization or signal.title
+    followup = (
+        f"- 核实{_safe_text(subject)}的企业或投资方官方融资公告。"
+        if financing
+        else f"- 查找{_safe_text(subject)}的官方采购原始公告。"
+    )
+    return _ShortItem(
+        lines=tuple(lines),
+        category=signal.category,
+        status=signal.label,
+        strict=False,
+        daily=False,
+        historical=False,
+        followup=followup,
+    )
+
+
+def _short_financing_source_links(item: Financing) -> list[str]:
+    urls = sorted({item.source_url, *item.source_urls})
+    labels = [_source_label(item, url) for url in urls]
+    counts = {label: labels.count(label) for label in set(labels)}
+    indexes: dict[str, int] = {}
+    links: list[str] = []
+    for url, label in zip(urls[:2], labels[:2], strict=True):
+        if counts[label] > 1:
+            indexes[label] = indexes.get(label, 0) + 1
+            label = f"{label}{indexes[label]}"
+        links.append(_link(label, url))
+    return links
+
+
+def _short_signal_source_links(signal: _ShortSignal) -> list[str]:
+    links: list[str] = []
+    for index, url in enumerate(signal.source_urls[:2], start=1):
+        if (
+            signal.category in _ROLLING_CATEGORIES
+            and _looks_like_aggregator(url)
+        ):
+            label = "聚合线索"
+        elif len(signal.source_urls) == 1:
+            label = "原始来源"
+        else:
+            label = f"来源{index}"
+        links.append(_link(label, url))
+    return links
+
+
+def _looks_like_aggregator(url: str) -> bool:
+    domain = (urlsplit(url).hostname or "").lower()
+    return any(
+        marker in domain
+        for marker in (
+            "jianyu",
+            "bidcenter",
+            "zhaobiao",
+            "qianlima",
+            "chinabidding",
+        )
+    )
+
+
+def _short_summary(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    text = " ".join(value.replace("\r", " ").replace("\n", " ").split())
+    text = re.sub(r"本条项目信息由[^。；]*[。；]?", "", text)
+    text = re.sub(r"采购联系人.*$", "", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = text.strip(" ，,。；;：:")
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[: max(1, limit - 1)].rstrip(" ，,。；;：:") + "…"
+    return _safe_text(text)
+
+
+def _short_section(
+    heading: str,
+    items: list[_ShortItem],
+    *,
+    empty_text: str,
+    statistics_label: str,
+) -> str:
+    lines = [line for item in items for line in item.lines]
+    if not lines:
+        lines.append(f"- {empty_text}")
+    strict = sum(item.strict for item in items)
+    high_confidence = sum(
+        item.status == "高可信待核实" for item in items
+    )
+    candidates = sum(item.status == "候选线索" for item in items)
+    lines.append(
+        (
+            f"**{statistics_label}：已核实 {strict} 条；"
+            f"高可信待核实 {high_confidence} 条；"
+            f"候选线索 {candidates} 条。**"
+        )
+    )
+    return f"## {heading}\n" + "\n".join(lines)
+
+
+def _short_other_dynamics(procurement_items: list[_ShortItem]) -> str:
+    counts = {
+        category: sum(item.category is category for item in procurement_items)
+        for category in _ROLLING_CATEGORIES
+    }
+    lines = []
+    for category in _ROLLING_CATEGORIES:
+        count = counts[category]
+        if count:
+            text = f"本期有 {count} 条采购信息，见上方。"
+        else:
+            text = "暂无重要新增。"
+        lines.append(f"- {_CATEGORY_LABELS[category]}：{text}")
+    return "## 三、其他行业动态\n" + "\n".join(lines)
+
+
+def _short_followups(
+    result: RunResult,
+    *,
+    financing_items: list[_ShortItem],
+    procurement_items: list[_ShortItem],
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for item in [*financing_items, *procurement_items]:
+        if item.followup and item.followup not in lines:
+            lines.append(item.followup)
+        if len(lines) >= 3:
+            return tuple(lines)
+    for project in sorted(result.state.projects, key=_open_project_sort_key):
+        if project.status not in _OPEN_STATUSES:
+            continue
+        deadline = _actionable_deadline(project, result.window_end)
+        if deadline is None:
+            continue
+        line = (
+            f"- {_safe_text(project.name)}将于"
+            f"{_format_datetime(deadline)}截止。"
+        )
+        if project.latest_source_url:
+            line += _link("查看公告", project.latest_source_url)
+        if line not in lines:
+            lines.append(line)
+        if len(lines) >= 3:
+            break
+    return tuple(lines)
+
+
+def _short_system_status(
+    result: RunResult,
+    displayed: list[_ShortItem],
+) -> str:
+    strict = sum(item.strict for item in displayed)
+    return (
+        f"系统状态：检索 {result.metrics.raw_search_count} 条，"
+        f"形成 {result.metrics.final_candidate_count} 条候选；"
+        f"本期展示严格已核实 {strict} 条；"
+        f"覆盖{_coverage_status_text(result)}。"
+        "完整采集与诊断见 GitHub Artifact。"
+    )
 
 
 def _format_event(event: Event) -> str:

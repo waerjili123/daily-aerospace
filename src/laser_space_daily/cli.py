@@ -29,7 +29,7 @@ from .matching import ProjectMatcher
 from .models import SourceGrade, VerificationStatus
 from .notifier import DingTalkNotifier, suppress_secret_bearing_http_logs
 from .pipeline import Pipeline, RunResult
-from .report import RenderedReport, ReportRenderer
+from .report import DingTalkShortReportRenderer, RenderedReport
 from .repository import StateRepository
 from .timebox import beijing_now
 from .verifier import RuleVerifier, SourceRegistry
@@ -159,7 +159,7 @@ def build_pipeline(settings: Settings) -> Pipeline:
         client=model_client,
         search_provider=search_provider,
         fallback_planner=QueryPlanner(
-            max_queries=4,
+            max_queries=min(8, settings.discovery.max_queries),
             financing_domains=registry.financing_domains,
         ),
         model=settings.deepseek.pro_model,
@@ -207,8 +207,8 @@ def build_pipeline(settings: Settings) -> Pipeline:
     )
 
 
-def _build_renderer(settings: Settings) -> ReportRenderer:
-    return ReportRenderer(max_chars=settings.report.max_chars)
+def _build_renderer(settings: Settings) -> DingTalkShortReportRenderer:
+    return DingTalkShortReportRenderer(max_chars=settings.report.max_chars)
 
 
 def _build_notifier(settings: Settings) -> DingTalkNotifier:
@@ -479,10 +479,8 @@ def _validate_test_delivery(
         raise DeliveryGateError("current_run_has_no_strict_verified_item")
 
     category_headings = (
-        "激光通信",
-        "激光武器/反无人机",
-        "光电转塔/吊舱",
-        "商业航天融资",
+        "一、商业航天融资新闻",
+        "二、招标采购情况",
     )
     category_has_content = False
     for heading in category_headings:
@@ -492,9 +490,9 @@ def _validate_test_delivery(
         body = report.markdown.split(marker, maxsplit=1)[1]
         body = body.split("\n## ", maxsplit=1)[0]
         if any(
-            line.startswith("- ")
+            line.lstrip().startswith("- ")
             and "](" in line
-            and "暂无已核实信息" not in line
+            and "暂无可展示" not in line
             for line in body.splitlines()
         ):
             category_has_content = True
