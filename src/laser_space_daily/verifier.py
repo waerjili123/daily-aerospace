@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import re
 import unicodedata
@@ -194,6 +194,8 @@ class SourceRegistry:
 
 
 class RuleVerifier:
+    _FINANCING_CORROBORATION_WINDOW = timedelta(days=45)
+
     def __init__(self, registry: SourceRegistry) -> None:
         self._registry = registry
 
@@ -331,7 +333,11 @@ class RuleVerifier:
                 )
 
         if grade in {SourceGrade.A, SourceGrade.B}:
-            financing_failure = self._financing_claim_failure(analysis)
+            financing_failure = (
+                self._financing_claim_failure(analysis)
+                if grade is SourceGrade.A
+                else self._financing_source_event_failure(analysis)
+            )
             if financing_failure is not None:
                 return self._decision(
                     VerificationStatus.PENDING,
@@ -665,6 +671,74 @@ class RuleVerifier:
         return tuple(gaps)
 
     @classmethod
+    def _financing_source_event_failure(
+        cls,
+        analysis: AnalysisResult,
+    ) -> str | None:
+        """Validate one B source without treating omitted attributes as facts."""
+
+        evidence_fields = {item.field for item in analysis.evidence}
+        subtype = analysis.financing_subtype or (
+            "round_equity" if analysis.financing_round else None
+        )
+        required = {"organization", "published_at"}
+        if subtype == "round_equity":
+            required.add("financing_round")
+        else:
+            required.add("financing_subtype")
+        if subtype is None or not required.issubset(evidence_fields):
+            return "financing_source_event_evidence_missing"
+        if not cls._field_has_quote_containing(
+            analysis.evidence, "organization", analysis.organization or ""
+        ):
+            return "evidence_not_grounded"
+        if analysis.published_at is None or not cls._field_has_date(
+            analysis.evidence, analysis.published_at
+        ):
+            return "evidence_not_grounded"
+        if subtype == "round_equity":
+            if not analysis.financing_round or not any(
+                item.field == "financing_round"
+                and cls._contains_round(item.quote, analysis.financing_round)
+                for item in analysis.evidence
+            ):
+                return "evidence_not_grounded"
+        elif not any(
+            item.field == "financing_subtype"
+            and cls._financing_subtype_supported(item.quote, subtype)
+            for item in analysis.evidence
+        ):
+            return "evidence_not_grounded"
+        if analysis.amount:
+            if analysis.amount_disclosed is False or not any(
+                item.field == "amount"
+                and cls._amount_key(item.quote) == cls._amount_key(analysis.amount)
+                for item in analysis.evidence
+            ):
+                return "evidence_not_grounded"
+        elif analysis.amount_disclosed is False and not any(
+            item.field == "amount" and cls._is_undisclosed(item.quote)
+            for item in analysis.evidence
+        ):
+            return "evidence_not_grounded"
+        for investor in analysis.investors:
+            if not cls._field_has_quote_containing(
+                analysis.evidence, "investors", investor
+            ):
+                return "evidence_not_grounded"
+        if analysis.business_area and not cls._field_has_quote_containing(
+            analysis.evidence, "business_area", analysis.business_area
+        ):
+            return "evidence_not_grounded"
+        if not any(
+            item.field == "event_type"
+            and cls._contains_any(item.quote, _event_type_terms(EventType.FINANCING))
+            for item in analysis.evidence
+        ):
+            return "evidence_not_grounded"
+        return None
+
+    @classmethod
     def _financing_subtype_supported(cls, quote: str, subtype: str) -> bool:
         terms = {
             "strategic": ("战略融资", "战略投资"),
@@ -703,7 +777,7 @@ class RuleVerifier:
     ) -> tuple[str, SourceRecord | None]:
         primary_domain = self._registry.financing_registered_domain(page.final_url)
         saw_duplicate = False
-        saw_conflict = False
+        conflict_reason: str | None = None
         saw_analyzed_source = False
 
         for candidate in corroborating:
@@ -732,22 +806,24 @@ class RuleVerifier:
             ):
                 saw_duplicate = True
                 continue
-            if self._normalize_claim(analysis.organization or "") != self._normalize_claim(
-                other_analysis.organization or ""
+            if not self._organizations_match(
+                analysis.organization, other_analysis.organization
             ):
                 continue
             saw_analyzed_source = True
             if self._analysis_page_failure(other_analysis, other, other_grade):
                 continue
-            if not self._critical_financing_fields_agree(analysis, other_analysis):
-                saw_conflict = True
+            if conflict := self._financing_corroboration_conflict(
+                analysis, other_analysis
+            ):
+                conflict_reason = conflict_reason or conflict
                 continue
             return (
                 "verified_financing_two_independent_sources",
                 self._source_record(other_analysis, other, other_grade),
             )
-        if saw_conflict:
-            return "financing_corroboration_conflict", None
+        if conflict_reason is not None:
+            return conflict_reason, None
         if saw_duplicate:
             return "financing_requires_independent_sources", None
         if saw_analyzed_source:
@@ -787,35 +863,101 @@ class RuleVerifier:
             return "evidence_not_grounded"
         return self._classification_failure(
             analysis, page, grade
-        ) or self._financing_claim_failure(
-            analysis
+        ) or self._financing_source_event_failure(analysis)
+
+    @classmethod
+    def _financing_corroboration_conflict(
+        cls, primary: AnalysisResult, other: AnalysisResult
+    ) -> str | None:
+        if primary.published_at is None or other.published_at is None:
+            return "financing_source_event_evidence_missing"
+        if (
+            abs(primary.published_at.date() - other.published_at.date())
+            > cls._FINANCING_CORROBORATION_WINDOW
+        ):
+            return "financing_corroboration_date_outside_window"
+        primary_subtype = primary.financing_subtype or (
+            "round_equity" if primary.financing_round else None
+        )
+        other_subtype = other.financing_subtype or (
+            "round_equity" if other.financing_round else None
+        )
+        if primary_subtype != other_subtype:
+            return "financing_corroboration_attribute_conflict"
+        if not cls._rounds_compatible(
+            primary.financing_round, other.financing_round
+        ):
+            return "financing_corroboration_round_conflict"
+        if (
+            primary.amount
+            and other.amount
+            and cls._amount_key(primary.amount) != cls._amount_key(other.amount)
+        ):
+            return "financing_corroboration_amount_conflict"
+        return None
+
+    @classmethod
+    def _organizations_match(
+        cls, primary: str | None, other: str | None
+    ) -> bool:
+        return bool(primary and other) and cls._organization_key(
+            primary
+        ) == cls._organization_key(other)
+
+    @classmethod
+    def _organization_key(cls, value: str) -> str:
+        normalized = cls._normalize_claim(value)
+        for suffix in (
+            "股份有限公司",
+            "有限责任公司",
+            "科技有限公司",
+            "有限公司",
+            "公司",
+        ):
+            normalized = normalized.removesuffix(suffix.casefold())
+        for prefix in (
+            "北京",
+            "上海",
+            "深圳",
+            "广州",
+            "杭州",
+            "南京",
+            "武汉",
+            "西安",
+            "成都",
+            "重庆",
+            "天津",
+            "苏州",
+            "无锡",
+        ):
+            if normalized.startswith(prefix.casefold()) and len(normalized) > len(prefix) + 2:
+                normalized = normalized[len(prefix) :]
+                break
+        return normalized
+
+    @classmethod
+    def _rounds_compatible(cls, primary: str | None, other: str | None) -> bool:
+        primary_rounds = cls._round_tokens(primary)
+        other_rounds = cls._round_tokens(other)
+        if not primary_rounds or not other_rounds:
+            return cls._normalize_round(primary) == cls._normalize_round(other)
+        return primary_rounds.issubset(other_rounds) or other_rounds.issubset(
+            primary_rounds
         )
 
     @classmethod
-    def _critical_financing_fields_agree(
-        cls, primary: AnalysisResult, other: AnalysisResult
-    ) -> bool:
-        return (
-            cls._normalize_claim(primary.organization or "")
-            == cls._normalize_claim(other.organization or "")
-            and primary.published_at is not None
-            and other.published_at is not None
-            and primary.published_at.date() == other.published_at.date()
-            and cls._normalize_round(primary.financing_round)
-            == cls._normalize_round(other.financing_round)
-            and (
-                primary.financing_subtype
-                or ("round_equity" if primary.financing_round else None)
-            )
-            == (
-                other.financing_subtype
-                or ("round_equity" if other.financing_round else None)
-            )
-            and cls._analysis_amount_key(primary) == cls._analysis_amount_key(other)
-            and {
-                cls._normalize_claim(investor) for investor in primary.investors
-            }
-            == {cls._normalize_claim(investor) for investor in other.investors}
+    def _round_tokens(cls, value: str | None) -> frozenset[str]:
+        if not value:
+            return frozenset()
+        normalized = unicodedata.normalize("NFKC", value).casefold()
+        normalized = re.sub(r"\s+", "", normalized)
+        matches = re.findall(
+            r"pre-?[a-d]\+{0,2}|series-?[a-d]\+{0,2}|天使\+{0,2}|种子|"
+            r"(?<![a-z])[a-d]\+{0,2}(?![a-z])",
+            normalized,
+        )
+        return frozenset(
+            item.replace("-", "").removeprefix("series") for item in matches
         )
 
     @staticmethod

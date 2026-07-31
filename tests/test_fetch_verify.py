@@ -993,7 +993,7 @@ def test_two_b_financing_sources_with_conflicting_amount_stay_pending():
     )
 
     assert decision.status is VerificationStatus.PENDING
-    assert decision.reason == "financing_corroboration_conflict"
+    assert decision.reason == "financing_corroboration_amount_conflict"
 
 
 def test_two_b_sources_on_same_registered_domain_are_not_independent(
@@ -1316,6 +1316,105 @@ def financing_claim(
     )
 
 
+def financing_matrix_claim(
+    source: FetchedPage,
+    *,
+    organization: str,
+    published_at: str,
+    round_name: str,
+    amount: str | None = None,
+    investors: tuple[str, ...] = (),
+) -> AnalysisResult:
+    evidence = [
+        Evidence(
+            field="organization",
+            quote=organization,
+            source_url=source.final_url,
+        ),
+        Evidence(
+            field="published_at",
+            quote=published_at[:10],
+            source_url=source.final_url,
+        ),
+        Evidence(
+            field="financing_round",
+            quote=round_name,
+            source_url=source.final_url,
+        ),
+        *classification_evidence(
+            source.final_url,
+            source.text,
+            country_quote="中国商业航天企业",
+            category_quote="商业航天",
+            event_quote="融资",
+        ),
+    ]
+    if amount is not None:
+        evidence.append(
+            Evidence(field="amount", quote=amount, source_url=source.final_url)
+        )
+    evidence.extend(
+        Evidence(field="investors", quote=investor, source_url=source.final_url)
+        for investor in investors
+    )
+    return AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        event_type=EventType.FINANCING,
+        title=source.title,
+        organization=organization,
+        published_at=published_at,
+        financing_round=round_name,
+        amount=amount,
+        investors=list(investors),
+        evidence=evidence,
+        source_url=source.final_url,
+    )
+
+
+def test_two_b_event_matrix_allows_omitted_attributes_and_compatible_rounds():
+    primary = page(
+        "https://media.example.cn/report/guangyou",
+        "中国商业航天企业北京光邮星空科技有限公司于2026-07-02完成"
+        "Pre-A和Pre-A+轮融资。",
+    )
+    secondary = page(
+        "https://other.example.cn/story/guangyou",
+        "中国商业航天企业光邮星空于2026-07-16完成Pre-A+轮融资，"
+        "中关村科学城领投。",
+    )
+    primary_analysis = financing_matrix_claim(
+        primary,
+        organization="北京光邮星空科技有限公司",
+        published_at="2026-07-02T00:00:00+08:00",
+        round_name="Pre-A和Pre-A+轮",
+    )
+    secondary_analysis = financing_matrix_claim(
+        secondary,
+        organization="光邮星空",
+        published_at="2026-07-16T00:00:00+08:00",
+        round_name="Pre-A+轮",
+        investors=("中关村科学城",),
+    )
+
+    decision = RuleVerifier(REGISTRY).verify(
+        primary_analysis,
+        primary,
+        [(secondary_analysis, secondary)],
+    )
+
+    assert decision.status is VerificationStatus.VERIFIED
+    assert decision.reason == "verified_financing_two_independent_sources"
+    assert len(decision.source_records) == 2
+    assert {
+        record.published_at.date() for record in decision.source_records
+    } == {datetime(2026, 7, 2).date(), datetime(2026, 7, 16).date()}
+    assert not any(
+        item.field == "amount" for item in decision.evidence
+    )
+
+
 def test_two_b_financing_requires_independent_analysis_and_persists_both_records():
     primary = page(
         "https://media.example.cn/report/independent",
@@ -1349,25 +1448,23 @@ def test_two_b_financing_requires_independent_analysis_and_persists_both_records
 
 
 @pytest.mark.parametrize(
-    ("secondary_date", "secondary_round", "secondary_amount"),
+    ("secondary_round", "secondary_amount", "expected_reason"),
     [
-        ("2026-07-21T00:00:00+08:00", "Series B", "2亿元"),
-        ("2026-07-21T00:00:00+08:00", "Series C", "1亿元"),
-        ("2026-07-20T00:00:00+08:00", "Series B", "1亿元"),
+        ("Series B", "2亿元", "financing_corroboration_amount_conflict"),
+        ("Series C", "1亿元", "financing_corroboration_round_conflict"),
     ],
 )
-def test_two_b_financing_conflicting_critical_fields_stay_pending(
-    secondary_date, secondary_round, secondary_amount
+def test_two_b_financing_conflicting_attributes_stay_pending(
+    secondary_round, secondary_amount, expected_reason
 ):
     primary = page(
         "https://media.example.cn/report/conflict",
         "中国商业航天企业 Orbit Corp 于 2026-07-21 完成 Series B 融资，"
         "金额1亿元，Capital One投资。",
     )
-    rendered_date = secondary_date[:10]
     secondary = page(
         "https://other.example.cn/story/conflict",
-        f"中国商业航天企业 Orbit Corp 于 {rendered_date} 完成 {secondary_round} 融资，"
+        f"中国商业航天企业 Orbit Corp 于 2026-07-21 完成 {secondary_round} 融资，"
         f"金额{secondary_amount}，Capital One投资。",
     )
 
@@ -1379,7 +1476,6 @@ def test_two_b_financing_conflicting_critical_fields_stay_pending(
                 (
                     financing_claim(
                         secondary,
-                        announced_at=secondary_date,
                         round_name=secondary_round,
                         amount=secondary_amount,
                     ),
@@ -1391,7 +1487,66 @@ def test_two_b_financing_conflicting_critical_fields_stay_pending(
         pytest.fail(f"verifier did not compare independently analyzed sources: {error}")
 
     assert decision.status is VerificationStatus.PENDING
-    assert decision.reason == "financing_corroboration_conflict"
+    assert decision.reason == expected_reason
+
+
+def test_two_b_financing_source_publication_dates_may_differ():
+    primary = page(
+        "https://media.example.cn/report/date-window",
+        "中国商业航天企业 Orbit Corp 于 2026-07-21 完成 Series B 融资，"
+        "金额1亿元，Capital One投资。",
+    )
+    secondary = page(
+        "https://other.example.cn/story/date-window",
+        "中国商业航天企业 Orbit Corp 于 2026-07-20 完成 Series B 融资，"
+        "金额1亿元，Capital One投资。",
+    )
+
+    decision = RuleVerifier(REGISTRY).verify(
+        financing_claim(primary),
+        primary,
+        [
+            (
+                financing_claim(
+                    secondary,
+                    announced_at="2026-07-20T00:00:00+08:00",
+                ),
+                secondary,
+            )
+        ],
+    )
+
+    assert decision.status is VerificationStatus.VERIFIED
+
+
+def test_two_b_financing_publication_dates_outside_window_stay_pending():
+    primary = page(
+        "https://media.example.cn/report/date-outside",
+        "中国商业航天企业 Orbit Corp 于 2026-07-21 完成 Series B 融资，"
+        "金额1亿元，Capital One投资。",
+    )
+    secondary = page(
+        "https://other.example.cn/story/date-outside",
+        "中国商业航天企业 Orbit Corp 于 2026-05-01 完成 Series B 融资，"
+        "金额1亿元，Capital One投资。",
+    )
+
+    decision = RuleVerifier(REGISTRY).verify(
+        financing_claim(primary),
+        primary,
+        [
+            (
+                financing_claim(
+                    secondary,
+                    announced_at="2026-05-01T00:00:00+08:00",
+                ),
+                secondary,
+            )
+        ],
+    )
+
+    assert decision.status is VerificationStatus.PENDING
+    assert decision.reason == "financing_corroboration_date_outside_window"
 
 
 def test_two_b_passive_company_round_mention_is_not_corroboration():
