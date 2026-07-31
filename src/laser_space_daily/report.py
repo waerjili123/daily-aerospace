@@ -1028,9 +1028,15 @@ def _same_short_financing_event(
         return False
     if left_subject not in right_subject and right_subject not in left_subject:
         return False
-    left_round = _round_identity(left.round_name or left.title)
-    right_round = _round_identity(right.round_name or right.title)
-    if not left_round or not right_round or left_round != right_round:
+    left_rounds = _round_identities(left.round_name or left.title)
+    right_rounds = _round_identities(right.round_name or right.title)
+    if not left_rounds or not right_rounds:
+        return False
+    if (
+        left_rounds != right_rounds
+        and not left_rounds.issubset(right_rounds)
+        and not right_rounds.issubset(left_rounds)
+    ):
         return False
     if left.amount and right.amount:
         if _identity_text(left.amount) != _identity_text(right.amount):
@@ -1850,6 +1856,17 @@ def _round_identity(value: str) -> str:
     if match is None:
         return ""
     return re.sub(r"[\s-]+", "", match.group(1).casefold())
+
+
+def _round_identities(value: str) -> frozenset[str]:
+    return frozenset(
+        re.sub(r"[\s-]+", "", match.group(1).casefold())
+        for match in re.finditer(
+            r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
+            r"天使\+{0,2}|种子|战略投资|战略)",
+            value,
+        )
+    )
 
 
 def _high_confidence_group(rows: list[object]) -> bool:

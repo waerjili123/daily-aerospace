@@ -746,6 +746,7 @@ def test_short_report_merges_same_pending_financing_across_media_sources() -> No
             "title": "光邮星空连续完成Pre-A和Pre-A+轮融资，聚焦星地激光通信",
             "organization": "光邮星空",
             "published_at": dt(7, 2),
+            "financing_round": "Pre-A+轮",
             "verification_event_key": (
                 "光邮星空|financing|prea,prea+|2026-07-02"
             ),
