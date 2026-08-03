@@ -1861,16 +1861,20 @@ def _overlaps_verified_financing(
     if category is not Category.COMMERCIAL_SPACE_FINANCING:
         return False
     identity_text = _identity_text(f"{organization} {title}")
-    candidate_round = _round_identity(round_name or title)
+    candidate_rounds = _round_identities(round_name or title)
     for item in result.state.financings:
         if item.verification_status is not VerificationStatus.VERIFIED:
             continue
         if _identity_text(item.company) not in identity_text:
             continue
-        verified_round = _round_identity(item.round_name or "")
-        if verified_round and candidate_round and verified_round != candidate_round:
+        verified_rounds = _round_identities(item.round_name or "")
+        if (
+            verified_rounds
+            and candidate_rounds
+            and verified_rounds.isdisjoint(candidate_rounds)
+        ):
             continue
-        if verified_round and not candidate_round:
+        if verified_rounds and not candidate_rounds:
             continue
         if published_at is not None:
             candidate_date = _as_beijing(published_at)

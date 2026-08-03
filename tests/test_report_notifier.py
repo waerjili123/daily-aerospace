@@ -802,6 +802,38 @@ def test_short_report_renders_same_verified_source_bundle_once() -> None:
     assert "融资统计：已核实 1 条" in financing_section
 
 
+def test_short_report_hides_combined_round_candidate_covered_by_verified_subround() -> None:
+    source = "https://www.chinaventure.com.cn/news/guangyou"
+    verified = financing(
+        "guangyou-verified",
+        company="光邮星空",
+        announced_at=dt(7, 16),
+        source_urls=[source, "https://m.pedaily.cn/news/guangyou"],
+    ).model_copy(update={"round_name": "Pre-A+轮"})
+    candidate_row = Candidate(
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        url=source,
+        summary="报道同一融资事件。",
+        discovered_at=WINDOW_END,
+        discovery_source="search:bocha",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=dt(7, 16),
+    )
+    result = make_result(
+        state=StateBundle(financings=[verified]),
+        changed_financing_ids=[verified.financing_id],
+        discovery_candidates=[candidate_row],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+
+    assert financing_section.count("光邮星空") == 1
+    assert "候选线索 0 条" in financing_section
+
+
 def test_short_report_hides_empty_followup_and_technical_diagnostics() -> None:
     metrics = RunMetrics(
         started_at=WINDOW_END,
