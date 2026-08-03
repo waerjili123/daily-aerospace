@@ -383,7 +383,7 @@ class RuleFallbackAnalyzer:
             if category is Category.COMMERCIAL_SPACE_FINANCING
             else _extract_organization(page.text)
         )
-        published_at, date_quote = _extract_date(page.text)
+        published_at, date_quote = _extract_page_publication_date(page)
         financing_round, financing_round_quote = (
             _extract_financing_round(text)
             if category is Category.COMMERCIAL_SPACE_FINANCING
@@ -594,12 +594,18 @@ class ResilientAnalyzer:
             primary = self._primary.analyze(page)
         except AnalysisExhausted:
             return self._fallback.analyze(page)
-        return self._enrich_missing_fields(primary, self._fallback.analyze(page))
+        return self._enrich_missing_fields(
+            primary,
+            self._fallback.analyze(page),
+            page=page,
+        )
 
     @staticmethod
     def _enrich_missing_fields(
         primary: AnalysisResult,
         fallback: AnalysisResult,
+        *,
+        page: FetchedPage | None = None,
     ) -> AnalysisResult:
         if not primary.in_china or not primary.in_scope or not fallback.in_scope:
             return primary
@@ -635,6 +641,20 @@ class ResilientAnalyzer:
                 if fallback_value is not None:
                     updates[field_name] = fallback_value
                     filled_evidence_fields.add(field_name)
+
+        authoritative_publication_date = None
+        if page is not None and page.publication_date_quote:
+            authoritative_publication_date, _ = _extract_date(
+                page.publication_date_quote
+            )
+        if authoritative_publication_date is not None:
+            # `published_at` describes the source page's publication time. A
+            # deterministic value extracted from page metadata, JSON-LD, or
+            # the visible header therefore outranks a model-selected date from
+            # the article body (which may be an event or announcement date).
+            if primary.published_at != authoritative_publication_date:
+                updates["published_at"] = authoritative_publication_date
+            filled_evidence_fields.add("published_at")
 
         if primary.amount is None and primary.amount_disclosed is None:
             if fallback.amount is not None or fallback.amount_disclosed is not None:
@@ -1163,10 +1183,10 @@ def _extract_financing_amount(
 
 def _extract_date(text: str) -> tuple[datetime | None, str | None]:
     patterns = (
-        r"(?P<year>20\d{2})-(?P<month>0?[1-9]|1[0-2])-(?P<day>0?[1-9]|[12]\d|3[01])",
-        r"(?P<year>20\d{2})/(?P<month>0?[1-9]|1[0-2])/(?P<day>0?[1-9]|[12]\d|3[01])",
-        r"(?P<year>20\d{2})\.(?P<month>0?[1-9]|1[0-2])\.(?P<day>0?[1-9]|[12]\d|3[01])",
-        r"(?P<year>20\d{2})年(?P<month>0?[1-9]|1[0-2])月(?P<day>0?[1-9]|[12]\d|3[01])日",
+        r"(?P<year>20\d{2})-(?P<month>1[0-2]|0?[1-9])-(?P<day>3[01]|[12]\d|0?[1-9])(?!\d)",
+        r"(?P<year>20\d{2})/(?P<month>1[0-2]|0?[1-9])/(?P<day>3[01]|[12]\d|0?[1-9])(?!\d)",
+        r"(?P<year>20\d{2})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>3[01]|[12]\d|0?[1-9])(?!\d)",
+        r"(?P<year>20\d{2})年(?P<month>1[0-2]|0?[1-9])月(?P<day>3[01]|[12]\d|0?[1-9])日",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -1183,6 +1203,18 @@ def _extract_date(text: str) -> tuple[datetime | None, str | None]:
             continue
         return value, match.group(0)
     return None, None
+
+
+def _extract_page_publication_date(
+    page: FetchedPage,
+) -> tuple[datetime | None, str | None]:
+    """Prefer the fetcher's explicit page-publication evidence over body dates."""
+
+    if page.publication_date_quote:
+        published_at, _ = _extract_date(page.publication_date_quote)
+        if published_at is not None:
+            return published_at, page.publication_date_quote
+    return _extract_date(page.text)
 
 
 def _extract_deadlines(

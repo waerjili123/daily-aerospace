@@ -128,7 +128,14 @@ def projects() -> list[Project]:
     ]
 
 
-def make_page(text: str, *, title: str | None = None, url: str = OFFICIAL_URL) -> FetchedPage:
+def make_page(
+    text: str,
+    *,
+    title: str | None = None,
+    url: str = OFFICIAL_URL,
+    publication_date_quote: str | None = None,
+    publication_date_source: str | None = None,
+) -> FetchedPage:
     return FetchedPage(
         requested_url=url,
         final_url=url,
@@ -137,6 +144,8 @@ def make_page(text: str, *, title: str | None = None, url: str = OFFICIAL_URL) -
         text=text,
         fetched_at=NOW,
         content_hash="0" * 64,
+        publication_date_quote=publication_date_quote,
+        publication_date_source=publication_date_source,
     )
 
 
@@ -509,6 +518,69 @@ def test_resilient_analyzer_does_not_bridge_conflicting_page_date():
     result = ResilientAnalyzer(Primary(), RuleFallbackAnalyzer()).analyze(page)
 
     assert not any(item.field == "published_at" for item in result.evidence)
+
+
+def test_rule_fallback_prefers_structured_page_publication_date_over_body_date():
+    page = make_page(
+        "2026-07-01，公司启动前期准备。\n"
+        "中国境内商业航天企业光邮星空于2026-07-16完成Pre-A轮融资。\n"
+        "页面发布时间：2026-07-16 14:22:19",
+        title="光邮星空完成Pre-A轮融资",
+        url="https://www.chinaventure.com.cn/news/date-authority",
+        publication_date_quote="2026-07-16 14:22:19",
+        publication_date_source="visible_header",
+    )
+
+    result = RuleFallbackAnalyzer().analyze(page)
+
+    assert result.published_at == datetime(
+        2026, 7, 16, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
+    assert any(
+        item.field == "published_at"
+        and item.quote == "2026-07-16 14:22:19"
+        for item in result.evidence
+    )
+
+
+def test_resilient_analyzer_corrects_model_body_date_with_page_publication_date():
+    page = make_page(
+        "2026-07-01，公司启动前期准备。\n"
+        "中国境内商业航天企业光邮星空完成Pre-A轮融资。\n"
+        "页面发布时间：2026-07-16 14:22:19",
+        title="光邮星空完成Pre-A轮融资",
+        url="https://www.chinaventure.com.cn/news/date-correction",
+        publication_date_quote="2026-07-16 14:22:19",
+        publication_date_source="visible_header",
+    )
+    primary_result = AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        event_type=EventType.FINANCING,
+        title=page.title,
+        organization="光邮星空",
+        published_at=datetime(
+            2026, 7, 1, tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+        financing_round="Pre-A轮",
+        source_url=page.final_url,
+    )
+
+    class Primary:
+        def analyze(self, _page):
+            return primary_result
+
+    result = ResilientAnalyzer(Primary(), RuleFallbackAnalyzer()).analyze(page)
+
+    assert result.published_at == datetime(
+        2026, 7, 16, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
+    assert any(
+        item.field == "published_at"
+        and item.quote == "2026-07-16 14:22:19"
+        for item in result.evidence
+    )
 
 
 @pytest.mark.parametrize(
