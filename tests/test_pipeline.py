@@ -964,6 +964,35 @@ def test_financing_index_merges_same_verified_source_bundle_despite_optional_dri
     assert _financing_index([existing], incoming) == 0
 
 
+def test_financing_index_merges_legal_name_and_combined_round_from_same_sources() -> None:
+    shared_sources = [
+        "https://m.pedaily.cn/news/566658",
+        "https://www.chinaventure.com.cn/news/114-20260716-392303.html",
+    ]
+    existing = Financing(
+        financing_id="short-subround",
+        company="光邮星空",
+        announced_at=datetime(2026, 7, 21, tzinfo=BEIJING),
+        round_name="Pre-A+轮",
+        financing_subtype="round_equity",
+        investors=[],
+        source_url=shared_sources[0],
+        source_urls=shared_sources,
+        verification_status=VerificationStatus.VERIFIED,
+    )
+    incoming = existing.model_copy(
+        update={
+            "financing_id": "legal-combined",
+            "company": "北京光邮星空科技有限公司",
+            "announced_at": datetime(2026, 7, 16, tzinfo=BEIJING),
+            "round_name": "Pre-A和Pre-A+轮",
+            "source_url": shared_sources[1],
+        }
+    )
+
+    assert _financing_index([existing], incoming) == 0
+
+
 def test_same_financing_terms_outside_corroboration_window_stay_separate(deps) -> None:
     deps.official_collector.rows = [candidate(), candidate(SECOND_URL)]
     deps.analyzer.results[OFFICIAL_URL] = analysis(

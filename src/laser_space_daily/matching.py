@@ -91,6 +91,52 @@ def normalize_text(value: str) -> str:
     return "".join(characters).strip()
 
 
+def organization_identity(value: str) -> str:
+    """Return a deterministic company identity for legal-name/brand matching."""
+
+    normalized = normalize_text(value).replace(" ", "")
+    for suffix in (
+        "股份有限公司",
+        "有限责任公司",
+        "科技有限公司",
+        "有限公司",
+        "公司",
+    ):
+        normalized = normalized.removesuffix(suffix)
+    for prefix in (
+        "北京",
+        "上海",
+        "深圳",
+        "广州",
+        "杭州",
+        "南京",
+        "武汉",
+        "西安",
+        "成都",
+        "重庆",
+        "天津",
+        "苏州",
+        "无锡",
+    ):
+        if normalized.startswith(prefix) and len(normalized) > len(prefix) + 2:
+            normalized = normalized[len(prefix) :]
+            break
+    return normalized
+
+
+def financing_round_identities(value: str) -> frozenset[str]:
+    """Extract every financing round named by a combined or single-round label."""
+
+    return frozenset(
+        re.sub(r"[\s-]+", "", match.group(1).casefold())
+        for match in re.finditer(
+            r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
+            r"天使\+{0,2}|种子|战略投资|战略)",
+            value,
+        )
+    )
+
+
 def _core_title(value: str) -> str:
     title = normalize_text(value)
     bare_second_prefix = _has_bare_second_prefix(value)

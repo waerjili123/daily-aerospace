@@ -802,6 +802,37 @@ def test_short_report_renders_same_verified_source_bundle_once() -> None:
     assert "融资统计：已核实 1 条" in financing_section
 
 
+def test_short_report_merges_legal_name_and_combined_round_verified_duplicate() -> None:
+    sources = [
+        "https://m.pedaily.cn/news/566658",
+        "https://www.chinaventure.com.cn/news/114-20260716-392303.html",
+    ]
+    first = financing(
+        "guangyou-short",
+        company="光邮星空",
+        announced_at=dt(7, 21),
+        source_urls=sources,
+    ).model_copy(update={"round_name": "Pre-A+轮"})
+    second = financing(
+        "guangyou-legal",
+        company="北京光邮星空科技有限公司",
+        announced_at=dt(7, 16),
+        source_urls=sources,
+    ).model_copy(update={"round_name": "Pre-A和Pre-A+轮"})
+    result = make_result(
+        state=StateBundle(financings=[first, second]),
+        changed_financing_ids=[first.financing_id, second.financing_id],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+
+    assert financing_section.count("**【已核实·历史补录】") == 1
+    assert "融资统计：已核实 1 条" in financing_section
+
+
 def test_short_report_hides_combined_round_candidate_covered_by_verified_subround() -> None:
     source = "https://www.chinaventure.com.cn/news/guangyou"
     verified = financing(

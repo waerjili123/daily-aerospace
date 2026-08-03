@@ -8,6 +8,7 @@ import re
 from urllib.parse import quote, urlsplit
 
 from .deadlines import deadline_is_current
+from .matching import financing_round_identities, organization_identity
 from .models import (
     Category,
     DomainModel,
@@ -740,11 +741,18 @@ def _same_verified_financing_display_event(
     left: Financing,
     right: Financing,
 ) -> bool:
-    if _identity_text(left.company) != _identity_text(right.company):
+    if organization_identity(left.company) != organization_identity(right.company):
         return False
     left_rounds = _round_identities(left.round_name or "")
     right_rounds = _round_identities(right.round_name or "")
-    if not left_rounds or left_rounds != right_rounds:
+    if (
+        not left_rounds
+        or not right_rounds
+        or (
+            not left_rounds.issubset(right_rounds)
+            and not right_rounds.issubset(left_rounds)
+        )
+    ):
         return False
     if abs((left.announced_at.date() - right.announced_at.date()).days) > 45:
         return False
@@ -1901,14 +1909,7 @@ def _round_identity(value: str) -> str:
 
 
 def _round_identities(value: str) -> frozenset[str]:
-    return frozenset(
-        re.sub(r"[\s-]+", "", match.group(1).casefold())
-        for match in re.finditer(
-            r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
-            r"天使\+{0,2}|种子|战略投资|战略)",
-            value,
-        )
-    )
+    return financing_round_identities(value)
 
 
 def _high_confidence_group(rows: list[object]) -> bool:

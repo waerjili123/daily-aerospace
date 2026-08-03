@@ -26,8 +26,10 @@ from .fetcher import FetchError, PublicationDateSource
 from .matching import (
     content_version_id,
     event_fingerprint,
+    financing_round_identities,
     financing_fingerprint,
     normalize_text,
+    organization_identity,
     stable_event_id,
     stable_project_id,
 )
@@ -1591,21 +1593,25 @@ def _same_financing_from_shared_sources(
 ) -> bool:
     """Collapse duplicate records produced from the same verified source bundle."""
 
-    existing_company = normalize_text(existing.company)
-    candidate_company = normalize_text(candidate.company)
-    existing_round = normalize_text(existing.round_name or "")
-    candidate_round = normalize_text(candidate.round_name or "")
+    existing_company = organization_identity(existing.company)
+    candidate_company = organization_identity(candidate.company)
+    existing_rounds = financing_round_identities(existing.round_name or "")
+    candidate_rounds = financing_round_identities(candidate.round_name or "")
     existing_subtype = existing.financing_subtype or (
-        "round_equity" if existing_round else None
+        "round_equity" if existing_rounds else None
     )
     candidate_subtype = candidate.financing_subtype or (
-        "round_equity" if candidate_round else None
+        "round_equity" if candidate_rounds else None
     )
     if (
         not existing_company
         or existing_company != candidate_company
-        or not existing_round
-        or existing_round != candidate_round
+        or not existing_rounds
+        or not candidate_rounds
+        or (
+            not existing_rounds.issubset(candidate_rounds)
+            and not candidate_rounds.issubset(existing_rounds)
+        )
         or existing_subtype != candidate_subtype
         or abs(
             (existing.announced_at.date() - candidate.announced_at.date()).days
