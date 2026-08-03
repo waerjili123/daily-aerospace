@@ -717,7 +717,7 @@ class RuleVerifier:
             return "financing_source_publication_date_evidence_invalid"
         if subtype == "round_equity":
             if not analysis.financing_round or not any(
-                item.field == "financing_round"
+                item.field in {"financing_round", "title"}
                 and cls._contains_round(item.quote, analysis.financing_round)
                 for item in analysis.evidence
             ):
