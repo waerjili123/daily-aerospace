@@ -674,8 +674,16 @@ def _short_verified_financings(result: RunResult) -> list[_ShortItem]:
             item.financing_id,
         ),
     )
-    items: list[_ShortItem] = []
+    unique_rows: list[Financing] = []
     for item in rows:
+        if any(
+            _same_verified_financing_display_event(existing, item)
+            for existing in unique_rows
+        ):
+            continue
+        unique_rows.append(item)
+    items: list[_ShortItem] = []
+    for item in unique_rows:
         latest_at = _financing_latest_at(item)
         daily = _in_window(
             latest_at,
@@ -726,6 +734,23 @@ def _short_verified_financings(result: RunResult) -> list[_ShortItem]:
             )
         )
     return items
+
+
+def _same_verified_financing_display_event(
+    left: Financing,
+    right: Financing,
+) -> bool:
+    if _identity_text(left.company) != _identity_text(right.company):
+        return False
+    left_rounds = _round_identities(left.round_name or "")
+    right_rounds = _round_identities(right.round_name or "")
+    if not left_rounds or left_rounds != right_rounds:
+        return False
+    if abs((left.announced_at.date() - right.announced_at.date()).days) > 45:
+        return False
+    left_sources = {left.source_url, *left.source_urls}
+    right_sources = {right.source_url, *right.source_urls}
+    return bool(left_sources & right_sources)
 
 
 def _short_verified_procurements(result: RunResult) -> list[_ShortItem]:

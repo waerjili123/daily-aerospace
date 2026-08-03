@@ -771,6 +771,37 @@ def test_short_report_merges_same_pending_financing_across_media_sources() -> No
     assert "待核实线索 1 条" in text
 
 
+def test_short_report_renders_same_verified_source_bundle_once() -> None:
+    sources = [
+        "https://m.pedaily.cn/news/566658",
+        "https://www.chinaventure.com.cn/news/114-20260716-392303.html",
+    ]
+    first = financing(
+        "guangyou-16",
+        company="光邮星空",
+        announced_at=dt(7, 16),
+        source_urls=sources,
+    ).model_copy(update={"round_name": "Pre-A+轮"})
+    second = financing(
+        "guangyou-21",
+        company="光邮星空",
+        announced_at=dt(7, 21),
+        source_urls=sources,
+    ).model_copy(update={"round_name": "Pre-A+轮"})
+    result = make_result(
+        state=StateBundle(financings=[first, second]),
+        changed_financing_ids=[first.financing_id, second.financing_id],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+
+    assert financing_section.count("光邮星空") == 1
+    assert "融资统计：已核实 1 条" in financing_section
+
+
 def test_short_report_hides_empty_followup_and_technical_diagnostics() -> None:
     metrics = RunMetrics(
         started_at=WINDOW_END,

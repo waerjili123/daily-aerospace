@@ -142,6 +142,7 @@ _STAGE_STATUS: dict[EventType, tuple[str, bool]] = {
 # Independent reports of one financing commonly lag by a few days. Wider gaps are
 # treated as possible repeat rounds even when company, round, amount and investors match.
 FINANCING_CORROBORATION_WINDOW_DAYS = 7
+FINANCING_SHARED_SOURCE_WINDOW_DAYS = 45
 
 
 class Pipeline:
@@ -1563,6 +1564,14 @@ def _financing_index(
     if exact:
         return exact[0]
 
+    shared_source_matches = [
+        index
+        for index, item in enumerate(financings)
+        if _same_financing_from_shared_sources(item, candidate)
+    ]
+    if len(shared_source_matches) == 1:
+        return shared_source_matches[0]
+
     candidate_terms = _cross_date_financing_terms(candidate)
     if candidate_terms is None:
         return None
@@ -1574,6 +1583,49 @@ def _financing_index(
         <= FINANCING_CORROBORATION_WINDOW_DAYS
     ]
     return same_terms[0] if len(same_terms) == 1 else None
+
+
+def _same_financing_from_shared_sources(
+    existing: Financing,
+    candidate: Financing,
+) -> bool:
+    """Collapse duplicate records produced from the same verified source bundle."""
+
+    existing_company = normalize_text(existing.company)
+    candidate_company = normalize_text(candidate.company)
+    existing_round = normalize_text(existing.round_name or "")
+    candidate_round = normalize_text(candidate.round_name or "")
+    existing_subtype = existing.financing_subtype or (
+        "round_equity" if existing_round else None
+    )
+    candidate_subtype = candidate.financing_subtype or (
+        "round_equity" if candidate_round else None
+    )
+    if (
+        not existing_company
+        or existing_company != candidate_company
+        or not existing_round
+        or existing_round != candidate_round
+        or existing_subtype != candidate_subtype
+        or abs(
+            (existing.announced_at.date() - candidate.announced_at.date()).days
+        )
+        > FINANCING_SHARED_SOURCE_WINDOW_DAYS
+    ):
+        return False
+    return bool(_financing_source_urls(existing) & _financing_source_urls(candidate))
+
+
+def _financing_source_urls(financing: Financing) -> set[str]:
+    return {
+        normalize_url(url)
+        for url in (
+            financing.source_url,
+            *financing.source_urls,
+            *(record.source_url for record in financing.source_records),
+        )
+        if url
+    }
 
 
 def _cross_date_financing_terms(
