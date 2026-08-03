@@ -707,7 +707,7 @@ class RuleVerifier:
                 return missing_reason[field]
         if missing_required:
             return "financing_source_event_evidence_missing"
-        if not cls._field_has_quote_containing(
+        if not cls._field_has_organization_quote(
             analysis.evidence, "organization", analysis.organization or ""
         ):
             return "financing_source_organization_evidence_invalid"
@@ -776,6 +776,26 @@ class RuleVerifier:
             and normalized_claim in cls._normalize_claim(item.quote)
             for item in evidence
         )
+
+    @classmethod
+    def _field_has_organization_quote(
+        cls, evidence: Iterable[Evidence], field: str, claim: str
+    ) -> bool:
+        """Accept a legal company name or its unambiguous normalized brand alias."""
+
+        normalized_claim = cls._normalize_claim(claim)
+        organization_key = cls._organization_key(claim)
+        if not normalized_claim:
+            return False
+        for item in evidence:
+            if item.field != field:
+                continue
+            normalized_quote = cls._normalize_claim(item.quote)
+            if normalized_claim in normalized_quote:
+                return True
+            if len(organization_key) >= 4 and organization_key in normalized_quote:
+                return True
+        return False
 
     @classmethod
     def _field_has_date(

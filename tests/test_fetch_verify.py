@@ -1454,6 +1454,46 @@ def test_financing_event_matrix_reports_missing_required_evidence_field(
     assert reason == expected_reason
 
 
+def test_financing_event_matrix_accepts_legal_name_brand_alias_evidence():
+    source = page(
+        "https://media.example.cn/report/guangyou-alias",
+        "中国商业航天企业北京光邮星空科技有限公司于2026-07-16完成Pre-A+轮融资。",
+    )
+    analysis = financing_matrix_claim(
+        source,
+        organization="北京光邮星空科技有限公司",
+        published_at="2026-07-16T00:00:00+08:00",
+        round_name="Pre-A+轮",
+    )
+    for item in analysis.evidence:
+        if item.field == "organization":
+            item.quote = "光邮星空连续完成Pre-A和Pre-A+轮融资"
+
+    reason = RuleVerifier._financing_source_event_failure(analysis)
+
+    assert reason is None
+
+
+def test_financing_event_matrix_rejects_different_company_alias_evidence():
+    source = page(
+        "https://media.example.cn/report/different-company",
+        "中国商业航天企业北京光邮星空科技有限公司于2026-07-16完成Pre-A+轮融资。",
+    )
+    analysis = financing_matrix_claim(
+        source,
+        organization="北京光邮星空科技有限公司",
+        published_at="2026-07-16T00:00:00+08:00",
+        round_name="Pre-A+轮",
+    )
+    for item in analysis.evidence:
+        if item.field == "organization":
+            item.quote = "星邮星空完成Pre-A+轮融资"
+
+    reason = RuleVerifier._financing_source_event_failure(analysis)
+
+    assert reason == "financing_source_organization_evidence_invalid"
+
+
 def test_two_b_financing_requires_independent_analysis_and_persists_both_records():
     primary = page(
         "https://media.example.cn/report/independent",
