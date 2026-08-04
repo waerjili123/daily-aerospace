@@ -1775,6 +1775,31 @@ def test_push_failure_keeps_report_and_returns_three(cli_deps, tmp_path: Path) -
     assert cli_deps.notifier.calls == 1
 
 
+def test_live_delivery_without_current_strict_item_still_notifies(
+    cli_deps, tmp_path: Path
+) -> None:
+    cli_deps.pipeline.result = make_result()
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert cli_deps.notifier.calls == 1
+    assert not cli_deps.notifier.reports[0].title.startswith("【测试】")
+    assert delivery["status"] == "accepted"
+    assert delivery["report_kind"] == "standard"
+
+
 def test_test_delivery_gate_blocks_run_without_current_strict_item(
     cli_deps, tmp_path: Path
 ) -> None:

@@ -32,12 +32,13 @@ def _workflow_step(steps: list[dict], name: str) -> dict:
     return next(step for step in steps if step.get("name") == name)
 
 
-def test_workflow_is_manual_bounded_and_defaults_to_dry_run():
+def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     workflow_path = ".github/workflows/daily-intelligence.yml"
     workflow = _repository_file(workflow_path).read_text(encoding="utf-8")
     document = _base_yaml(workflow_path)
 
-    assert set(document["on"]) == {"workflow_dispatch"}
+    assert set(document["on"]) == {"workflow_dispatch", "schedule"}
+    assert document["on"]["schedule"] == [{"cron": "0 0 * * *"}]
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert "BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}" in workflow
     assert "secrets.DINGTALK_WEBHOOK" in workflow
@@ -56,9 +57,9 @@ def test_workflow_is_manual_bounded_and_defaults_to_dry_run():
         "default": "daily",
     }
     assert document["on"]["workflow_dispatch"]["inputs"]["delivery_mode"] == {
-        "description": "Generate only, or send one test-labeled DingTalk report",
+        "description": "Generate only, send a gated test, or send a production report",
         "type": "choice",
-        "options": ["dry_run", "dingtalk_test"],
+        "options": ["dry_run", "dingtalk_test", "dingtalk_live"],
         "default": "dry_run",
     }
     assert document["concurrency"] == {
@@ -71,16 +72,23 @@ def test_workflow_is_manual_bounded_and_defaults_to_dry_run():
     assert pipeline_step["id"] == "daily_pipeline"
     assert "--dry-run" in pipeline_step["run"]
     assert "--test-label" in pipeline_step["run"]
-    assert '"${{ inputs.discovery_mode }}"' in pipeline_step["run"]
-    assert '"${{ inputs.max_queries }}"' in pipeline_step["run"]
-    assert pipeline_step["env"]["DELIVERY_MODE"] == "${{ inputs.delivery_mode }}"
+    assert '"${DISCOVERY_MODE}"' in pipeline_step["run"]
+    assert '"${MAX_QUERIES}"' in pipeline_step["run"]
+    assert '"${DELIVERY_MODE}" == "dingtalk_live"' in pipeline_step["run"]
+    assert pipeline_step["env"]["DISCOVERY_MODE"] == (
+        "${{ github.event_name == 'schedule' && 'daily' || inputs.discovery_mode }}"
+    )
+    assert pipeline_step["env"]["MAX_QUERIES"] == (
+        "${{ github.event_name == 'schedule' && '12' || inputs.max_queries }}"
+    )
+    assert pipeline_step["env"]["DELIVERY_MODE"] == (
+        "${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}"
+    )
     guard_step = _workflow_step(
-        document["jobs"]["run"]["steps"], "Guard verification branch"
+        document["jobs"]["run"]["steps"], "Guard production branches"
     )
-    assert guard_step["run"] == (
-        'test "${GITHUB_REF}" = '
-        '"refs/heads/codex/verification-promotion-20260728"'
-    )
+    assert "refs/heads/main" in guard_step["run"]
+    assert "refs/heads/codex/verification-promotion-20260728" in guard_step["run"]
     summary_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Publish report summary"
     )
@@ -288,16 +296,18 @@ def test_readme_documents_schema_migration_and_single_writer_lock() -> None:
         assert required in readme
 
 
-def test_workflow_cannot_schedule_or_commit_and_send_is_explicit() -> None:
+def test_workflow_schedule_is_fixed_and_delivery_is_explicit() -> None:
     document = _base_yaml(".github/workflows/daily-intelligence.yml")
     workflow = _repository_file(
         ".github/workflows/daily-intelligence.yml"
     ).read_text(encoding="utf-8")
     steps = document["jobs"]["run"]["steps"]
 
-    assert set(document["on"]) == {"workflow_dispatch"}
+    assert document["on"]["schedule"] == [{"cron": "0 0 * * *"}]
     assert "--dry-run" in _workflow_step(steps, "Run daily pipeline")["run"]
-    assert "inputs.delivery_mode == 'dingtalk_test'" in workflow
+    assert "github.event_name == 'schedule'" in workflow
+    assert "'dingtalk_live'" in workflow
+    assert "inputs.delivery_mode != 'dry_run'" in workflow
     assert document["on"]["workflow_dispatch"]["inputs"]["delivery_mode"][
         "default"
     ] == "dry_run"
@@ -318,7 +328,8 @@ def test_readme_documents_required_setup_and_dry_run():
         "DINGTALK_SECRET",
         "delivery_mode=dry_run",
         "dingtalk_test",
-        "07:30",
+        "dingtalk_live",
+        "08:00",
         "artifact",
         "A/B/C",
         "pending",

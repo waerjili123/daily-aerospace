@@ -1,6 +1,8 @@
 name: Daily Laser and Space Intelligence
 
 on:
+  schedule:
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       discovery_mode:
@@ -19,11 +21,12 @@ on:
           - "40"
         default: "12"
       delivery_mode:
-        description: "Generate only, or send one test-labeled DingTalk report"
+        description: "Generate only, send a gated test, or send a production report"
         type: choice
         options:
           - "dry_run"
           - "dingtalk_test"
+          - "dingtalk_live"
         default: "dry_run"
 
 concurrency:
@@ -57,28 +60,40 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Guard verification branch
-        run: test "${GITHUB_REF}" = "refs/heads/codex/verification-promotion-20260728"
+      - name: Guard production branches
+        shell: bash
+        run: |
+          case "${GITHUB_REF}" in
+            refs/heads/main|refs/heads/codex/verification-promotion-20260728) ;;
+            *) echo "Unsupported workflow branch: ${GITHUB_REF}" >&2; exit 1 ;;
+          esac
 
       - name: Run daily pipeline
         id: daily_pipeline
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}
-          DINGTALK_WEBHOOK: ${{ inputs.delivery_mode == 'dingtalk_test' && secrets.DINGTALK_WEBHOOK || 'https://example.invalid/manual-dry-run' }}
-          DINGTALK_SECRET: ${{ inputs.delivery_mode == 'dingtalk_test' && secrets.DINGTALK_SECRET || 'unused-manual-dry-run-secret' }}
-          DELIVERY_MODE: ${{ inputs.delivery_mode }}
+          DINGTALK_WEBHOOK: ${{ (github.event_name == 'schedule' || inputs.delivery_mode != 'dry_run') && secrets.DINGTALK_WEBHOOK || 'https://example.invalid/manual-dry-run' }}
+          DINGTALK_SECRET: ${{ (github.event_name == 'schedule' || inputs.delivery_mode != 'dry_run') && secrets.DINGTALK_SECRET || 'unused-manual-dry-run-secret' }}
+          DISCOVERY_MODE: ${{ github.event_name == 'schedule' && 'daily' || inputs.discovery_mode }}
+          MAX_QUERIES: ${{ github.event_name == 'schedule' && '12' || inputs.max_queries }}
+          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
         shell: bash
         run: |
           args=(
             --config config.yaml
-            --discovery-mode "${{ inputs.discovery_mode }}"
-            --max-queries "${{ inputs.max_queries }}"
+            --discovery-mode "${DISCOVERY_MODE}"
+            --max-queries "${MAX_QUERIES}"
           )
           if [[ "${DELIVERY_MODE}" == "dry_run" ]]; then
             args+=(--dry-run)
-          else
+          elif [[ "${DELIVERY_MODE}" == "dingtalk_test" ]]; then
             args+=(--test-label)
+          elif [[ "${DELIVERY_MODE}" == "dingtalk_live" ]]; then
+            :
+          else
+            echo "Unsupported delivery mode: ${DELIVERY_MODE}" >&2
+            exit 2
           fi
           laser-space-daily "${args[@]}"
 
