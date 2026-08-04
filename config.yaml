@@ -1,5 +1,6 @@
 deepseek:
-  timeout_seconds: 60
+  timeout_seconds: 20
+  max_retries: 0
   base_url: https://api.deepseek.com
   flash_model: deepseek-v4-flash
   pro_model: deepseek-v4-pro

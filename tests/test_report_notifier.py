@@ -2528,6 +2528,9 @@ def test_build_pipeline_uses_real_adapter_types_without_external_calls(tmp_path:
     assert isinstance(pipeline._fetcher, PageFetcher)
     assert isinstance(pipeline._analyzer, ResilientAnalyzer)
     assert isinstance(pipeline._analyzer._primary, DeepSeekAnalyzer)
+    assert pipeline._analyzer._primary._max_attempts == 1
+    assert pipeline._analyzer._primary._client.max_retries == 0
+    assert pipeline._analyzer._primary._client.timeout == 20
     assert pipeline._trend_summarizer is pipeline._analyzer._primary
     assert isinstance(pipeline._verifier, RuleVerifier)
     assert isinstance(pipeline._matcher, ProjectMatcher)

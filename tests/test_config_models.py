@@ -116,7 +116,8 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
 def test_committed_config_contains_no_secret_values():
     expected_config = {
         "deepseek": {
-            "timeout_seconds": "60",
+            "timeout_seconds": "20",
+            "max_retries": "0",
             "base_url": "https://api.deepseek.com",
             "flash_model": "deepseek-v4-flash",
             "pro_model": "deepseek-v4-pro",
