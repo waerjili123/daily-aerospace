@@ -132,11 +132,13 @@ def build_pipeline(settings: Settings) -> Pipeline:
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek.base_url,
         timeout=settings.deepseek.timeout_seconds,
+        max_retries=settings.deepseek.max_retries,
     )
     deepseek = DeepSeekAnalyzer(
         model_client,
         flash_model=settings.deepseek.flash_model,
         pro_model=settings.deepseek.pro_model,
+        max_attempts=1,
     )
     analyzer = ResilientAnalyzer(deepseek, RuleFallbackAnalyzer())
     domains: dict[str, SourceGrade] = {seed.domain: seed.grade for seed in seeds}

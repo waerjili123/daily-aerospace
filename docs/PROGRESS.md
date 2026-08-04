@@ -1122,3 +1122,12 @@ Actions #24（提交 `1b35fdc`，分支
 - [ ] 合并 PR #6 到 `main`，从 `main` 补发 2026-08-04 正式日报并确认 `delivery-status.json` 为 `accepted`。
 
 安全边界：未修改 Secrets 或仓库可见性；在 PR 合并和正式补发完成前，不声称定时推送或今日消息已经送达。
+
+### Actions #50 正式补发超时与快速降级修复
+
+- [x] PR #6 已合并到 `main`，合并提交为 `bc9f7a1`；北京时间每天 08:00 的 `0 0 * * *` 定时入口已进入主分支。
+- [x] Actions #50 从 `main` 以 `daily + 12 + dingtalk_live` 运行，在 `Run daily pipeline` 阶段达到 45 分钟工作流上限后被取消；钉钉没有收到本轮消息。
+- [x] 日志确认耗时来自 DeepSeek `/chat/completions` 自动重试，不是 GitHub 排队或钉钉接口。
+- [x] DeepSeek 单次超时调整为 20 秒，SDK 隐式重试设为 0，正文分析每页只尝试一次；失败后继续使用既有规则分析和候选快照，不降低核实标准。
+- [x] 配置与生产装配增加回归断言；完整离线测试 516 项通过。
+- [ ] 热修复合并后从 `main` 再执行一次 `dingtalk_live`，以钉钉返回 `errcode=0` 和 `delivery-status.json=accepted` 为最终送达依据。
