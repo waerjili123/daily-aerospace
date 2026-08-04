@@ -282,7 +282,17 @@ class RuleFallbackAnalyzer:
         Category.COMMERCIAL_SPACE_FINANCING: (
             "商业航天",
             "运载火箭公司",
+            "运载火箭",
+            "液体火箭",
             "卫星公司",
+            "卫星制造",
+            "卫星运营",
+            "低轨卫星",
+            "星载",
+            "卫星激光通信",
+            "星地激光通信",
+            "空间激光通信",
+            "航天企业",
             "commercial space",
         ),
     }
@@ -340,9 +350,11 @@ class RuleFallbackAnalyzer:
     def analyze(self, page: FetchedPage) -> AnalysisResult:
         text = f"{page.title}\n{page.text}"
         normalized = _normalize(text)
-        in_china = not _has_explicit_foreign_signal(text) and (
-            _has_domestic_signal(text)
-            or _is_approved_domestic_source(page.final_url)
+        subject_text = _event_subject_text(page.title, page.text)
+        in_china = _is_domestic_event_subject(
+            page.title,
+            subject_text,
+            approved_domestic_source=_is_approved_domestic_source(page.final_url),
         )
         category = self._category(normalized)
         if (
@@ -366,8 +378,22 @@ class RuleFallbackAnalyzer:
             category = None
 
         event_type = _event_type(normalized, category) if in_scope else None
-        organization, organization_quote = _extract_organization(page.text)
-        published_at, date_quote = _extract_date(page.text)
+        organization, organization_quote = (
+            _extract_financing_organization(text)
+            if category is Category.COMMERCIAL_SPACE_FINANCING
+            else _extract_organization(page.text)
+        )
+        published_at, date_quote = _extract_page_publication_date(page)
+        financing_round, financing_round_quote = (
+            _extract_financing_round(text)
+            if category is Category.COMMERCIAL_SPACE_FINANCING
+            else (None, None)
+        )
+        amount, amount_disclosed, amount_quote = (
+            _extract_financing_amount(text)
+            if category is Category.COMMERCIAL_SPACE_FINANCING
+            else (None, None, None)
+        )
         deadlines = (
             _extract_deadlines(page.text)
             if category is not Category.COMMERCIAL_SPACE_FINANCING
@@ -375,10 +401,12 @@ class RuleFallbackAnalyzer:
         )
         evidence: list[Evidence] = []
         if in_china:
-            country_quote = _first_line_matching(
-                page.text,
+            country_quote = _domestic_subject_quote(
+                subject_text
+            ) or _first_line_matching(
+                subject_text,
                 ("中国境内", "我国境内", "国内项目", "中国", "我国", "国内"),
-            )
+            ) or _first_domestic_line(subject_text)
             evidence.append(
                 Evidence(
                     field="in_china",
@@ -393,7 +421,7 @@ class RuleFallbackAnalyzer:
             event_quote = _first_line_matching(
                 text, _event_type_terms(event_type)
             )
-            scope_quote = next(
+            combined_scope_quote = next(
                 (
                     line.strip()
                     for line in text.splitlines()
@@ -401,7 +429,13 @@ class RuleFallbackAnalyzer:
                     and _contains_any(_normalize(line), self._CATEGORY_TERMS[category])
                     and _contains_any(_normalize(line), _event_type_terms(event_type))
                 ),
-                page.text,
+                None,
+            )
+            scope_quote = (
+                combined_scope_quote
+                or category_quote
+                or event_quote
+                or _first_nonempty_line(page.text)
             )
             evidence.extend(
                 (
@@ -422,7 +456,7 @@ class RuleFallbackAnalyzer:
                     ),
                 )
             )
-        if page.title.strip() and page.title.strip() in page.text:
+        if page.title.strip():
             evidence.append(
                 Evidence(
                     field="title",
@@ -446,6 +480,22 @@ class RuleFallbackAnalyzer:
                     source_url=page.final_url,
                 )
             )
+        if financing_round and financing_round_quote:
+            evidence.append(
+                Evidence(
+                    field="financing_round",
+                    quote=financing_round_quote,
+                    source_url=page.final_url,
+                )
+            )
+        if amount_quote:
+            evidence.append(
+                Evidence(
+                    field="amount",
+                    quote=amount_quote,
+                    source_url=page.final_url,
+                )
+            )
         for deadline_name, (_, _, quote) in deadlines.items():
             evidence.append(
                 Evidence(
@@ -462,6 +512,12 @@ class RuleFallbackAnalyzer:
             title=page.title.strip() or _first_nonempty_line(page.text),
             organization=organization,
             published_at=published_at,
+            amount=amount,
+            amount_disclosed=amount_disclosed,
+            financing_round=financing_round,
+            financing_subtype=(
+                "round_equity" if financing_round is not None else None
+            ),
             keywords=_matched_keywords(normalized, category, self._CATEGORY_TERMS),
             evidence=evidence,
             registration_deadline=(
@@ -487,14 +543,23 @@ class RuleFallbackAnalyzer:
 
     @classmethod
     def _category(cls, normalized: str) -> Category | None:
+        if _contains_any(normalized, cls._FINANCING_TERMS) and _contains_any(
+            normalized,
+            cls._CATEGORY_TERMS[Category.COMMERCIAL_SPACE_FINANCING],
+        ):
+            return Category.COMMERCIAL_SPACE_FINANCING
         for category in (
             Category.LASER_COMMUNICATION,
             Category.LASER_WEAPON,
             Category.EO_TURRET,
-            Category.COMMERCIAL_SPACE_FINANCING,
         ):
             if _contains_any(normalized, cls._CATEGORY_TERMS[category]):
                 return category
+        if _contains_any(
+            normalized,
+            cls._CATEGORY_TERMS[Category.COMMERCIAL_SPACE_FINANCING],
+        ):
+            return Category.COMMERCIAL_SPACE_FINANCING
         return None
 
     @classmethod
@@ -518,7 +583,7 @@ class RuleFallbackAnalyzer:
 
 
 class ResilientAnalyzer:
-    """Use deterministic fallback only after controlled primary exhaustion."""
+    """Use deterministic analysis after exhaustion and to fill safe omissions."""
 
     def __init__(self, primary: Any, fallback: RuleFallbackAnalyzer) -> None:
         self._primary = primary
@@ -526,9 +591,122 @@ class ResilientAnalyzer:
 
     def analyze(self, page: FetchedPage) -> AnalysisResult:
         try:
-            return self._primary.analyze(page)
+            primary = self._primary.analyze(page)
         except AnalysisExhausted:
             return self._fallback.analyze(page)
+        return self._enrich_missing_fields(
+            primary,
+            self._fallback.analyze(page),
+            page=page,
+        )
+
+    @staticmethod
+    def _enrich_missing_fields(
+        primary: AnalysisResult,
+        fallback: AnalysisResult,
+        *,
+        page: FetchedPage | None = None,
+    ) -> AnalysisResult:
+        if not primary.in_china or not primary.in_scope or not fallback.in_scope:
+            return primary
+        if (
+            primary.category is not None
+            and fallback.category is not None
+            and primary.category is not fallback.category
+        ):
+            return primary
+        if (
+            primary.event_type is not None
+            and fallback.event_type is not None
+            and primary.event_type is not fallback.event_type
+        ):
+            return primary
+
+        updates: dict[str, Any] = {}
+        filled_evidence_fields: set[str] = set()
+        simple_fields = (
+            "category",
+            "event_type",
+            "organization",
+            "published_at",
+            "financing_round",
+            "financing_subtype",
+            "registration_deadline",
+            "bid_submission_deadline",
+            "opening_deadline",
+        )
+        for field_name in simple_fields:
+            if getattr(primary, field_name) is None:
+                fallback_value = getattr(fallback, field_name)
+                if fallback_value is not None:
+                    updates[field_name] = fallback_value
+                    filled_evidence_fields.add(field_name)
+
+        authoritative_publication_date = None
+        if page is not None and page.publication_date_quote:
+            authoritative_publication_date, _ = _extract_date(
+                page.publication_date_quote
+            )
+        if authoritative_publication_date is not None:
+            # `published_at` describes the source page's publication time. A
+            # deterministic value extracted from page metadata, JSON-LD, or
+            # the visible header therefore outranks a model-selected date from
+            # the article body (which may be an event or announcement date).
+            if primary.published_at != authoritative_publication_date:
+                updates["published_at"] = authoritative_publication_date
+            filled_evidence_fields.add("published_at")
+
+        if primary.amount is None and primary.amount_disclosed is None:
+            if fallback.amount is not None or fallback.amount_disclosed is not None:
+                updates["amount"] = fallback.amount
+                updates["amount_disclosed"] = fallback.amount_disclosed
+                filled_evidence_fields.add("amount")
+
+        deadline_precision = dict(primary.deadline_precision)
+        for name, precision in fallback.deadline_precision.items():
+            if name not in deadline_precision:
+                deadline_precision[name] = precision
+        if deadline_precision != primary.deadline_precision:
+            updates["deadline_precision"] = deadline_precision
+
+        evidence = list(primary.evidence)
+        existing = {
+            (item.field, item.quote, item.source_url)
+            for item in evidence
+        }
+        supplemental_evidence_fields = set(filled_evidence_fields)
+        if (
+            primary.category is fallback.category
+            and primary.event_type is fallback.event_type
+            and primary.in_china is fallback.in_china
+            and primary.in_scope is fallback.in_scope
+        ):
+            supplemental_evidence_fields.update(
+                {"in_china", "in_scope", "category", "event_type"}
+            )
+        if (
+            primary.published_at is not None
+            and fallback.published_at is not None
+            and primary.published_at.date() == fallback.published_at.date()
+        ):
+            # The deterministic fallback reads the publication date extracted
+            # from page metadata/JSON-LD/visible headers. Preserve that quote as
+            # evidence even when the model already supplied the same date.
+            supplemental_evidence_fields.add("published_at")
+        evidence_changed = False
+        for item in fallback.evidence:
+            if (
+                item.field in supplemental_evidence_fields
+                and (item.field, item.quote, item.source_url) not in existing
+            ):
+                evidence.append(item)
+                existing.add((item.field, item.quote, item.source_url))
+                evidence_changed = True
+        if not updates and not evidence_changed:
+            return primary
+        updates["evidence"] = evidence
+        updates["degraded"] = True
+        return primary.model_copy(update=updates)
 
     @property
     def deepseek_tokens(self) -> int:
@@ -550,6 +728,7 @@ def guard_grounded_output(
             or not item.quote.strip()
             or (
                 item.quote not in page.text
+                and item.quote not in page.title
                 and not (
                     item.field == "in_china" and item.quote == page.final_url
                 )
@@ -704,6 +883,116 @@ def _first_line_matching(text: str, terms: Sequence[str]) -> str | None:
     )
 
 
+def _first_domestic_line(text: str) -> str | None:
+    return next(
+        (
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+            and _has_domestic_signal(line)
+            and not _has_explicit_foreign_signal(line)
+        ),
+        None,
+    )
+
+
+def _event_subject_text(title: str, body: str) -> str:
+    selected: list[str] = []
+    total = 0
+    for raw in (title, *body.splitlines()):
+        for segment in re.split(r"(?<=[。！？!?；;])\s*", raw):
+            value = segment.strip()
+            if not value or value in selected:
+                continue
+            if len(value) > 600:
+                value = value[:600].rstrip()
+            selected.append(value)
+            total += len(value)
+            if len(selected) >= 8 or total >= 1_800:
+                return "\n".join(selected)
+    return "\n".join(selected)
+
+
+def _is_domestic_event_subject(
+    title: str,
+    subject_text: str,
+    *,
+    approved_domestic_source: bool,
+) -> bool:
+    if _has_strong_domestic_event_subject(title):
+        return True
+    if _has_foreign_event_subject(title):
+        return False
+    if _has_strong_domestic_event_subject(subject_text):
+        return True
+    if _has_foreign_event_subject(subject_text):
+        return False
+    return (
+        _has_domestic_signal(subject_text) or approved_domestic_source
+    ) and not _has_explicit_foreign_signal(subject_text)
+
+
+def _has_strong_domestic_event_subject(text: str) -> bool:
+    if not _has_event_action(text):
+        return False
+    if _domestic_subject_quote(text) is not None:
+        return True
+    return any(
+        cue in text
+        for cue in (
+            "中国境内",
+            "我国境内",
+            "国内项目",
+            "中国商业航天企业",
+            "国内商业航天企业",
+        )
+    )
+
+
+def _has_foreign_event_subject(text: str) -> bool:
+    return _has_explicit_foreign_signal(text) and _has_event_action(text)
+
+
+def _has_event_action(text: str) -> bool:
+    normalized = _normalize(text)
+    return _contains_any(
+        normalized,
+        (
+            *RuleFallbackAnalyzer._PROCUREMENT_TERMS,
+            *RuleFallbackAnalyzer._FINANCING_TERMS,
+        ),
+    )
+
+
+def _domestic_subject_quote(text: str) -> str | None:
+    locations = "|".join(re.escape(item) for item in _DOMESTIC_LOCATION_PREFIXES)
+    matches = (
+        item.group(0).strip()
+        for item in re.finditer(
+            rf"(?:{locations})(?:市)?[\u4e00-\u9fffA-Za-z0-9·]{{2,40}}?"
+            r"(?:股份有限公司|有限责任公司|有限公司|公安局|部队|单位|研究院|研究所|中心|大学)",
+            text,
+        )
+    )
+    return min(
+        (item for item in matches if item),
+        key=_domestic_subject_rank,
+        default=None,
+    )
+
+
+def _domestic_subject_rank(value: str) -> tuple[int, int, str]:
+    if value.endswith(("股份有限公司", "有限责任公司", "有限公司")):
+        entity_rank = 0
+    elif value.endswith(("公安局", "部队", "单位")):
+        entity_rank = 1
+    elif value.endswith(("研究院", "研究所", "中心")):
+        entity_rank = 2
+    else:
+        entity_rank = 3
+    return entity_rank, len(value), value
+
+
 def _extract_organization(text: str) -> tuple[str | None, str | None]:
     match = re.search(
         r"(?:采购人|招标人|采购单位|组织机构|Organization)\s*[:：]\s*([^\r\n。；;]{2,100})",
@@ -716,12 +1005,188 @@ def _extract_organization(text: str) -> tuple[str | None, str | None]:
     return value, match.group(0).strip()
 
 
+_FINANCING_COMPANY_ACTION = re.compile(
+    r"(?P<company>[\u4e00-\u9fffA-Za-z0-9·]{2,60}?)"
+    r"(?:（[^）\r\n]{0,40}）|\([^)\r\n]{0,40}\))?"
+    r"[\s，,：:]*"
+    r"(?:已于近日|于近日|于近期|近日|日前|连续|再度|再|已|正式|宣布)?"
+    r"(?:获|获得|完成).{0,20}?(?:融资|投资)",
+    flags=re.IGNORECASE,
+)
+_FINANCING_COMPANY_PREFIXES = (
+    "商业航天企业",
+    "商业航天公司",
+    "星地激光通信企业",
+    "空间激光通信企业",
+    "激光通信企业",
+    "火箭新锐公司",
+    "航天新锐公司",
+    "卫星公司",
+)
+_FINANCING_COMPANY_SUFFIXES = (
+    "股份有限公司",
+    "有限责任公司",
+    "科技有限公司",
+    "有限公司",
+)
+_DOMESTIC_LOCATION_PREFIXES = (
+    "北京",
+    "上海",
+    "深圳",
+    "广州",
+    "天津",
+    "重庆",
+    "合肥",
+    "西安",
+    "成都",
+    "武汉",
+    "南京",
+    "杭州",
+    "苏州",
+    "无锡",
+)
+_FINANCING_COMPANY_LEADING_CONTEXT = re.compile(
+    r"^(?:"
+    r"\d{4}年\d{1,2}月\d{1,2}日"
+    r"|\d{1,2}月\d{1,2}日"
+    r"|据[^，,。]{1,20}(?:消息|报道)"
+    r")[，,、：:\s]*"
+)
+_FINANCING_COMPANY_TRAILING_MODIFIERS = (
+    "已于近日",
+    "于近日",
+    "于近期",
+    "近日",
+    "日前",
+    "连续",
+    "再度",
+    "宣布",
+    "正式",
+    "再",
+    "已",
+)
+_FINANCING_COMPANY_TRAILING_DESCRIPTORS = (
+    "商业航天企业",
+    "商业航天公司",
+    "商业航天",
+    "星地激光通信企业",
+    "空间激光通信企业",
+    "激光通信企业",
+    "激光通信",
+)
+_FINANCING_COMPANY_INVALID_TOKENS = (
+    "资本加持",
+    "融资消息",
+    "融资事件",
+    "投资消息",
+    "完成融资",
+    "获得融资",
+)
+_FINANCING_ROUND_PATTERN = re.compile(
+    r"(?i)(pre[\s-]?[a-d]\+{0,2}|[a-d]\+{0,2}|"
+    r"天使\+{0,2}|种子|战略投资|战略)\s*轮"
+)
+_FINANCING_AMOUNT_PATTERN = re.compile(
+    r"(?:人民币)?(?:"
+    r"(?:近|超|逾|约|数)(?:\d+(?:\.\d+)?)?(?:亿|千万|百万|万)元"
+    r"|(?:\d+(?:\.\d+)?|[一二三四五六七八九十百]+)"
+    r"(?:亿|千万|百万|万)元"
+    r"|(?:亿|千万|百万|万)元级"
+    r")(?:人民币)?"
+)
+_UNDISCLOSED_AMOUNT_PATTERN = re.compile(
+    r"(?:具体)?(?:融资)?金额(?:暂)?未披露"
+)
+
+
+def _extract_financing_organization(text: str) -> tuple[str | None, str | None]:
+    candidates: list[tuple[tuple[int, int, int], str, str]] = []
+    for line in (item.strip() for item in text.splitlines() if item.strip()):
+        for matched in _FINANCING_COMPANY_ACTION.finditer(line):
+            raw_company = matched.group("company").strip(" ，,：:丨|")
+            company = _FINANCING_COMPANY_LEADING_CONTEXT.sub("", raw_company)
+            changed = True
+            while changed:
+                changed = False
+                for prefix in _FINANCING_COMPANY_PREFIXES:
+                    if company.startswith(prefix):
+                        company = company[len(prefix) :]
+                        changed = True
+                        break
+            had_legal_suffix = False
+            for suffix in _FINANCING_COMPANY_SUFFIXES:
+                if company.endswith(suffix):
+                    company = company[: -len(suffix)]
+                    had_legal_suffix = True
+                    break
+            for prefix in _DOMESTIC_LOCATION_PREFIXES:
+                if company.startswith(prefix):
+                    company = company[len(prefix) :]
+                    break
+            changed = True
+            while changed:
+                changed = False
+                for modifier in (
+                    *_FINANCING_COMPANY_TRAILING_MODIFIERS,
+                    *_FINANCING_COMPANY_TRAILING_DESCRIPTORS,
+                ):
+                    if company.endswith(modifier):
+                        company = company[: -len(modifier)]
+                        changed = True
+                        break
+            company = company.strip(" ，,：:丨|")
+            if not 2 <= len(company) <= 40:
+                continue
+            if (
+                company.startswith(("再获", "获", "获得", "完成"))
+                or any(token in company for token in _FINANCING_COMPANY_INVALID_TOKENS)
+            ):
+                continue
+            candidates.append(
+                (
+                    (
+                        0 if had_legal_suffix else 1,
+                        0 if len(company) <= 16 else 1,
+                        matched.start(),
+                    ),
+                    company,
+                    line,
+                )
+            )
+    if candidates:
+        _, company, quote = min(candidates, key=lambda item: item[0])
+        return company, quote
+    return None, None
+
+
+def _extract_financing_round(text: str) -> tuple[str | None, str | None]:
+    matched = _FINANCING_ROUND_PATTERN.search(text)
+    if not matched:
+        return None, None
+    raw = re.sub(r"\s+", "", matched.group(0))
+    raw = re.sub(r"(?i)^pre-", "Pre-", raw)
+    return raw, matched.group(0)
+
+
+def _extract_financing_amount(
+    text: str,
+) -> tuple[str | None, bool | None, str | None]:
+    disclosed = _FINANCING_AMOUNT_PATTERN.search(text)
+    if disclosed and disclosed.group(0):
+        value = disclosed.group(0).strip()
+        return value, True, value
+    undisclosed = _UNDISCLOSED_AMOUNT_PATTERN.search(text)
+    if undisclosed:
+        return None, False, undisclosed.group(0)
+    return None, None, None
+
+
 def _extract_date(text: str) -> tuple[datetime | None, str | None]:
     patterns = (
-        r"(?P<year>20\d{2})-(?P<month>0?[1-9]|1[0-2])-(?P<day>0?[1-9]|[12]\d|3[01])",
-        r"(?P<year>20\d{2})/(?P<month>0?[1-9]|1[0-2])/(?P<day>0?[1-9]|[12]\d|3[01])",
-        r"(?P<year>20\d{2})\.(?P<month>0?[1-9]|1[0-2])\.(?P<day>0?[1-9]|[12]\d|3[01])",
-        r"(?P<year>20\d{2})年(?P<month>0?[1-9]|1[0-2])月(?P<day>0?[1-9]|[12]\d|3[01])日",
+        r"(?P<year>20\d{2})-(?P<month>1[0-2]|0?[1-9])-(?P<day>3[01]|[12]\d|0?[1-9])(?!\d)",
+        r"(?P<year>20\d{2})/(?P<month>1[0-2]|0?[1-9])/(?P<day>3[01]|[12]\d|0?[1-9])(?!\d)",
+        r"(?P<year>20\d{2})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>3[01]|[12]\d|0?[1-9])(?!\d)",
+        r"(?P<year>20\d{2})年(?P<month>1[0-2]|0?[1-9])月(?P<day>3[01]|[12]\d|0?[1-9])日",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -738,6 +1203,18 @@ def _extract_date(text: str) -> tuple[datetime | None, str | None]:
             continue
         return value, match.group(0)
     return None, None
+
+
+def _extract_page_publication_date(
+    page: FetchedPage,
+) -> tuple[datetime | None, str | None]:
+    """Prefer the fetcher's explicit page-publication evidence over body dates."""
+
+    if page.publication_date_quote:
+        published_at, _ = _extract_date(page.publication_date_quote)
+        if published_at is not None:
+            return published_at, page.publication_date_quote
+    return _extract_date(page.text)
 
 
 def _extract_deadlines(
@@ -850,8 +1327,15 @@ def _is_approved_domestic_source(url: str) -> bool:
 def _has_domestic_signal(text: str) -> bool:
     if any(term in text for term in ("中国境内", "我国境内", "国内项目")):
         return True
-    return re.search(
+    if re.search(
         r"(?:中国|我国|国内).{0,8}(?:企业|机构|单位|政府|军队|项目)", text
+    ) is not None:
+        return True
+    locations = "|".join(re.escape(item) for item in _DOMESTIC_LOCATION_PREFIXES)
+    return re.search(
+        rf"(?:{locations})(?:市)?[\u4e00-\u9fffA-Za-z0-9·]{{2,40}}"
+        r"(?:有限公司|研究院|研究所|公安局|大学|中心)",
+        text,
     ) is not None
 
 

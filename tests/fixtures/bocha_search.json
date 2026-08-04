@@ -11,6 +11,7 @@
         "url": "https://example.cn/notices/1?source=bocha",
         "snippet": "公告片段",
         "summary": "公告摘要",
+        "datePublished": "2026-07-22T08:00:00+08:00",
         "siteName": "示例采购网"
       }
     ]

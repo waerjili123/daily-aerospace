@@ -1,17 +1,33 @@
 name: Daily Laser and Space Intelligence
 
 on:
+  schedule:
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
-      max_queries:
-        description: "Bocha query count for manual collection validation"
+      discovery_mode:
+        description: "Daily incremental or one-time 90-day backfill"
         type: choice
         options:
-          - "1"
-          - "2"
-          - "3"
+          - "daily"
+          - "backfill"
+        default: "daily"
+      max_queries:
+        description: "Bocha hard query budget (daily <=12, backfill <=40)"
+        type: choice
+        options:
           - "4"
-        default: "4"
+          - "12"
+          - "40"
+        default: "12"
+      delivery_mode:
+        description: "Generate only, send a gated test, or send a production report"
+        type: choice
+        options:
+          - "dry_run"
+          - "dingtalk_test"
+          - "dingtalk_live"
+        default: "dry_run"
 
 concurrency:
   group: laser-space-daily
@@ -44,23 +60,183 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+      - name: Guard production branches
+        shell: bash
+        run: |
+          case "${GITHUB_REF}" in
+            refs/heads/main|refs/heads/codex/verification-promotion-20260728) ;;
+            *) echo "Unsupported workflow branch: ${GITHUB_REF}" >&2; exit 1 ;;
+          esac
+
       - name: Run daily pipeline
+        id: daily_pipeline
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}
-          DINGTALK_WEBHOOK: https://example.invalid/manual-dry-run
-          DINGTALK_SECRET: unused-manual-dry-run-secret
-        run: >-
-          laser-space-daily
-          --config config.yaml
-          --dry-run
-          --max-queries "${{ inputs.max_queries }}"
+          DINGTALK_WEBHOOK: ${{ (github.event_name == 'schedule' || inputs.delivery_mode != 'dry_run') && secrets.DINGTALK_WEBHOOK || 'https://example.invalid/manual-dry-run' }}
+          DINGTALK_SECRET: ${{ (github.event_name == 'schedule' || inputs.delivery_mode != 'dry_run') && secrets.DINGTALK_SECRET || 'unused-manual-dry-run-secret' }}
+          DISCOVERY_MODE: ${{ github.event_name == 'schedule' && 'daily' || inputs.discovery_mode }}
+          MAX_QUERIES: ${{ github.event_name == 'schedule' && '12' || inputs.max_queries }}
+          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
+        shell: bash
+        run: |
+          args=(
+            --config config.yaml
+            --discovery-mode "${DISCOVERY_MODE}"
+            --max-queries "${MAX_QUERIES}"
+          )
+          if [[ "${DELIVERY_MODE}" == "dry_run" ]]; then
+            args+=(--dry-run)
+          elif [[ "${DELIVERY_MODE}" == "dingtalk_test" ]]; then
+            args+=(--test-label)
+          elif [[ "${DELIVERY_MODE}" == "dingtalk_live" ]]; then
+            :
+          else
+            echo "Unsupported delivery mode: ${DELIVERY_MODE}" >&2
+            exit 2
+          fi
+          laser-space-daily "${args[@]}"
+
+      - name: Publish report summary
+        if: success()
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          workspace = Path.cwd().resolve()
+          manifest_path = workspace / "data/run-result.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          if manifest.get("status") != "success":
+              raise SystemExit("run-result.json does not describe a successful run")
+
+          report_reference = manifest.get("report_path")
+          if not isinstance(report_reference, str) or not report_reference:
+              raise SystemExit("run-result.json has no report_path")
+
+          reports_root = (workspace / "reports").resolve()
+          report_path = (workspace / report_reference).resolve()
+          if (
+              not report_path.is_relative_to(reports_root)
+              or report_path.suffix.lower() != ".md"
+              or not report_path.is_file()
+          ):
+              raise SystemExit("run-result.json points to an invalid report")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(report_path.read_text(encoding="utf-8"))
+              diagnostics_path = workspace / "data/candidate-diagnostics.json"
+              if diagnostics_path.is_file():
+                  diagnostics = json.loads(
+                      diagnostics_path.read_text(encoding="utf-8")
+                  )
+                  summary.write("\n## Candidate verification diagnostics\n\n")
+                  shown = 0
+                  for row in diagnostics:
+                      if not isinstance(row, dict):
+                          continue
+                      if not (
+                          row.get("selected_for_report")
+                          or row.get("elastic_attempted")
+                      ):
+                          continue
+
+                      def inline(value):
+                          text = str(value or "unknown")
+                          return (
+                              text.replace("`", "'")
+                              .replace("\r", " ")
+                              .replace("\n", " ")
+                          )
+
+                      hostname = urlsplit(
+                          str(row.get("source_url") or "")
+                      ).hostname or "unknown"
+                      summary.write(
+                          "- "
+                          f"title=`{inline(row.get('title'))}`; "
+                          f"domain=`{inline(hostname)}`; "
+                          f"status=`{inline(row.get('status'))}`; "
+                          f"reason=`{inline(row.get('reason'))}`; "
+                          f"event_key=`{inline(row.get('verification_event_key'))}`; "
+                          f"evidence={int(row.get('evidence_count') or 0)}; "
+                          f"elastic_attempted={bool(row.get('elastic_attempted'))}\n"
+                      )
+                      shown += 1
+                      if shown >= 12:
+                          break
+                  if shown == 0:
+                      summary.write("- No report-selected or elastic candidates.\n")
+
+      - name: Publish failure diagnostics summary
+        if: failure()
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          diagnostic_path = Path("data/failure-diagnostics.json")
+
+          def inline(value):
+              if not isinstance(value, str) or not value:
+                  return "unknown"
+              return value.replace("`", "'").replace("\r", " ").replace("\n", " ")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Pipeline failure diagnostics\n\n")
+              if not diagnostic_path.is_file():
+                  summary.write(
+                      "Structured diagnostics were not generated; "
+                      "inspect the failed step log.\n"
+                  )
+              else:
+                  try:
+                      diagnostic = json.loads(
+                          diagnostic_path.read_text(encoding="utf-8")
+                      )
+                  except (OSError, UnicodeError, json.JSONDecodeError):
+                      summary.write(
+                          "Structured diagnostics are unreadable; "
+                          "inspect the failed step log.\n"
+                      )
+                  else:
+                      summary.write(f"- Stage: `{inline(diagnostic.get('stage'))}`\n")
+                      summary.write(
+                          f"- Error type: `{inline(diagnostic.get('error_type'))}`\n"
+                      )
+                      frames = diagnostic.get("frames")
+                      if isinstance(frames, list) and frames:
+                          summary.write("- Repository traceback frames:\n")
+                          for frame in frames:
+                              if not isinstance(frame, dict):
+                                  continue
+                              path = inline(frame.get("path"))
+                              function = inline(frame.get("function"))
+                              line = frame.get("line")
+                              if not isinstance(line, int):
+                                  line = "unknown"
+                              summary.write(
+                                  f"  - `{path}:{line} ({function})`\n"
+                              )
 
       - name: Upload generated report
-        if: always()
+        if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daily-intelligence-report
+          path: |
+            reports/
+            data/
+          if-no-files-found: warn
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daily-intelligence-failure-diagnostics
           path: |
             reports/
             data/

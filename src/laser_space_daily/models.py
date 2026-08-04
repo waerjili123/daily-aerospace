@@ -53,6 +53,8 @@ class Candidate(DomainModel):
     summary: str = ""
     discovered_at: datetime
     discovery_source: str
+    category_hint: Category | None = None
+    source_published_at: datetime | None = None
 
 
 class Evidence(DomainModel):
@@ -204,9 +206,16 @@ class Financing(DomainModel):
 class PendingItem(DomainModel):
     item_id: str
     title: str
+    summary: str = ""
     reason: str
     source_url: str
     discovered_at: datetime
+    category_hint: Category | None = None
+    source_published_at: datetime | None = None
+    verification_attempts: int = Field(default=0, ge=0)
+    last_verification_at: datetime | None = None
+    consecutive_no_new_sources: int = Field(default=0, ge=0)
+    attempted_queries: list[str] = Field(default_factory=list)
 
 
 class RunMetrics(DomainModel):
@@ -217,6 +226,16 @@ class RunMetrics(DomainModel):
     errors: list[str] = Field(default_factory=list)
     search_count: int = Field(default=0, ge=0)
     candidate_count: int = Field(default=0, ge=0)
+    raw_search_count: int = Field(default=0, ge=0)
+    valid_shape_count: int = Field(default=0, ge=0)
+    relevance_pass_count: int = Field(default=0, ge=0)
+    recent_7d_count: int = Field(default=0, ge=0)
+    fallback_8_30d_count: int = Field(default=0, ge=0)
+    fallback_window_days: int = Field(default=30, ge=8, le=90)
+    unknown_date_count: int = Field(default=0, ge=0)
+    final_candidate_count: int = Field(default=0, ge=0)
+    fetch_failure_count: int = Field(default=0, ge=0)
+    information_available: bool = False
     official_candidate_count: int = Field(default=0, ge=0)
     verified_count: int = Field(default=0, ge=0)
     pending_count: int = Field(default=0, ge=0)
@@ -229,6 +248,21 @@ class RunMetrics(DomainModel):
     search_failure_reasons: list[str] = Field(default_factory=list)
     model_coverage_degraded: bool = False
     search_coverage_degraded: bool = False
+    search_budget: int = Field(default=0, ge=0)
+    search_budget_used: int = Field(default=0, ge=0)
+    discovery_channel_calls: int = Field(default=0, ge=0)
+    verification_channel_calls: int = Field(default=0, ge=0)
+    elastic_search_calls: int = Field(default=0, ge=0, le=3)
+    verification_targets_count: int = Field(default=0, ge=0)
+    verification_new_source_count: int = Field(default=0, ge=0)
+    verification_duplicate_source_count: int = Field(default=0, ge=0)
+    elastic_trigger_reasons: list[str] = Field(default_factory=list)
+    agent_round_count: int = Field(default=0, ge=0)
+    duplicate_query_count: int = Field(default=0, ge=0)
+    event_filter_rejected_count: int = Field(default=0, ge=0)
+    event_duplicate_count: int = Field(default=0, ge=0)
+    agent_search_degraded: bool = False
+    agent_stop_reason: str = ""
 
 
 class StateBundle(DomainModel):

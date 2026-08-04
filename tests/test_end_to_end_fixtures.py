@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 from zoneinfo import ZoneInfo
 
+from laser_space_daily.discovery import select_search_candidates
 from laser_space_daily.fetcher import FetchedPage
 from laser_space_daily.matching import ProjectMatcher
 from laser_space_daily.models import (
@@ -97,6 +98,32 @@ def _fixture_records() -> list[dict]:
             )
         )
     return records
+
+
+def test_information_availability_fixture_filters_noise_old_and_duplicate_rows() -> None:
+    fixture = _load_json("information_availability_cases.json")
+    now = datetime.fromisoformat(fixture["now"])
+    rows = [
+        Candidate.model_validate(
+            {
+                **record,
+                "discovered_at": now,
+                "discovery_source": "bocha",
+            }
+        )
+        for record in fixture["candidates"]
+    ]
+
+    selection = select_search_candidates(rows, now)
+
+    assert [item.url for item in selection.candidates] == fixture["expected_urls"]
+    assert selection.raw_search_count == 21
+    assert selection.valid_shape_count == 21
+    assert selection.relevance_pass_count == 13
+    assert selection.filter_rejected_count == 8
+    assert selection.recent_7d_count == 6
+    assert selection.fallback_8_30d_count == 0
+    assert selection.unknown_date_count == 0
 
 
 class FixturePlanner:
@@ -397,7 +424,13 @@ def test_sanitized_fixture_corpus_runs_real_components_end_to_end(tmp_path) -> N
     assert "北京时间 2026-07-21 09:30—2026-07-22 09:30" in markdown
     assert "滚动池 2026-04-22—2026-07-22" in markdown
     first_daily = _section(
-        markdown, "过去24小时新增/变化", "当前可报名及即将启动"
+        markdown, "过去24小时新增/变化", "本轮新核实/历史补录"
+    )
+    first_backfill = _section(
+        markdown, "本轮新核实/历史补录", "当前可报名及即将启动"
+    )
+    first_top = _section(
+        markdown, "今日最值得看", "过去24小时新增/变化"
     )
     formal_ids = {
         record["id"]
@@ -407,16 +440,31 @@ def test_sanitized_fixture_corpus_runs_real_components_end_to_end(tmp_path) -> N
     expected_changed_urls = {
         record_by_id[record_id]["candidate"]["url"] for record_id in formal_ids
     }
-    assert set(re.findall(r"\]\((https://[^)]+)\)", first_daily)) == expected_changed_urls
+    top_urls = set(re.findall(r"\]\((https://[^)]+)\)", first_top))
+    daily_urls = set(re.findall(r"\]\((https://[^)]+)\)", first_daily))
+    backfill_urls = set(re.findall(r"\]\((https://[^)]+)\)", first_backfill))
+    assert top_urls | daily_urls | backfill_urls == expected_changed_urls
+    assert top_urls.isdisjoint(daily_urls)
+    assert top_urls.isdisjoint(backfill_urls)
+    assert daily_urls.isdisjoint(backfill_urls)
     for record_id in formal_ids:
         assert f"]({record_by_id[record_id]['candidate']['url']})" in markdown
-    assert "2026-04-21" in first_daily
-    assert "机载光电转塔伺服稳像核心组件招标公告" in first_daily
-    assert record_by_id["financing-one-b-pending"]["candidate"]["url"] not in markdown
+    assert "2026-04-21" in first_top + first_daily + first_backfill
+    assert (
+        "机载光电转塔伺服稳像核心组件招标公告"
+        in first_top + first_daily + first_backfill
+    )
+    followup = _section(markdown, "今日重点跟进", "三个月趋势与数据完整性")
+    assert record_by_id["financing-one-b-pending"]["candidate"]["url"] in followup
+    assert record_by_id["financing-one-b-pending"]["candidate"]["url"] not in first_daily
     assert record_by_id["bank-credit-rejected"]["candidate"]["url"] not in markdown
     eo_rolling = _section(markdown, "光电转塔/吊舱", "商业航天融资")
     assert record_by_id["eo-turret-core"]["candidate"]["url"] not in eo_rolling
-    assert record_by_id["same-name-lot-1"]["candidate"]["url"] in eo_rolling
+    assert record_by_id["same-name-lot-1"]["candidate"]["url"] not in eo_rolling
+    assert (
+        record_by_id["same-name-lot-1"]["candidate"]["url"]
+        in first_top + first_daily + first_backfill
+    )
     assert not re.search(r"</?[a-z][^>]*>", markdown, flags=re.IGNORECASE)
     assert not re.search(r"^\s*\|", markdown, flags=re.MULTILINE)
     assert all(
@@ -447,9 +495,26 @@ def test_sanitized_fixture_corpus_runs_real_components_end_to_end(tmp_path) -> N
     assert second.changed_event_ids == first.changed_event_ids
     assert second.changed_project_ids == first.changed_project_ids
     assert second.changed_financing_ids == first.changed_financing_ids
-    second_daily = _section(
-        ReportRenderer(max_chars=18000).render(second).markdown,
+    second_markdown = ReportRenderer(max_chars=18000).render(second).markdown
+    second_top = _section(
+        second_markdown,
+        "今日最值得看",
         "过去24小时新增/变化",
+    )
+    second_daily = _section(
+        second_markdown,
+        "过去24小时新增/变化",
+        "本轮新核实/历史补录",
+    )
+    second_backfill = _section(
+        second_markdown,
+        "本轮新核实/历史补录",
         "当前可报名及即将启动",
     )
-    assert set(re.findall(r"\]\((https://[^)]+)\)", second_daily)) == expected_changed_urls
+    second_changed_urls = set(
+        re.findall(
+            r"\]\((https://[^)]+)\)",
+            second_top + second_daily + second_backfill,
+        )
+    )
+    assert second_changed_urls == expected_changed_urls

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from laser_space_daily.fetcher import FetchError, FetchedPage
-from laser_space_daily.analyzer import AnalyzerError, ResilientAnalyzer
+from laser_space_daily.analyzer import (
+    AnalyzerError,
+    ResilientAnalyzer,
+    RuleFallbackAnalyzer,
+)
+from laser_space_daily.agentic_discovery import (
+    AgenticDiscoveryResult,
+    ResearchTraceItem,
+)
 from laser_space_daily.discovery import (
     DiscoveryConfigurationError,
     DiscoveryQuotaError,
@@ -22,6 +30,7 @@ from laser_space_daily.models import (
     Event,
     EventType,
     Evidence,
+    Financing,
     PendingItem,
     Project,
     SourceGrade,
@@ -30,9 +39,14 @@ from laser_space_daily.models import (
     TrendSummary,
     VerificationStatus,
 )
-from laser_space_daily.pipeline import Pipeline
+from laser_space_daily.pipeline import Pipeline, _financing_index
 from laser_space_daily.report import ReportRenderer
-from laser_space_daily.verifier import VerificationDecision
+from laser_space_daily.verification_followup import VerificationFollowupPlanner
+from laser_space_daily.verifier import (
+    RuleVerifier,
+    SourceRegistry,
+    VerificationDecision,
+)
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -46,12 +60,19 @@ def candidate(
     *,
     source: str = "official:official.example.cn",
     discovered_at: datetime = NOW,
+    summary: str = "",
+    title: str = "Laser terminal award",
+    category_hint: Category | None = None,
+    source_published_at: datetime | None = None,
 ) -> Candidate:
     return Candidate(
-        title="Laser terminal award",
+        title=title,
         url=url,
+        summary=summary,
         discovered_at=discovered_at,
         discovery_source=source,
+        category_hint=category_hint,
+        source_published_at=source_published_at,
     )
 
 
@@ -150,13 +171,14 @@ class FakeSearchProvider:
         self.error: BaseException | None = None
         self.usage_count = 0
         self.calls = 0
+        self.responses: dict[str, list[Candidate]] = {}
 
-    def search(self, query):
+    def search(self, query, **_kwargs):
         self.calls += 1
         self.usage_count += 1
         if self.error:
             raise self.error
-        return list(self.rows)
+        return list(self.responses.get(getattr(query, "text", ""), self.rows))
 
 
 class FakeOfficialCollector:
@@ -174,8 +196,10 @@ class FakeFetcher:
     def __init__(self) -> None:
         self.errors: dict[str, BaseException] = {}
         self.pages: dict[str, FetchedPage] = {}
+        self.calls: list[str] = []
 
     def fetch(self, item: Candidate) -> FetchedPage:
+        self.calls.append(item.url)
         error = self.errors.get(item.url)
         if error:
             raise error
@@ -258,6 +282,24 @@ def test_pipeline_requests_rolling_three_month_trend_window(deps) -> None:
     ]
 
 
+def test_pipeline_writes_current_run_candidate_checkpoint_after_analysis(deps) -> None:
+    checkpoints: list[dict] = []
+
+    Pipeline(
+        **deps.as_kwargs(),
+        checkpoint_writer=checkpoints.append,
+    ).run(NOW)
+
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["status"] == "analyzed"
+    assert checkpoints[0]["occurred_at"] == NOW.isoformat()
+    assert checkpoints[0]["candidates"][0]["source_url"] == OFFICIAL_URL
+    assert checkpoints[0]["candidates"][0]["organization"] == "Space Institute"
+    assert checkpoints[0]["candidates"][0]["published_at"].startswith(
+        "2026-07-21"
+    )
+
+
 class FakeLogger:
     def __init__(self) -> None:
         self.messages: list[str] = []
@@ -307,9 +349,16 @@ def pending_decision(reason: str = "source_unavailable") -> VerificationDecision
 
 
 def test_pipeline_routes_verified_and_pending(deps) -> None:
-    unreachable = candidate(SECOND_URL)
-    deps.official_collector.rows = [candidate(), unreachable]
+    unreachable = candidate(SECOND_URL, summary="Search-provider fallback summary")
+    rejected_url = "https://news.example.cn/rejected"
+    rejected = candidate(rejected_url, summary="Visible search candidate")
+    deps.official_collector.rows = [candidate(), unreachable, rejected]
     deps.verifier.decisions[SECOND_URL] = pending_decision()
+    deps.verifier.decisions[rejected_url] = VerificationDecision(
+        status=VerificationStatus.REJECTED,
+        reason="out_of_scope",
+        source_grade=SourceGrade.C,
+    )
 
     result = Pipeline(**deps.as_kwargs()).run(NOW)
 
@@ -317,6 +366,25 @@ def test_pipeline_routes_verified_and_pending(deps) -> None:
     assert result.metrics.pending_count == 1
     assert len(result.state.events) == 1
     assert result.state.pending[0].reason == "source_unavailable"
+    assert result.state.pending[0].summary == "Search-provider fallback summary"
+    diagnostics = {
+        item.source_url: item for item in result.candidate_diagnostics
+    }
+    assert diagnostics[OFFICIAL_URL].stage == "persisted"
+    assert diagnostics[OFFICIAL_URL].status == "verified"
+    assert diagnostics[OFFICIAL_URL].source_grade is SourceGrade.A
+    assert diagnostics[SECOND_URL].stage == "persisted"
+    assert diagnostics[SECOND_URL].status == "pending"
+    assert diagnostics[SECOND_URL].reason == "source_unavailable"
+    assert diagnostics[SECOND_URL].elastic_eligible is False
+    assert (
+        diagnostics[SECOND_URL].elastic_ineligible_reason
+        == "followup_disabled"
+    )
+    assert diagnostics[rejected_url].stage == "verification"
+    assert diagnostics[rejected_url].status == "rejected"
+    assert diagnostics[rejected_url].reason == "out_of_scope"
+    assert diagnostics[rejected_url].source_grade is SourceGrade.C
 
 
 def test_pipeline_analyzes_each_corroborating_source_before_verification(deps) -> None:
@@ -331,6 +399,160 @@ def test_pipeline_analyzes_each_corroborating_source_before_verification(deps) -
     assert isinstance(secondary_page, FetchedPage)
     assert secondary_analysis.source_url == SECOND_URL
     assert secondary_page.final_url == SECOND_URL
+
+
+def test_pipeline_fetches_event_duplicate_search_source_for_corroboration(deps) -> None:
+    primary_url = "https://media-a.example/eaglesat"
+    corroborating_url = "https://media-b.example/eaglesat"
+    common = {
+        "summary": "商业航天卫星公司鹰飒科技完成数千万元Pre-A轮股权融资。",
+        "category_hint": Category.COMMERCIAL_SPACE_FINANCING,
+    }
+    deps.official_collector.rows = []
+    deps.search_provider.rows = [
+        candidate(
+            primary_url,
+            source="search:bocha",
+            title="鹰飒科技完成数千万元Pre-A轮融资",
+            source_published_at=NOW - timedelta(days=1),
+            **common,
+        ),
+        candidate(
+            corroborating_url,
+            source="search:bocha",
+            title="商业航天企业「鹰飒科技」完成Pre-A轮融资",
+            source_published_at=NOW,
+            **common,
+        ),
+    ]
+
+    Pipeline(**deps.as_kwargs()).run(NOW)
+
+    assert set(deps.fetcher.calls) == {primary_url, corroborating_url}
+    assert len(deps.verifier.corroborating_by_url[corroborating_url]) == 1
+
+
+def test_pipeline_strictly_verifies_consistent_chinaventure_and_pedaily_sources(
+    deps,
+) -> None:
+    announced_at = datetime(2026, 7, 7, tzinfo=BEIJING)
+    chinaventure_url = "https://www.chinaventure.com.cn/news/116-test.html"
+    pedaily_url = "https://m.pedaily.cn/news/566-test"
+    common_summary = (
+        "北京微光启航科技有限公司完成亿元级天使++轮股权融资，"
+        "资金用于商业航天液体火箭和发动机研发。"
+    )
+    chinaventure = candidate(
+        chinaventure_url,
+        source="search:bocha",
+        title="微光启航完成亿元级人民币天使++轮融资",
+        summary=common_summary,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=announced_at,
+    )
+    pedaily = candidate(
+        pedaily_url,
+        source="search:bocha",
+        title="微光启航完成亿元级人民币天使++轮融资",
+        summary=common_summary,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=announced_at,
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(chinaventure, pedaily),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    chinaventure_text = (
+        "微光启航完成亿元级人民币天使++轮融资\n"
+        "发布时间：2026-07-07 14:13:24\n"
+        "2026年7月7日，北京微光启航科技有限公司宣布完成亿元级人民币天使++轮融资。\n"
+        "资金将用于商业航天液体火箭和发动机研发。\n"
+        "行业背景随后比较了美国SpaceX的可回收火箭路线。"
+    )
+    pedaily_text = (
+        "微光启航完成亿元级人民币天使++轮融资\n"
+        "页面发布时间：2026-07-07\n"
+        "2026年7月7日，北京微光启航科技有限公司完成亿元级人民币天使++轮融资。\n"
+        "本轮资金用于商业航天液体火箭、发动机及核心部件研发。"
+    )
+    deps.fetcher.pages[chinaventure_url] = FetchedPage(
+        requested_url=chinaventure_url,
+        final_url=chinaventure_url,
+        status_code=200,
+        title=chinaventure.title,
+        text=chinaventure_text,
+        fetched_at=NOW,
+        content_hash="1" * 64,
+        publication_date_quote="2026-07-07 14:13:24",
+        publication_date_source="visible_header",
+    )
+    deps.fetcher.pages[pedaily_url] = FetchedPage(
+        requested_url=pedaily_url,
+        final_url=pedaily_url,
+        status_code=200,
+        title=pedaily.title,
+        text=pedaily_text,
+        fetched_at=NOW,
+        content_hash="2" * 64,
+        publication_date_quote="2026-07-07",
+        publication_date_source="metadata",
+    )
+    deps.official_collector.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["analyzer"] = RuleFallbackAnalyzer()
+    arguments["verifier"] = RuleVerifier(
+        SourceRegistry(
+            {},
+            financing_b_domains=(
+                "chinaventure.com.cn",
+                "pedaily.cn",
+            ),
+        )
+    )
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=(
+            "chinaventure.com.cn",
+            "pedaily.cn",
+        ),
+        elastic_budget=0,
+        pool_days=90,
+        max_targets=3,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert result.metrics.verified_count >= 1
+    assert len(result.state.financings) == 1
+    financing = result.state.financings[0]
+    assert financing.verification_status is VerificationStatus.VERIFIED
+    assert {record.source_url for record in financing.source_records} == {
+        chinaventure_url,
+        pedaily_url,
+    }
+    diagnostics = {
+        item.source_url: item for item in result.candidate_diagnostics
+    }
+    assert diagnostics[chinaventure_url].publication_date_source == "visible_header"
+    assert diagnostics[pedaily_url].publication_date_source == "metadata"
+    assert (
+        diagnostics[chinaventure_url].verification_event_key
+        == diagnostics[pedaily_url].verification_event_key
+    )
 
 
 def test_pipeline_persists_two_b_source_evidence_records(deps) -> None:
@@ -701,12 +923,74 @@ def test_near_date_financing_source_merge_refreshes_rolling_report(deps) -> None
         OFFICIAL_URL: datetime(2026, 7, 18, tzinfo=BEIJING),
         SECOND_URL: datetime(2026, 7, 21, 12, tzinfo=BEIJING),
     }
-    financing_section = ReportRenderer(18000).render(result).markdown.split(
-        "## 商业航天融资", maxsplit=1
-    )[1].split("## 今日重点跟进", maxsplit=1)[0]
-    assert "Space Institute" in financing_section
-    assert OFFICIAL_URL in financing_section
-    assert SECOND_URL in financing_section
+    report = ReportRenderer(18000).render(result).markdown
+    top_section = report.split(
+        "## 今日最值得看", maxsplit=1
+    )[1].split("## 过去24小时新增/变化", maxsplit=1)[0]
+    assert "Space Institute" in top_section
+    assert OFFICIAL_URL in top_section
+    assert SECOND_URL in top_section
+    assert report.count("Space Institute") == 1
+
+
+def test_financing_index_merges_same_verified_source_bundle_despite_optional_drift() -> None:
+    shared_sources = [
+        "https://m.pedaily.cn/news/566658",
+        "https://www.chinaventure.com.cn/news/114-20260716-392303.html",
+    ]
+    existing = Financing(
+        financing_id="first",
+        company="光邮星空",
+        announced_at=datetime(2026, 7, 16, tzinfo=BEIJING),
+        round_name="Pre-A+轮",
+        financing_subtype="round_equity",
+        amount_disclosed=False,
+        investors=[],
+        source_url=shared_sources[0],
+        source_urls=shared_sources,
+        verification_status=VerificationStatus.VERIFIED,
+    )
+    incoming = existing.model_copy(
+        update={
+            "financing_id": "second",
+            "announced_at": datetime(2026, 7, 21, tzinfo=BEIJING),
+            "amount_disclosed": True,
+            "amount_cny": 100_000_000,
+            "investors": ["中关村科学城"],
+            "source_url": shared_sources[1],
+        }
+    )
+
+    assert _financing_index([existing], incoming) == 0
+
+
+def test_financing_index_merges_legal_name_and_combined_round_from_same_sources() -> None:
+    shared_sources = [
+        "https://m.pedaily.cn/news/566658",
+        "https://www.chinaventure.com.cn/news/114-20260716-392303.html",
+    ]
+    existing = Financing(
+        financing_id="short-subround",
+        company="光邮星空",
+        announced_at=datetime(2026, 7, 21, tzinfo=BEIJING),
+        round_name="Pre-A+轮",
+        financing_subtype="round_equity",
+        investors=[],
+        source_url=shared_sources[0],
+        source_urls=shared_sources,
+        verification_status=VerificationStatus.VERIFIED,
+    )
+    incoming = existing.model_copy(
+        update={
+            "financing_id": "legal-combined",
+            "company": "北京光邮星空科技有限公司",
+            "announced_at": datetime(2026, 7, 16, tzinfo=BEIJING),
+            "round_name": "Pre-A和Pre-A+轮",
+            "source_url": shared_sources[1],
+        }
+    )
+
+    assert _financing_index([existing], incoming) == 0
 
 
 def test_same_financing_terms_outside_corroboration_window_stay_separate(deps) -> None:
@@ -885,7 +1169,15 @@ def test_shared_primary_analyzer_and_trend_counter_is_not_doubled(deps) -> None:
 
 
 def test_candidate_dedupe_search_counts_and_official_failures(deps) -> None:
-    deps.search_provider.rows = [candidate(source="bocha")]
+    deps.search_provider.rows = [
+        candidate(
+            source="bocha",
+            title="Laser communication terminal award",
+            summary="Laser communication terminal procurement",
+            category_hint=Category.LASER_COMMUNICATION,
+            source_published_at=NOW,
+        )
+    ]
     deps.official_collector.rows = [candidate()]
     deps.official_collector.failed_domains = frozenset({"failed.gov.cn"})
 
@@ -896,6 +1188,819 @@ def test_candidate_dedupe_search_counts_and_official_failures(deps) -> None:
     assert result.metrics.official_candidate_count == 1
     assert result.metrics.deduplicated_count == 1
     assert result.metrics.failed_domains == ["failed.gov.cn"]
+
+
+def test_pipeline_uses_agentic_research_result_and_exposes_trace(deps) -> None:
+    item = candidate(
+        "https://search.example.cn/agent-result",
+        source="bocha",
+        title="星间激光通信终端采购公告",
+        summary="某研究院发布空间激光通信终端采购项目。",
+        category_hint=Category.LASER_COMMUNICATION,
+        source_published_at=NOW,
+    )
+    trace = ResearchTraceItem(
+        round_index=1,
+        query="星间激光通信终端采购公告 中国 境内",
+        category=Category.LASER_COMMUNICATION,
+        intent="project_followup",
+        result_count=1,
+        new_candidate_count=1,
+        budget_remaining=7,
+        outcome="ok",
+    )
+
+    class FakeResearcher:
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(item,),
+                trace=(trace,),
+                budget=12,
+                budget_used=5,
+                search_count=5,
+                agent_round_count=1,
+                duplicate_query_count=2,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="model_completed",
+            )
+
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    deps.official_collector.rows = []
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert deps.search_provider.calls == 0
+    assert result.metrics.search_count == 5
+    assert result.metrics.search_budget == 12
+    assert result.metrics.search_budget_used == 5
+    assert result.metrics.agent_round_count == 1
+    assert result.metrics.duplicate_query_count == 2
+    assert result.metrics.agent_stop_reason == "model_completed"
+    assert result.research_trace == [
+        {
+            "round_index": 1,
+            "query": trace.query,
+            "category": Category.LASER_COMMUNICATION.value,
+            "intent": "project_followup",
+            "result_count": 1,
+            "new_candidate_count": 1,
+            "budget_remaining": 7,
+            "outcome": "ok",
+        }
+    ]
+
+
+def test_pipeline_uses_at_most_three_elastic_queries_and_reverifies_target(deps):
+    primary_url = "https://media-a.example/laser-terminal"
+    official_followup_url = "https://official.example.cn/notices/laser-terminal"
+    primary = candidate(
+        primary_url,
+        source="search:bocha",
+        title="中国境内星间激光通信终端采购公告",
+        summary="某研究院发布星间激光通信终端采购招标公告。",
+        category_hint=Category.LASER_COMMUNICATION,
+        source_published_at=NOW - timedelta(days=2),
+    )
+    followup = candidate(
+        official_followup_url,
+        source="search:bocha",
+        title="中国境内星间激光通信终端采购公告",
+        summary="某研究院发布星间激光通信终端采购招标公告。",
+        category_hint=Category.LASER_COMMUNICATION,
+        source_published_at=NOW - timedelta(days=2),
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(primary,),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    class ReverifyAfterFollowup(FakeVerifier):
+        def verify(self, result, fetched, corroborating=()):
+            related = list(corroborating)
+            self.corroborating_by_url[fetched.final_url] = related
+            if fetched.final_url == official_followup_url or any(
+                other_page.final_url == official_followup_url
+                for _other_analysis, other_page in related
+            ):
+                return VerificationDecision(
+                    status=VerificationStatus.VERIFIED,
+                    reason="verified_tender",
+                    source_grade=SourceGrade.A,
+                    evidence=result.evidence,
+                )
+            return VerificationDecision(
+                status=VerificationStatus.PENDING,
+                reason="classification_evidence_invalid",
+                source_grade=SourceGrade.B,
+                evidence=result.evidence,
+            )
+
+    deps.official_collector.rows = []
+    deps.analyzer.results[primary_url] = analysis(
+        primary_url,
+        event_type=EventType.TENDER,
+        title=primary.title,
+    )
+    deps.analyzer.results[official_followup_url] = analysis(
+        official_followup_url,
+        event_type=EventType.TENDER,
+        title=followup.title,
+    )
+    deps.verifier = ReverifyAfterFollowup()
+    deps.search_provider.rows = [followup]
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=1,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert result.metrics.search_budget_used == 13
+    assert result.metrics.elastic_search_calls == 1
+    assert result.metrics.discovery_channel_calls == 4
+    assert result.metrics.verification_channel_calls == 9
+    assert result.metrics.verification_targets_count == 1
+    assert result.metrics.verification_new_source_count == 1
+    assert result.metrics.verification_duplicate_source_count == 0
+    assert result.metrics.verified_count >= 1
+    assert len(result.state.events) >= 1
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert len(elastic_trace) == 1
+    assert elastic_trace[0]["post_verification_status"] == "verified"
+
+
+def test_pipeline_keeps_matching_official_result_beyond_selection_limit(deps):
+    primary_url = "https://news.qq.com/article/light-post"
+    official_url = "https://m.zgccity.com/view/h5/news/204.html"
+    primary = candidate(
+        primary_url,
+        source="search:bocha",
+        title="光邮星空完成Pre-A+轮融资",
+        summary="光邮星空聚焦空间激光通信并完成Pre-A+轮融资。",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=NOW - timedelta(days=12),
+    )
+    official = candidate(
+        official_url,
+        source="search:bocha",
+        title="中关村科学城公司投资光邮星空",
+        summary=(
+            "中关村科学城公司完成对空间激光通信企业光邮星空Pre-A+轮投资。"
+        ),
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=None,
+    )
+    distracting_rows = [
+        candidate(
+            f"https://media.example/financing/{index}",
+            source="search:bocha",
+            title=f"卫星企业{index}完成A轮融资",
+            summary=f"卫星企业{index}完成A轮融资并用于卫星制造。",
+            category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+            source_published_at=NOW - timedelta(days=1),
+        )
+        for index in range(10)
+    ]
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(primary,),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    class VerifyWithOfficialInvestor(FakeVerifier):
+        def verify(self, result, fetched, corroborating=()):
+            related = list(corroborating)
+            self.corroborating_by_url[fetched.final_url] = related
+            if fetched.final_url == official_url or any(
+                other_page.final_url == official_url
+                for _other_analysis, other_page in related
+            ):
+                return VerificationDecision(
+                    status=VerificationStatus.VERIFIED,
+                    reason="verified_financing_official",
+                    source_grade=SourceGrade.A,
+                    evidence=result.evidence,
+                )
+            return VerificationDecision(
+                status=VerificationStatus.PENDING,
+                reason="financing_requires_official_or_two_independent_b_sources",
+                source_grade=SourceGrade.C,
+                evidence=result.evidence,
+            )
+
+    primary_analysis = analysis(
+        primary_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=primary.title,
+        published_at=NOW - timedelta(days=12),
+    )
+    primary_analysis.organization = "光邮星空"
+    primary_analysis.financing_round = "Pre-A+轮"
+    primary_analysis.investors = ["中关村科学城", "九合创投"]
+    official_analysis = primary_analysis.model_copy(
+        update={"source_url": official_url, "title": official.title}
+    )
+
+    deps.official_collector.rows = []
+    deps.analyzer.results[primary_url] = primary_analysis
+    deps.analyzer.results[official_url] = official_analysis
+    deps.verifier = VerifyWithOfficialInvestor()
+    deps.search_provider.rows = [*distracting_rows, official]
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        official_investor_domains={
+            "zgccity.com": [
+                "北京中关村科学城创新发展有限公司",
+                "中关村科学城公司",
+                "中关村科学城",
+            ]
+        },
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert official_url in deps.fetcher.calls, result.research_trace
+    assert result.metrics.elastic_search_calls == 1
+    assert result.metrics.verification_new_source_count == 11
+    assert result.metrics.verified_count >= 1
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert "site:zgccity.com" in elastic_trace[0]["query"]
+    assert elastic_trace[0]["allocation_reason"] == "official_source_match"
+    assert elastic_trace[0]["preferred_domains"] == ["zgccity.com"]
+    assert "中关村科学城" in elastic_trace[0]["matched_aliases"]
+    assert elastic_trace[0]["post_verification_status"] == "verified"
+
+
+def test_pipeline_distributes_empty_followups_two_plus_one(deps):
+    first_url = "https://www.stcn.com/article/first"
+    second_url = "https://news.qq.com/article/second"
+    first = candidate(
+        first_url,
+        source="search:bocha",
+        title="龙擎空天完成Pre-A+轮融资",
+        summary="龙擎空天完成Pre-A+轮融资并用于低轨卫星产品研发。",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=NOW - timedelta(days=2),
+    )
+    second = candidate(
+        second_url,
+        source="search:bocha",
+        title="谱星航天完成Pre-A轮融资",
+        summary="谱星航天完成Pre-A轮融资并用于卫星制造。",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=NOW - timedelta(days=1),
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(first, second),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    first_analysis = analysis(
+        first_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=first.title,
+        published_at=NOW - timedelta(days=2),
+    )
+    first_analysis.organization = "龙擎空天"
+    first_analysis.financing_round = "Pre-A+轮"
+    second_analysis = analysis(
+        second_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=second.title,
+        published_at=NOW - timedelta(days=1),
+    )
+    second_analysis.organization = "谱星航天"
+    second_analysis.financing_round = "Pre-A轮"
+
+    deps.official_collector.rows = []
+    deps.analyzer.results[first_url] = first_analysis
+    deps.analyzer.results[second_url] = second_analysis
+    deps.verifier.decisions[first_url] = VerificationDecision(
+        status=VerificationStatus.PENDING,
+        reason="financing_requires_official_or_two_independent_b_sources",
+        source_grade=SourceGrade.B,
+    )
+    deps.verifier.decisions[second_url] = VerificationDecision(
+        status=VerificationStatus.PENDING,
+        reason="financing_requires_official_or_two_independent_b_sources",
+        source_grade=SourceGrade.C,
+    )
+    deps.search_provider.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert [item["target_url"] for item in elastic_trace] == [
+        first_url,
+        second_url,
+        first_url,
+    ]
+    assert [item["allocation_reason"] for item in elastic_trace] == [
+        "highest_promotion_potential",
+        "cover_distinct_target",
+        "retry_same_target",
+    ]
+    assert result.metrics.elastic_search_calls == 3
+    assert result.metrics.verification_targets_count == 2
+    assert result.metrics.search_budget_used == 15
+
+
+def test_pipeline_covers_three_distinct_events_with_three_elastic_calls(deps):
+    rows = [
+        candidate(
+            "https://www.stcn.com/article/longqing",
+            source="search:bocha",
+            title="龙擎空天完成Pre-A+轮融资",
+            summary="龙擎空天完成Pre-A+轮融资并用于低轨卫星产品研发。",
+            category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+            source_published_at=NOW - timedelta(days=3),
+        ),
+        candidate(
+            "https://news.qq.com/article/puxing",
+            source="search:bocha",
+            title="谱星航天完成Pre-A轮融资",
+            summary="谱星航天完成Pre-A轮融资并用于商业航天卫星制造。",
+            category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+            source_published_at=NOW - timedelta(days=2),
+        ),
+        candidate(
+            "https://finance.ifeng.com/article/weiguang",
+            source="search:bocha",
+            title="微光启航完成天使++轮融资",
+            summary="微光启航完成天使++轮融资并用于商业航天液体火箭研发。",
+            category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+            source_published_at=NOW - timedelta(days=1),
+        ),
+    ]
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=tuple(rows),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    details = (
+        ("龙擎空天", "Pre-A+轮", SourceGrade.B),
+        ("谱星航天", "Pre-A轮", SourceGrade.C),
+        ("微光启航", "天使++轮", SourceGrade.C),
+    )
+    for row, (organization, round_name, grade) in zip(rows, details):
+        row_analysis = analysis(
+            row.url,
+            event_type=EventType.FINANCING,
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            title=row.title,
+            published_at=row.source_published_at,
+        )
+        row_analysis.organization = organization
+        row_analysis.financing_round = round_name
+        deps.analyzer.results[row.url] = row_analysis
+        deps.verifier.decisions[row.url] = VerificationDecision(
+            status=VerificationStatus.PENDING,
+            reason="financing_requires_official_or_two_independent_b_sources",
+            source_grade=grade,
+        )
+
+    deps.official_collector.rows = []
+    deps.search_provider.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert len(elastic_trace) == 3
+    assert {item["target_url"] for item in elastic_trace} == {
+        row.url for row in rows
+    }
+    assert [item["allocation_reason"] for item in elastic_trace[1:]] == [
+        "cover_distinct_target",
+        "cover_distinct_target",
+    ]
+    assert result.metrics.verification_targets_count == 3
+    assert result.metrics.search_budget_used == 15
+
+
+@pytest.mark.parametrize(
+    ("prior_no_new", "expected_calls"),
+    [(0, 2), (1, 1)],
+)
+def test_pipeline_stops_single_target_after_two_no_new_queries(
+    deps,
+    prior_no_new,
+    expected_calls,
+):
+    primary_url = "https://m.pedaily.cn/news/566658"
+    primary = candidate(
+        primary_url,
+        source="search:bocha",
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        summary=(
+            "北京光邮星空科技有限公司聚焦高速星地激光通信并完成两轮融资，"
+            "九合创投领投，同创伟业、中关村科学城跟投。"
+        ),
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=NOW - timedelta(days=9),
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(primary,),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=2,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    primary_analysis = analysis(
+        primary_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=primary.title,
+        published_at=NOW - timedelta(days=9),
+    )
+    primary_analysis.organization = "光邮星空"
+    primary_analysis.financing_round = "Pre-A+轮"
+    primary_analysis.amount = None
+    primary_analysis.amount_disclosed = None
+    primary_analysis.investors = []
+    primary_analysis.evidence = [
+        Evidence(
+            field="organization",
+            quote="北京光邮星空科技有限公司",
+            source_url=primary_url,
+        ),
+        Evidence(
+            field="published_at",
+            quote=(NOW - timedelta(days=9)).strftime("%Y年%m月%d日"),
+            source_url=primary_url,
+        ),
+        Evidence(
+            field="financing_round",
+            quote="Pre-A和Pre-A+轮融资",
+            source_url=primary_url,
+        ),
+    ]
+
+    deps.official_collector.rows = []
+    if prior_no_new:
+        deps.repository.state = StateBundle(
+            pending=[
+                PendingItem(
+                    item_id="guangyou-pending",
+                    title=primary.title,
+                    reason="financing_missing_required_evidence",
+                    source_url=primary_url,
+                    discovered_at=NOW - timedelta(days=1),
+                    consecutive_no_new_sources=prior_no_new,
+                )
+            ]
+        )
+    deps.analyzer.results[primary_url] = primary_analysis
+    deps.verifier.decisions[primary_url] = VerificationDecision(
+        status=VerificationStatus.PENDING,
+        reason="financing_missing_required_evidence",
+        source_grade=SourceGrade.B,
+    )
+    deps.search_provider.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        official_investor_domains={
+            "zgccity.com": ["中关村科学城"],
+        },
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+        stop_after_no_new=2,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert len(elastic_trace) == expected_calls
+    assert result.metrics.elastic_search_calls == expected_calls
+    assert result.metrics.search_budget_used == 12 + expected_calls
+    assert "site:zgccity.com" in elastic_trace[0]["query"]
+    assert "融资金额" in elastic_trace[0]["query"]
+    assert "金额未披露" in elastic_trace[0]["query"]
+    assert elastic_trace[0]["clue_layers"] == ["candidate"]
+    assert elastic_trace[0]["missing_evidence_fields"] == ["amount"]
+    if expected_calls == 2:
+        assert elastic_trace[1]["allocation_reason"] == "retry_same_target"
+    assert elastic_trace[-1]["stop_reason"] == "no_new_source_threshold"
+    pending = next(
+        item for item in result.state.pending if item.source_url == primary_url
+    )
+    assert pending.consecutive_no_new_sources == 2
+
+
+def test_pipeline_date_gap_uses_candidate_date_without_writeback(deps):
+    primary_url = "https://www.chinaventure.com.cn/news/date-missing"
+    candidate_date = NOW - timedelta(days=15)
+    primary = candidate(
+        primary_url,
+        source="search:bocha",
+        title="微光启航完成亿元级天使++轮融资",
+        summary=(
+            "北京微光启航科技有限公司近日完成亿元级天使++轮融资，"
+            "资金用于液体火箭和发动机研制。"
+        ),
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=candidate_date,
+    )
+
+    class FakeResearcher:
+        deepseek_tokens = 0
+
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(primary,),
+                trace=(),
+                budget=12,
+                budget_used=12,
+                search_count=12,
+                agent_round_count=1,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="budget_exhausted",
+            )
+
+    primary_analysis = analysis(
+        primary_url,
+        event_type=EventType.FINANCING,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        title=primary.title,
+        published_at=candidate_date,
+    )
+    primary_analysis.organization = "微光启航"
+    primary_analysis.published_at = None
+    primary_analysis.financing_round = "天使++轮"
+
+    deps.official_collector.rows = []
+    deps.analyzer.results[primary_url] = primary_analysis
+    deps.verifier.decisions[primary_url] = VerificationDecision(
+        status=VerificationStatus.PENDING,
+        reason="missing_required_fields:published_at",
+        source_grade=SourceGrade.B,
+    )
+    deps.search_provider.rows = []
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeResearcher()
+    arguments["verification_followup"] = VerificationFollowupPlanner(
+        financing_b_domains=("stcn.com", "pedaily.cn", "cls.cn"),
+        elastic_budget=3,
+        pool_days=90,
+        max_targets=3,
+        stop_after_no_new=2,
+    )
+
+    result = Pipeline(**arguments).run(NOW)
+
+    elastic_trace = [
+        item
+        for item in result.research_trace
+        if item["intent"] == "verification_elastic"
+    ]
+    assert len(elastic_trace) == 2
+    assert result.metrics.search_budget_used == 14
+    assert elastic_trace[0]["missing_evidence_fields"] == ["published_at"]
+    assert "发布日期" in elastic_trace[0]["query"]
+    assert "发布时间" in elastic_trace[0]["query"]
+    assert "公告时间" in elastic_trace[0]["query"]
+    assert primary_analysis.published_at is None
+    diagnostic = next(
+        item
+        for item in result.candidate_diagnostics
+        if item.source_url == primary_url
+    )
+    assert diagnostic.status == "pending"
+    assert diagnostic.missing_fields == ["published_at"]
+    assert diagnostic.elastic_eligible is True
+    assert diagnostic.elastic_attempted is True
+    assert diagnostic.elastic_ineligible_reason is None
+
+
+def test_pipeline_backfill_keeps_relevant_candidates_up_to_90_days(deps) -> None:
+    item = candidate(
+        "https://search.example.cn/backfill-result",
+        source="bocha",
+        title="高能激光反无人机系统招标公告",
+        summary="某单位发布高能激光反无人机装备采购项目。",
+        category_hint=Category.LASER_WEAPON,
+        source_published_at=NOW - timedelta(days=60),
+    )
+
+    class FakeBackfillResearcher:
+        def discover(self, now, projects):
+            return AgenticDiscoveryResult(
+                candidates=(item,),
+                trace=(),
+                budget=40,
+                budget_used=4,
+                search_count=4,
+                agent_round_count=0,
+                duplicate_query_count=0,
+                degraded=False,
+                error_reasons=[],
+                stop_reason="model_completed",
+                mode="backfill",
+            )
+
+    arguments = deps.as_kwargs()
+    arguments["researcher"] = FakeBackfillResearcher()
+    deps.official_collector.rows = []
+
+    result = Pipeline(**arguments).run(NOW)
+
+    assert [row.url for row in result.discovery_candidates] == [item.url]
+    assert result.metrics.fallback_window_days == 90
+    assert result.metrics.fallback_8_30d_count == 1
+
+
+def test_pipeline_filters_search_noise_before_fetch_and_marks_information_available(
+    deps,
+) -> None:
+    deps.planner.queries = [
+        SimpleNamespace(kind="incremental", text=f"query-{index}")
+        for index in range(4)
+    ]
+    deps.official_collector.rows = []
+    deps.search_provider.rows = [
+        candidate(
+            f"https://search.example.cn/relevant/{index}",
+            source="bocha",
+            title=f"星间激光通信终端采购公告 {index}",
+            summary="空间激光通信终端采购项目",
+            category_hint=Category.LASER_COMMUNICATION,
+            source_published_at=NOW,
+        )
+        for index in range(5)
+    ]
+    deps.search_provider.rows.append(
+        candidate(
+            "https://search.example.cn/noise",
+            source="bocha",
+            title="空间激光通信激光打印机采购",
+            summary="激光打印机和硒鼓采购项目",
+            category_hint=Category.LASER_COMMUNICATION,
+            source_published_at=NOW,
+        )
+    )
+
+    result = Pipeline(**deps.as_kwargs()).run(NOW)
+
+    assert result.metrics.search_count == 4
+    assert result.metrics.raw_search_count == 24
+    assert result.metrics.relevance_pass_count == 20
+    assert result.metrics.final_candidate_count == 5
+    assert result.metrics.information_available is True
+    assert [item.url for item in result.discovery_candidates] == [
+        f"https://search.example.cn/relevant/{index}" for index in range(5)
+    ]
+    assert len(deps.fetcher.calls) == 5
+    assert all("noise" not in url for url in deps.fetcher.calls)
+
+
+def test_pipeline_preserves_search_metadata_when_fetch_fails(deps) -> None:
+    deps.planner.queries = [
+        SimpleNamespace(kind="incremental", text=f"query-{index}")
+        for index in range(4)
+    ]
+    deps.official_collector.rows = []
+    source_date = datetime(2026, 7, 21, 8, tzinfo=BEIJING)
+    item = candidate(
+        "https://search.example.cn/unreachable",
+        source="bocha",
+        title="高能激光反无人机系统招标",
+        summary="激光反无人机装备采购",
+        category_hint=Category.LASER_WEAPON,
+        source_published_at=source_date,
+    )
+    deps.search_provider.rows = [item]
+    deps.fetcher.errors[item.url] = FetchError("TLS validation failed")
+
+    result = Pipeline(**deps.as_kwargs()).run(NOW)
+
+    assert result.metrics.fetch_failure_count == 1
+    assert result.metrics.information_available is False
+    assert len(result.state.pending) == 1
+    pending = result.state.pending[0]
+    assert pending.category_hint is Category.LASER_WEAPON
+    assert pending.source_published_at == source_date
+    assert pending.summary == item.summary
+    diagnostic = result.candidate_diagnostics[0]
+    assert diagnostic.stage == "fetch"
+    assert diagnostic.status == "failed"
+    assert diagnostic.reason == "fetch_failed"
+    assert diagnostic.selected_for_report is True
 
 
 def test_trend_failure_uses_deterministic_degraded_fallback(deps) -> None:
@@ -929,6 +2034,10 @@ def test_pending_id_is_stable_and_logs_exclude_secrets_and_body(deps) -> None:
     assert "super-secret" not in log_text
     assert "PRIVATE PAGE BODY" not in log_text
     assert "api_key" not in log_text
+    diagnostic_text = first.candidate_diagnostics[0].model_dump_json()
+    assert "super-secret" not in diagnostic_text
+    assert "PRIVATE PAGE BODY" not in diagnostic_text
+    assert "api_key" not in diagnostic_text
 
 
 def test_repeated_pending_url_replaces_reason_without_duplicate(deps) -> None:
@@ -940,6 +2049,9 @@ def test_repeated_pending_url_replaces_reason_without_duplicate(deps) -> None:
                 reason="source_unavailable",
                 source_url=OFFICIAL_URL,
                 discovered_at=datetime(2026, 7, 21, tzinfo=BEIJING),
+                verification_attempts=2,
+                consecutive_no_new_sources=1,
+                attempted_queries=["existing verification query"],
             )
         ]
     )
@@ -952,6 +2064,11 @@ def test_repeated_pending_url_replaces_reason_without_duplicate(deps) -> None:
     assert len(result.state.pending) == 1
     assert result.state.pending[0].reason == "missing_required_fields"
     assert result.state.pending[0].discovered_at == NOW
+    assert result.state.pending[0].verification_attempts == 2
+    assert result.state.pending[0].consecutive_no_new_sources == 1
+    assert result.state.pending[0].attempted_queries == [
+        "existing verification query"
+    ]
 
 
 def test_verified_rerun_removes_resolved_pending_item(deps) -> None:

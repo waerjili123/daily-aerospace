@@ -9,7 +9,7 @@ import yaml
 from pydantic import ValidationError
 
 from laser_space_daily.cli import build_pipeline
-from laser_space_daily.config import load_settings
+from laser_space_daily.config import DiscoverySettings, load_settings
 from laser_space_daily.models import Candidate, Category, Event, Evidence, SourceGrade, VerificationStatus
 from laser_space_daily.timebox import daily_window, rolling_start
 
@@ -32,22 +32,35 @@ def _workflow_step(steps: list[dict], name: str) -> dict:
     return next(step for step in steps if step.get("name") == name)
 
 
-def test_workflow_is_manual_bounded_dry_run_without_dingtalk_secrets():
+def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     workflow_path = ".github/workflows/daily-intelligence.yml"
     workflow = _repository_file(workflow_path).read_text(encoding="utf-8")
     document = _base_yaml(workflow_path)
 
-    assert set(document["on"]) == {"workflow_dispatch"}
+    assert set(document["on"]) == {"workflow_dispatch", "schedule"}
+    assert document["on"]["schedule"] == [{"cron": "0 0 * * *"}]
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert "BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}" in workflow
-    assert "secrets.DINGTALK_WEBHOOK" not in workflow
-    assert "secrets.DINGTALK_SECRET" not in workflow
+    assert "secrets.DINGTALK_WEBHOOK" in workflow
+    assert "secrets.DINGTALK_SECRET" in workflow
     assert "concurrency:" in workflow
     assert document["on"]["workflow_dispatch"]["inputs"]["max_queries"] == {
-        "description": "Bocha query count for manual collection validation",
+        "description": "Bocha hard query budget (daily <=12, backfill <=40)",
         "type": "choice",
-        "options": ["1", "2", "3", "4"],
-        "default": "4",
+        "options": ["4", "12", "40"],
+        "default": "12",
+    }
+    assert document["on"]["workflow_dispatch"]["inputs"]["discovery_mode"] == {
+        "description": "Daily incremental or one-time 90-day backfill",
+        "type": "choice",
+        "options": ["daily", "backfill"],
+        "default": "daily",
+    }
+    assert document["on"]["workflow_dispatch"]["inputs"]["delivery_mode"] == {
+        "description": "Generate only, send a gated test, or send a production report",
+        "type": "choice",
+        "options": ["dry_run", "dingtalk_test", "dingtalk_live"],
+        "default": "dry_run",
     }
     assert document["concurrency"] == {
         "group": "laser-space-daily",
@@ -56,8 +69,48 @@ def test_workflow_is_manual_bounded_dry_run_without_dingtalk_secrets():
     pipeline_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Run daily pipeline"
     )
+    assert pipeline_step["id"] == "daily_pipeline"
     assert "--dry-run" in pipeline_step["run"]
-    assert '--max-queries "${{ inputs.max_queries }}"' in pipeline_step["run"]
+    assert "--test-label" in pipeline_step["run"]
+    assert '"${DISCOVERY_MODE}"' in pipeline_step["run"]
+    assert '"${MAX_QUERIES}"' in pipeline_step["run"]
+    assert '"${DELIVERY_MODE}" == "dingtalk_live"' in pipeline_step["run"]
+    assert pipeline_step["env"]["DISCOVERY_MODE"] == (
+        "${{ github.event_name == 'schedule' && 'daily' || inputs.discovery_mode }}"
+    )
+    assert pipeline_step["env"]["MAX_QUERIES"] == (
+        "${{ github.event_name == 'schedule' && '12' || inputs.max_queries }}"
+    )
+    assert pipeline_step["env"]["DELIVERY_MODE"] == (
+        "${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}"
+    )
+    guard_step = _workflow_step(
+        document["jobs"]["run"]["steps"], "Guard production branches"
+    )
+    assert "refs/heads/main" in guard_step["run"]
+    assert "refs/heads/codex/verification-promotion-20260728" in guard_step["run"]
+    summary_step = _workflow_step(
+        document["jobs"]["run"]["steps"], "Publish report summary"
+    )
+    assert summary_step["if"] == "success()"
+    assert summary_step["shell"] == "python"
+    assert "GITHUB_STEP_SUMMARY" in summary_step["run"]
+    assert "data/run-result.json" in summary_step["run"]
+    assert "data/candidate-diagnostics.json" in summary_step["run"]
+    assert "Candidate verification diagnostics" in summary_step["run"]
+    assert "verification_event_key" in summary_step["run"]
+    assert "evidence_count" in summary_step["run"]
+    assert "urlsplit" in summary_step["run"]
+    assert 'glob("*.md")' not in summary_step["run"]
+    assert "DINGTALK" not in summary_step["run"]
+    failure_summary = _workflow_step(
+        document["jobs"]["run"]["steps"],
+        "Publish failure diagnostics summary",
+    )
+    assert failure_summary["if"] == "failure()"
+    assert failure_summary["shell"] == "python"
+    assert "data/failure-diagnostics.json" in failure_summary["run"]
+    assert "GITHUB_STEP_SUMMARY" in failure_summary["run"]
 
 
 def test_committed_config_contains_no_secret_values():
@@ -69,7 +122,20 @@ def test_committed_config_contains_no_secret_values():
             "pro_model": "deepseek-v4-pro",
         },
         "bocha": {"timeout_seconds": "30"},
-        "discovery": {"max_queries": "40", "fetch_timeout_seconds": "15"},
+        "discovery": {
+            "mode": "daily",
+                "max_queries": "12",
+                "daily_search_budget": "12",
+                "daily_elastic_budget": "3",
+                "backfill_search_budget": "40",
+                "verification_pool_days": "90",
+                "verification_max_targets": "3",
+                "verification_stop_after_no_new": "2",
+            "max_agent_rounds": "8",
+            "max_results_per_call": "10",
+            "stop_after_no_new_rounds": "2",
+            "fetch_timeout_seconds": "15",
+        },
         "report": {"max_chars": "18000"},
         "notifier": {"timeout_seconds": "15"},
         "data_dir": "data",
@@ -86,8 +152,19 @@ def test_committed_config_contains_no_secret_values():
                 "minospace.cn": "微纳星空",
                 "geespace.com": "时空道宇",
             },
-                "official_investor_domains": {},
-            "independent_media_domains": ["cls.cn", "pedaily.cn", "stcn.com"],
+                "official_investor_domains": {
+                    "zgccity.com": [
+                        "北京中关村科学城创新发展有限公司",
+                        "中关村科学城公司",
+                        "中关村科学城",
+                    ]
+                },
+                "independent_media_domains": [
+                    "stcn.com",
+                    "pedaily.cn",
+                    "chinaventure.com.cn",
+                    "cls.cn",
+                ],
         },
     }
     config = _base_yaml("config.yaml")
@@ -161,8 +238,21 @@ def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
     assert artifact_step["uses"] == (
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     )
-    assert artifact_step["if"] == "always()"
+    assert artifact_step["if"] == "success()"
+    assert artifact_step["with"]["name"] == "daily-intelligence-report"
     assert artifact_step["with"]["path"].splitlines() == ["reports/", "data/"]
+    failure_artifact = _workflow_step(
+        steps,
+        "Upload failure diagnostics",
+    )
+    assert failure_artifact["uses"] == (
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    )
+    assert failure_artifact["if"] == "failure()"
+    assert failure_artifact["with"]["name"] == (
+        "daily-intelligence-failure-diagnostics"
+    )
+    assert failure_artifact["with"]["path"].splitlines() == ["reports/", "data/"]
     assert all(step.get("name") != "Commit state and report" for step in steps)
     assert "git add data reports" not in workflow
     assert "git push origin" not in workflow
@@ -206,16 +296,21 @@ def test_readme_documents_schema_migration_and_single_writer_lock() -> None:
         assert required in readme
 
 
-def test_workflow_cannot_schedule_notify_or_commit() -> None:
+def test_workflow_schedule_is_fixed_and_delivery_is_explicit() -> None:
     document = _base_yaml(".github/workflows/daily-intelligence.yml")
     workflow = _repository_file(
         ".github/workflows/daily-intelligence.yml"
     ).read_text(encoding="utf-8")
     steps = document["jobs"]["run"]["steps"]
 
-    assert set(document["on"]) == {"workflow_dispatch"}
+    assert document["on"]["schedule"] == [{"cron": "0 0 * * *"}]
     assert "--dry-run" in _workflow_step(steps, "Run daily pipeline")["run"]
-    assert "secrets.DINGTALK" not in workflow
+    assert "github.event_name == 'schedule'" in workflow
+    assert "'dingtalk_live'" in workflow
+    assert "inputs.delivery_mode != 'dry_run'" in workflow
+    assert document["on"]["workflow_dispatch"]["inputs"]["delivery_mode"][
+        "default"
+    ] == "dry_run"
     assert all(step.get("name") != "Commit state and report" for step in steps)
 
 
@@ -231,9 +326,10 @@ def test_readme_documents_required_setup_and_dry_run():
         "BOCHA_API_KEY",
         "DINGTALK_WEBHOOK",
         "DINGTALK_SECRET",
-        "dry_run=true",
-        "dry_run=false",
-        "07:30",
+        "delivery_mode=dry_run",
+        "dingtalk_test",
+        "dingtalk_live",
+        "08:00",
         "artifact",
         "A/B/C",
         "pending",
@@ -272,6 +368,20 @@ def test_windows_use_beijing_time_and_calendar_months():
     assert start.isoformat() == "2026-07-21T07:30:00+08:00"
     assert end == now
     assert rolling_start(now).isoformat() == "2026-04-22T07:30:00+08:00"
+
+
+def test_daily_base_plus_elastic_budget_never_exceeds_fifteen():
+    settings = DiscoverySettings(
+        daily_search_budget=12,
+        daily_elastic_budget=3,
+    )
+
+    assert settings.daily_search_budget + settings.daily_elastic_budget == 15
+    with pytest.raises(ValidationError, match="less than or equal to 3"):
+        DiscoverySettings(
+            daily_search_budget=12,
+            daily_elastic_budget=4,
+        )
 
 
 def test_event_rejects_unverified_formal_record():
@@ -343,15 +453,46 @@ def test_production_financing_registry_is_explicit_and_used_by_pipeline(monkeypa
     pipeline = build_pipeline(settings)
     registry = pipeline._verifier._registry
 
+    assert pipeline._verification_followup.elastic_budget == 3
+    assert pipeline._verification_followup.pool_days == 90
+
     assert settings.financing_sources.official_company_domains["landspace.com"] == "蓝箭航天"
     assert settings.financing_sources.independent_media_domains == [
-        "cls.cn",
-        "pedaily.cn",
         "stcn.com",
+        "pedaily.cn",
+        "chinaventure.com.cn",
+        "cls.cn",
+    ]
+    assert settings.financing_sources.official_investor_domains[
+        "zgccity.com"
+    ] == [
+        "北京中关村科学城创新发展有限公司",
+        "中关村科学城公司",
+        "中关村科学城",
     ]
     assert registry.grade_financing("https://news.landspace.com/a", "蓝箭航天") is SourceGrade.A
     assert registry.grade_financing("https://landspace.com/a", "无关航天公司") is SourceGrade.C
     assert registry.grade_financing("https://www.cls.cn/detail/1", "蓝箭航天") is SourceGrade.B
+    assert (
+        registry.grade_financing(
+            "https://www.chinaventure.com.cn/news/1",
+            "光邮星空",
+        )
+        is SourceGrade.B
+    )
+    investor_evidence = [
+        Evidence(
+            field="investors",
+            quote="中关村科学城公司完成对北京光邮星空科技有限公司Pre-A+轮投资",
+            source_url="https://m.zgccity.com/view/h5/news/204.html",
+        )
+    ]
+    assert registry.grade_financing(
+        "https://m.zgccity.com/view/h5/news/204.html",
+        "光邮星空",
+        ["中关村科学城公司"],
+        investor_evidence,
+    ) is SourceGrade.A
 
 
 def test_build_pipeline_wires_configured_official_investor_registry(monkeypatch):

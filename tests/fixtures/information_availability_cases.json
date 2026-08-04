@@ -1,0 +1,39 @@
+{
+  "now": "2026-07-22T09:30:00+08:00",
+  "candidates": [
+    {"title": "星间激光通信终端采购公告 1", "url": "https://example.cn/recent/1", "summary": "空间激光通信终端采购项目", "category_hint": "laser_communication", "source_published_at": "2026-07-22T08:00:00+08:00"},
+    {"title": "高能激光反无人机系统招标 2", "url": "https://example.cn/recent/2", "summary": "激光反无人机装备采购", "category_hint": "laser_weapon", "source_published_at": "2026-07-21T08:00:00+08:00"},
+    {"title": "无人机光电吊舱采购公告 3", "url": "https://example.cn/recent/3", "summary": "无人机光电载荷和光电吊舱采购", "category_hint": "eo_turret", "source_published_at": "2026-07-20T08:00:00+08:00"},
+    {"title": "商业航天卫星公司完成 A 轮融资 4", "url": "https://example.cn/recent/4", "summary": "卫星公司宣布完成股权融资", "category_hint": "commercial_space_financing", "source_published_at": "2026-07-19T08:00:00+08:00"},
+    {"title": "空间激光通信终端中标结果 5", "url": "https://example.cn/recent/5", "summary": "激光通信终端项目公布中标结果", "category_hint": "laser_communication", "source_published_at": "2026-07-18T08:00:00+08:00"},
+    {"title": "定向能激光反制系统采购 6", "url": "https://example.cn/recent/6", "summary": "定向能激光与激光反制装备采购", "category_hint": "laser_weapon", "source_published_at": "2026-07-16T10:00:00+08:00"},
+
+    {"title": "星间激光通信项目变更 7", "url": "https://example.cn/fallback/7", "summary": "空间激光通信终端项目变更", "category_hint": "laser_communication", "source_published_at": "2026-07-14T08:00:00+08:00"},
+    {"title": "光电转塔项目中标 8", "url": "https://example.cn/fallback/8", "summary": "机载光电转塔公布中标结果", "category_hint": "eo_turret", "source_published_at": "2026-07-05T08:00:00+08:00"},
+    {"title": "商业航天火箭公司战略融资 9", "url": "https://example.cn/fallback/9", "summary": "运载火箭公司获得战略投资", "category_hint": "commercial_space_financing", "source_published_at": "2026-06-25T08:00:00+08:00"},
+
+    {"title": "空间激光通信终端采购日期未知 10", "url": "https://example.cn/unknown/10", "summary": "激光通信终端采购项目", "category_hint": "laser_communication", "source_published_at": null},
+    {"title": "高能激光武器项目日期未知 11", "url": "https://example.cn/unknown/11", "summary": "高能激光武器采购", "category_hint": "laser_weapon", "source_published_at": null},
+    {"title": "商业航天卫星公司融资日期未知 12", "url": "https://example.cn/unknown/12", "summary": "卫星公司完成融资", "category_hint": "commercial_space_financing", "source_published_at": null},
+
+    {"title": "空间激光通信历史旧闻 13", "url": "https://example.cn/old/13", "summary": "空间激光通信历史项目", "category_hint": "laser_communication", "source_published_at": "2026-06-01T08:00:00+08:00"},
+    {"title": "高能激光武器历史旧闻 14", "url": "https://example.cn/old/14", "summary": "高能激光武器历史信息", "category_hint": "laser_weapon", "source_published_at": "2025-12-01T08:00:00+08:00"},
+
+    {"title": "激光通信激光打印机采购 15", "url": "https://example.cn/noise/printer", "summary": "激光打印机、硒鼓和墨盒采购", "category_hint": "laser_communication", "source_published_at": "2026-07-22T08:00:00+08:00"},
+    {"title": "激光通信激光美容设备 16", "url": "https://example.cn/noise/beauty", "summary": "激光美容、脱毛和祛斑设备", "category_hint": "laser_communication", "source_published_at": "2026-07-22T08:00:00+08:00"},
+    {"title": "激光通信激光雕刻设备 17", "url": "https://example.cn/noise/engraving", "summary": "激光雕刻和激光切割设备", "category_hint": "laser_communication", "source_published_at": "2026-07-22T08:00:00+08:00"},
+    {"title": "激光通信医疗用品 18", "url": "https://example.cn/noise/medical", "summary": "医疗器械和医用防护用品采购", "category_hint": "laser_communication", "source_published_at": "2026-07-22T08:00:00+08:00"},
+    {"title": "商业航天通用 AI 软件采购 19", "url": "https://example.cn/noise/ai", "summary": "商业航天企业开展大模型采购和软件采购", "category_hint": "commercial_space_financing", "source_published_at": "2026-07-22T08:00:00+08:00"},
+
+    {"title": "重复的星间激光通信终端采购 20", "url": "https://example.cn/recent/1?utm_source=duplicate", "summary": "空间激光通信终端采购项目", "category_hint": "laser_communication", "source_published_at": "2026-07-22T08:00:00+08:00"},
+    {"title": "重复的高能激光反无人机系统 21", "url": "https://example.cn/recent/2?source=duplicate", "summary": "激光反无人机装备采购", "category_hint": "laser_weapon", "source_published_at": "2026-07-21T08:00:00+08:00"}
+  ],
+  "expected_urls": [
+    "https://example.cn/recent/1",
+    "https://example.cn/recent/2",
+    "https://example.cn/recent/3",
+    "https://example.cn/recent/4",
+    "https://example.cn/recent/5",
+    "https://example.cn/recent/6"
+  ]
+}

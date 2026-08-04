@@ -16,12 +16,15 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+import laser_space_daily.cli as cli_module
 from laser_space_daily.analyzer import DeepSeekAnalyzer, ResilientAnalyzer
 from laser_space_daily.cli import (
     CliDependencies,
     RunAlreadyActive,
     _LocalRunLock,
+    _build_renderer,
     _build_parser,
+    _mark_test_report,
     build_pipeline,
     run_cli,
 )
@@ -31,6 +34,7 @@ from laser_space_daily.fetcher import PageFetcher
 from laser_space_daily.matching import ProjectMatcher
 from laser_space_daily.models import (
     AnalysisResult,
+    Candidate,
     Category,
     Event,
     EventType,
@@ -45,13 +49,16 @@ from laser_space_daily.models import (
     VerificationStatus,
 )
 from laser_space_daily.notifier import DingTalkNotifier, NotificationError
-from laser_space_daily.pipeline import RunResult
+from laser_space_daily.pipeline import CandidateDiagnostic, RunResult
 from laser_space_daily.report import (
+    DingTalkShortReportRenderer,
     RenderedReport,
     ReportRenderer,
     ReportTooLong,
     _actionable_deadline,
+    _category_candidate_lines,
     _followup_lines,
+    _pending_reason_text,
 )
 from laser_space_daily.repository import StateRepository
 from laser_space_daily.verifier import RuleVerifier
@@ -60,6 +67,23 @@ from laser_space_daily.verifier import RuleVerifier
 BEIJING = ZoneInfo("Asia/Shanghai")
 WINDOW_START = datetime(2026, 7, 21, 9, 30, tzinfo=BEIJING)
 WINDOW_END = datetime(2026, 7, 22, 9, 30, tzinfo=BEIJING)
+
+
+@pytest.mark.parametrize(
+    ("reason", "label"),
+    [
+        ("classification_country_evidence_invalid", "境内主体证据不足"),
+        ("classification_category_evidence_invalid", "目标业务证据不足"),
+        ("classification_event_evidence_invalid", "事件动作证据不足"),
+        ("classification_scope_evidence_invalid", "范围证据不足"),
+        (
+            "financing_requires_official_or_two_independent_b_sources",
+            "缺少官方来源或第二个独立 B 级来源",
+        ),
+    ],
+)
+def test_pending_reason_renders_precise_classification_failure(reason, label):
+    assert _pending_reason_text(reason) == label
 ROLLING_START = datetime(2026, 4, 22, 9, 30, tzinfo=BEIJING)
 WEBHOOK = "https://dingtalk.example/robot/send/test-token-never-log"
 DINGTALK_SECRET = "SECtest-signing-secret-never-log"
@@ -165,6 +189,198 @@ def test_date_only_deadline_remains_actionable_and_in_followup_until_local_day_e
     assert any("当日截止项目" in line for line in _followup_lines(result, {}))
 
 
+def test_category_section_surfaces_selected_search_candidate_rejected_downstream():
+    item = Candidate(
+        title="星间激光通信终端采购公告",
+        url="https://search.example.cn/laser-terminal",
+        summary="某研究院发布空间激光通信终端采购信息",
+        discovered_at=WINDOW_END,
+        discovery_source="bocha",
+        category_hint=Category.LASER_COMMUNICATION,
+        source_published_at=dt(7, 21),
+    )
+    result = make_result(discovery_candidates=[item])
+
+    candidate_lines = "\n".join(
+        _category_candidate_lines(result, Category.LASER_COMMUNICATION)
+    )
+    followup = "\n".join(_followup_lines(result, {}))
+
+    assert "候选线索（未核实）" in candidate_lines
+    assert "2026-07-21" in candidate_lines
+    assert item.title in candidate_lines
+    assert item.summary in candidate_lines
+    assert item.url in candidate_lines
+    assert item.title not in followup
+
+
+def test_high_confidence_pending_signal_renders_once_in_top_section():
+    diagnostic = CandidateDiagnostic(
+        source_url="https://www.stcn.com/article/guangyou",
+        title="光邮星空完成Pre-A轮融资",
+        summary="报道明确披露融资轮次和投资方。",
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization="光邮星空",
+        published_at=dt(7, 16),
+        financing_round="Pre-A轮",
+        evidence_count=6,
+        stage="persisted",
+        status="pending",
+        reason="financing_requires_official_or_two_independent_b_sources",
+        source_grade=SourceGrade.B,
+        verification_event_key="光邮星空|financing|Pre-A",
+    )
+    result = make_result().model_copy(
+        update={"candidate_diagnostics": [diagnostic]}
+    )
+
+    markdown = ReportRenderer().render(result).markdown
+    top = markdown.split("## 今日最值得看", 1)[1].split(
+        "## 过去24小时新增/变化", 1
+    )[0]
+    financing_section = markdown.split("## 商业航天融资", 1)[1].split(
+        "## 今日重点跟进", 1
+    )[0]
+
+    assert "高可信待核实" in top
+    assert "光邮星空完成Pre-A轮融资" in top
+    assert "高可信待核实" not in financing_section
+    assert markdown.count("光邮星空完成Pre-A轮融资") == 1
+
+
+def test_verified_financing_suppresses_same_company_round_candidate_variants():
+    verified = financing(
+        company="微光启航",
+        announced_at=dt(7, 7),
+    ).model_copy(update={"round_name": "天使++轮"})
+    diagnostic = CandidateDiagnostic(
+        source_url="https://media.example/weiguang-third",
+        title="微光启航完成亿元天使++轮融资",
+        summary="北京微光启航科技有限公司完成本轮融资。",
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization=None,
+        published_at=dt(7, 7),
+        financing_round=None,
+        evidence_count=4,
+        stage="persisted",
+        status="pending",
+        reason="missing_required_fields:organization",
+        source_grade=SourceGrade.B,
+    )
+    candidate = Candidate(
+        title="微光启航完成亿元级人民币天使++轮融资",
+        url="https://search.example/weiguang-fourth",
+        summary="该轮融资用于全碳纤维火箭工程研制。",
+        discovered_at=WINDOW_END,
+        discovery_source="bocha",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=dt(7, 8),
+    )
+    result = make_result(
+        state=StateBundle(financings=[verified]),
+        changed_financing_ids=[verified.financing_id],
+        discovery_candidates=[candidate],
+    ).model_copy(update={"candidate_diagnostics": [diagnostic]})
+
+    markdown = ReportRenderer().render(result).markdown
+
+    assert "严格已核实" in markdown
+    assert markdown.count("微光启航") == 1
+    assert "weiguang-third" not in markdown
+    assert "weiguang-fourth" not in markdown
+
+
+def test_backfill_candidate_uses_90_day_time_label():
+    item = Candidate(
+        title="商业航天企业完成A轮融资",
+        url="https://search.example.cn/financing",
+        summary="卫星公司宣布完成商业航天股权融资",
+        discovered_at=WINDOW_END,
+        discovery_source="bocha",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=dt(5, 20),
+    )
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        fallback_window_days=90,
+    )
+    result = make_result(metrics=metrics, discovery_candidates=[item])
+
+    candidate_lines = "\n".join(
+        _category_candidate_lines(result, Category.COMMERCIAL_SPACE_FINANCING)
+    )
+
+    assert "8–90 天补充" in candidate_lines
+    assert "时间范围外" not in candidate_lines
+
+
+def test_report_exposes_agentic_budget_and_stop_reason():
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        search_budget=12,
+        search_budget_used=9,
+        agent_round_count=3,
+        duplicate_query_count=2,
+        event_filter_rejected_count=7,
+        event_duplicate_count=1,
+        agent_stop_reason="no_new_candidates",
+    )
+
+    markdown = ReportRenderer().render(make_result(metrics=metrics)).markdown
+
+    assert "智能检索：预算 12；实际调用 9；模型轮次 3" in markdown
+    assert "重复查询拦截 2" in markdown
+    assert "事件过滤淘汰 7" in markdown
+    assert "事件级合并 1" in markdown
+    assert "停止原因 no\\_new\\_candidates" in markdown
+
+
+def test_report_exposes_elastic_verification_budget_and_outcome():
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        search_budget=12,
+        search_budget_used=15,
+        discovery_channel_calls=4,
+        verification_channel_calls=11,
+        elastic_search_calls=3,
+        verification_targets_count=1,
+        verification_new_source_count=2,
+        verification_duplicate_source_count=4,
+        elastic_trigger_reasons=[
+            "financing_requires_official_or_two_independent_b_sources"
+        ],
+    )
+
+    markdown = ReportRenderer().render(make_result(metrics=metrics)).markdown
+
+    assert (
+        "智能检索：基础预算 12；基础调用 12；弹性调用 3；总调用 15"
+        in markdown
+    )
+    assert "定向核验：处理事件 1；新增来源 2；重复来源 4" in markdown
+    assert (
+        "financing\\_requires\\_official\\_or\\_two\\_independent\\_b\\_sources"
+        in markdown
+    )
+
+
+def test_test_label_marks_title_and_markdown():
+    report = RenderedReport(
+        title="# 中国激光与商业航天情报日报｜2026-07-28",
+        markdown="# 中国激光与商业航天情报日报｜2026-07-28\n\n正文\n",
+    )
+
+    marked = _mark_test_report(report)
+
+    assert marked.title.startswith("# 【测试】")
+    assert marked.markdown.startswith("# 【测试】")
+    assert marked.markdown.count("【测试】") == 1
+
+
 def financing(
     financing_id: str = "f-new",
     *,
@@ -214,6 +430,7 @@ def make_result(
     changed_project_ids: list[str] | None = None,
     changed_financing_ids: list[str] | None = None,
     metrics: RunMetrics | None = None,
+    discovery_candidates: list[Candidate] | None = None,
 ) -> RunResult:
     report_state = state or StateBundle()
     return RunResult(
@@ -225,6 +442,12 @@ def make_result(
             verified_count=5,
             pending_count=len(report_state.pending),
             deduplicated_count=2,
+            raw_search_count=10,
+            valid_shape_count=9,
+            relevance_pass_count=7,
+            recent_7d_count=5,
+            final_candidate_count=5,
+            information_available=True,
         ),
         trend_summary=TrendSummary(
             window_start=dt(4, 22),
@@ -243,6 +466,7 @@ def make_result(
         changed_event_ids=changed_event_ids or [],
         changed_project_ids=changed_project_ids or [],
         changed_financing_ids=changed_financing_ids or [],
+        discovery_candidates=discovery_candidates or [],
     )
 
 
@@ -341,9 +565,12 @@ def run_result() -> RunResult:
             PendingItem(
                 item_id="suspected-1",
                 title="疑似同项目公告",
+                summary="搜索结果摘要，仅供人工复核。",
                 reason="suspected_project_match",
                 source_url="https://pending.example/item",
                 discovered_at=WINDOW_END,
+                category_hint=Category.LASER_COMMUNICATION,
+                source_published_at=dt(7, 22, 8),
             )
         ],
     )
@@ -378,6 +605,289 @@ def test_report_matches_snapshot(run_result: RunResult, snapshot_text: str) -> N
     ]
     positions = [report.markdown.index(f"## {heading}") for heading in headings]
     assert positions == sorted(positions)
+
+
+def test_production_renderer_uses_separated_dingtalk_short_report(
+    cli_deps,
+) -> None:
+    renderer = _build_renderer(cli_deps.settings)
+
+    assert isinstance(renderer, DingTalkShortReportRenderer)
+
+
+def test_short_report_separates_financing_before_procurement_and_keeps_links(
+    run_result: RunResult,
+) -> None:
+    text = DingTalkShortReportRenderer().render(run_result).markdown
+    financing = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+    procurement = text.split("## 二、招标采购情况", 1)[1].split(
+        "## 三、其他行业动态", 1
+    )[0]
+
+    assert text.index("## 一、商业航天融资新闻") < text.index(
+        "## 二、招标采购情况"
+    )
+    assert "星河动力" in financing
+    assert "星间激光通信终端采购" not in financing
+    assert "星间激光通信终端采购" in procurement
+    assert "星河动力" not in procurement
+    assert "[企业公告](https://company.example/financing)" in financing
+    assert "[权威媒体报道](https://media.example/financing)" in financing
+    assert "[官方原始公告](https://official.example/open)" in procurement
+    assert "融资统计：已核实" in financing
+    assert "招标统计：已核实" in procurement
+    assert 600 <= len(text) <= 1200
+
+
+def test_short_report_compacts_items_before_raising_length_error(
+    run_result: RunResult,
+) -> None:
+    compact = DingTalkShortReportRenderer(max_chars=900).render(run_result)
+
+    assert len(compact.markdown) <= 900
+    assert "## 一、商业航天融资新闻" in compact.markdown
+    assert "## 二、招标采购情况" in compact.markdown
+    with pytest.raises(ReportTooLong):
+        DingTalkShortReportRenderer(max_chars=200).render(run_result)
+
+
+def test_short_report_marks_changed_old_financing_as_historical_backfill() -> None:
+    item = financing(announced_at=dt(7, 7))
+    result = make_result(
+        state=StateBundle(financings=[item]),
+        changed_financing_ids=[item.financing_id],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+
+    assert "【已核实·历史补录】星河动力完成A轮" in text
+    assert "历史补录 1 条" in text
+    assert "过去24小时融资新增 0 条" in text
+    assert "本轮新核实/历史补录" not in text
+
+
+def test_short_report_keeps_financing_and_tender_candidates_in_separate_sections() -> None:
+    financing_diagnostic = CandidateDiagnostic(
+        source_url="https://www.stcn.com/article/guangyou",
+        title="光邮星空完成Pre-A轮融资",
+        summary=(
+            "光邮星空宣布完成Pre-A轮融资，投资方包括中关村科学城、"
+            "九合创投和同创伟业，具体金额未披露。"
+        ),
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization="光邮星空",
+        published_at=dt(7, 16),
+        financing_round="Pre-A轮",
+        evidence_count=6,
+        stage="persisted",
+        status="pending",
+        reason="financing_requires_official_or_two_independent_b_sources",
+        source_grade=SourceGrade.B,
+        verification_event_key="光邮星空|financing|Pre-A",
+    )
+    tender = Candidate(
+        title="无人机激光反制设备采购成交结果",
+        url="https://shanghai.jianyu360.cn/item",
+        summary=(
+            "本条项目信息由聚合站提供。采购单位为上海市公安局黄浦分局，"
+            "候选中标方为上海纬稳科技。采购联系人 张三 采购电话 123456"
+        ),
+        discovered_at=WINDOW_END,
+        discovery_source="bocha",
+        category_hint=Category.LASER_WEAPON,
+        source_published_at=dt(7, 3),
+    )
+    result = make_result(discovery_candidates=[tender]).model_copy(
+        update={"candidate_diagnostics": [financing_diagnostic]}
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+    tender_section = text.split("## 二、招标采购情况", 1)[1].split(
+        "## 三、其他行业动态", 1
+    )[0]
+
+    assert "光邮星空完成Pre-A轮融资" in financing_section
+    assert "无人机激光反制设备" not in financing_section
+    assert "无人机激光反制设备" in tender_section
+    assert "光邮星空" not in tender_section
+    assert "[聚合线索](https://shanghai.jianyu360.cn/item)" in tender_section
+    assert "采购联系人" not in text
+    assert "采购电话" not in text
+
+
+def test_short_report_merges_same_pending_financing_across_media_sources() -> None:
+    first = CandidateDiagnostic(
+        source_url="https://www.chinaventure.com.cn/guangyou",
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        summary="光邮星空宣布连续完成Pre-A和Pre-A+轮融资。",
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization="北京光邮星空科技有限公司",
+        published_at=dt(7, 16),
+        financing_round="Pre-A和Pre-A+轮",
+        evidence_count=6,
+        stage="persisted",
+        status="pending",
+        reason="financing_missing_required_evidence",
+        source_grade=SourceGrade.B,
+        verification_event_key="光邮星空|financing|prea,prea+|2026-07-16",
+    )
+    second = first.model_copy(
+        update={
+            "source_url": "https://m.pedaily.cn/news/guangyou",
+            "title": "光邮星空连续完成Pre-A和Pre-A+轮融资，聚焦星地激光通信",
+            "organization": "光邮星空",
+            "published_at": dt(7, 2),
+            "financing_round": "Pre-A+轮",
+            "verification_event_key": (
+                "光邮星空|financing|prea,prea+|2026-07-02"
+            ),
+        }
+    )
+    result = make_result().model_copy(
+        update={"candidate_diagnostics": [first, second]}
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+
+    assert financing_section.count("**【高可信待核实】") == 1
+    assert "企业：北京光邮星空科技有限公司" in financing_section
+    assert "[来源1](https://m.pedaily.cn/news/guangyou)" in financing_section
+    assert (
+        "[来源2](https://www.chinaventure.com.cn/guangyou)"
+        in financing_section
+    )
+    assert "待核实线索 1 条" in text
+
+
+def test_short_report_renders_same_verified_source_bundle_once() -> None:
+    sources = [
+        "https://m.pedaily.cn/news/566658",
+        "https://www.chinaventure.com.cn/news/114-20260716-392303.html",
+    ]
+    first = financing(
+        "guangyou-16",
+        company="光邮星空",
+        announced_at=dt(7, 16),
+        source_urls=sources,
+    ).model_copy(update={"round_name": "Pre-A+轮"})
+    second = financing(
+        "guangyou-21",
+        company="光邮星空",
+        announced_at=dt(7, 21),
+        source_urls=sources,
+    ).model_copy(update={"round_name": "Pre-A+轮"})
+    result = make_result(
+        state=StateBundle(financings=[first, second]),
+        changed_financing_ids=[first.financing_id, second.financing_id],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+
+    assert financing_section.count("光邮星空") == 1
+    assert "融资统计：已核实 1 条" in financing_section
+
+
+def test_short_report_merges_legal_name_and_combined_round_verified_duplicate() -> None:
+    sources = [
+        "https://m.pedaily.cn/news/566658",
+        "https://www.chinaventure.com.cn/news/114-20260716-392303.html",
+    ]
+    first = financing(
+        "guangyou-short",
+        company="光邮星空",
+        announced_at=dt(7, 21),
+        source_urls=sources,
+    ).model_copy(update={"round_name": "Pre-A+轮"})
+    second = financing(
+        "guangyou-legal",
+        company="北京光邮星空科技有限公司",
+        announced_at=dt(7, 16),
+        source_urls=sources,
+    ).model_copy(update={"round_name": "Pre-A和Pre-A+轮"})
+    result = make_result(
+        state=StateBundle(financings=[first, second]),
+        changed_financing_ids=[first.financing_id, second.financing_id],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+
+    assert financing_section.count("**【已核实·历史补录】") == 1
+    assert "融资统计：已核实 1 条" in financing_section
+
+
+def test_short_report_hides_combined_round_candidate_covered_by_verified_subround() -> None:
+    source = "https://www.chinaventure.com.cn/news/guangyou"
+    verified = financing(
+        "guangyou-verified",
+        company="光邮星空",
+        announced_at=dt(7, 16),
+        source_urls=[source, "https://m.pedaily.cn/news/guangyou"],
+    ).model_copy(update={"round_name": "Pre-A+轮"})
+    candidate_row = Candidate(
+        title="光邮星空连续完成Pre-A和Pre-A+轮融资",
+        url=source,
+        summary="报道同一融资事件。",
+        discovered_at=WINDOW_END,
+        discovery_source="search:bocha",
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        source_published_at=dt(7, 16),
+    )
+    result = make_result(
+        state=StateBundle(financings=[verified]),
+        changed_financing_ids=[verified.financing_id],
+        discovery_candidates=[candidate_row],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    financing_section = text.split("## 一、商业航天融资新闻", 1)[1].split(
+        "## 二、招标采购情况", 1
+    )[0]
+
+    assert financing_section.count("光邮星空") == 1
+    assert "候选线索 0 条" in financing_section
+
+
+def test_short_report_hides_empty_followup_and_technical_diagnostics() -> None:
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        raw_search_count=84,
+        final_candidate_count=4,
+        search_budget=12,
+        search_budget_used=15,
+        elastic_search_calls=3,
+        agent_stop_reason="budget_exhausted",
+        elastic_trigger_reasons=["missing_required_fields:published_at"],
+    )
+
+    text = DingTalkShortReportRenderer().render(
+        make_result(metrics=metrics)
+    ).markdown
+
+    assert "## 四、重点跟进" not in text
+    assert "系统状态：检索 84 条，形成 4 条候选" in text
+    assert "budget_exhausted" not in text
+    assert "missing_required_fields" not in text
+    assert "采集漏斗" not in text
+    assert "模型轮次" not in text
+    assert "失败域" not in text
 
 
 def test_currently_open_section_requires_supported_nonexpired_deadline() -> None:
@@ -434,16 +944,19 @@ def test_stage_links_and_latest_link_are_original_urls(run_result: RunResult) ->
 def test_changed_projects_render_status_deadline_chain_without_event_duplicate(
     run_result: RunResult,
 ) -> None:
-    daily = ReportRenderer(18000).render(run_result).markdown.split(
-        "## 当前可报名及即将启动", maxsplit=1
-    )[0]
+    top = (
+        ReportRenderer(18000)
+        .render(run_result)
+        .markdown.split("## 今日最值得看", maxsplit=1)[1]
+        .split("## 过去24小时新增/变化", maxsplit=1)[0]
+    )
 
-    assert "状态：开放报名" in daily
-    assert "截止：投标截止 2026-07-25 17:00" in daily
-    assert "[查看原始公告](https://official.example/open)" in daily
-    assert "公告链：[招标公告](https://official.example/open)（2026-07-21）" in daily
-    assert daily.count("星间激光通信终端采购") == 1
-    assert "｜招标公告｜星间激光通信终端采购｜" not in daily
+    assert "状态：开放报名" in top
+    assert "截止：投标截止 2026-07-25 17:00" in top
+    assert "[查看原始公告](https://official.example/open)" in top
+    assert "公告链：[招标公告](https://official.example/open)（2026-07-21）" in top
+    assert top.count("星间激光通信终端采购") == 1
+    assert "｜招标公告｜星间激光通信终端采购｜" not in top
 
 
 def test_announcement_chain_is_sorted_by_date_then_event_id(
@@ -596,22 +1109,26 @@ def test_rolling_pool_uses_three_calendar_months(run_result: RunResult) -> None:
     assert "2026-04-21历史项目" not in text
 
 
-def test_new_financing_appears_in_24h_and_financing_module(
+def test_new_financing_appears_once_in_top_section(
     run_result: RunResult,
 ) -> None:
     text = ReportRenderer(18000).render(run_result).markdown
-    daily, rest = text.split("## 当前可报名及即将启动", maxsplit=1)
+    top = text.split("## 今日最值得看", maxsplit=1)[1].split(
+        "## 过去24小时新增/变化", maxsplit=1
+    )[0]
+    rest = text.split("## 当前可报名及即将启动", maxsplit=1)[1]
     financing_section = rest.split("## 商业航天融资", maxsplit=1)[1].split(
         "## 今日重点跟进", maxsplit=1
     )[0]
 
-    assert "星河动力" in daily
-    assert "星河动力" in financing_section
-    assert "[企业公告](https://company.example/financing)" in financing_section
-    assert "[权威媒体报道](https://media.example/financing)" in financing_section
+    assert "星河动力" in top
+    assert "星河动力" not in financing_section
+    assert text.count("星河动力") == 1
+    assert "[企业公告](https://company.example/financing)" in top
+    assert "[权威媒体报道](https://media.example/financing)" in top
 
 
-def test_old_late_discovered_financing_is_only_in_24h_module() -> None:
+def test_old_late_discovered_financing_is_only_in_top_module() -> None:
     late_discovery = financing(
         announced_at=dt(3, 1),
         source_published_at={
@@ -625,12 +1142,19 @@ def test_old_late_discovered_financing_is_only_in_24h_module() -> None:
             changed_financing_ids=[late_discovery.financing_id],
         )
     ).markdown
-    daily, rest = text.split("## 当前可报名及即将启动", maxsplit=1)
+    top = text.split("## 今日最值得看", maxsplit=1)[1].split(
+        "## 过去24小时新增/变化", maxsplit=1
+    )[0]
+    daily = text.split("## 过去24小时新增/变化", maxsplit=1)[1].split(
+        "## 本轮新核实/历史补录", maxsplit=1
+    )[0]
+    rest = text.split("## 当前可报名及即将启动", maxsplit=1)[1]
     financing_section = rest.split("## 商业航天融资", maxsplit=1)[1].split(
         "## 今日重点跟进", maxsplit=1
     )[0]
 
-    assert "星河动力" in daily
+    assert "星河动力" in top
+    assert "星河动力" not in daily
     assert "星河动力" not in financing_section
 
 
@@ -697,6 +1221,84 @@ def test_financing_source_label_ignores_unstructured_quote_text() -> None:
     assert f"[投资方公告]({url})" not in text
 
 
+def test_financing_omits_amount_when_source_does_not_disclose_or_deny_it() -> None:
+    item = financing().model_copy(
+        update={
+            "amount_cny": None,
+            "amount_disclosed": False,
+            "investors": [],
+            "business_area": None,
+            "evidence": [
+                Evidence(
+                    field="financing_round",
+                    quote="公司完成A轮融资",
+                    source_url="https://company.example/financing",
+                )
+            ],
+        }
+    )
+
+    text = ReportRenderer(18000).render(
+        make_result(
+            state=StateBundle(financings=[item]),
+            changed_financing_ids=[item.financing_id],
+        )
+    ).markdown
+
+    assert "金额：未披露" not in text
+    assert "投资方：未披露" not in text
+    assert "领域：未披露" not in text
+
+
+def test_financing_renders_amount_undisclosed_only_with_explicit_evidence() -> None:
+    item = financing().model_copy(
+        update={
+            "amount_cny": None,
+            "amount_disclosed": False,
+            "evidence": [
+                Evidence(
+                    field="amount",
+                    quote="具体融资金额未披露",
+                    source_url="https://company.example/financing",
+                )
+            ],
+        }
+    )
+
+    text = ReportRenderer(18000).render(
+        make_result(
+            state=StateBundle(financings=[item]),
+            changed_financing_ids=[item.financing_id],
+        )
+    ).markdown
+
+    assert "金额：未披露" in text
+
+
+def test_multiple_generic_financing_sources_are_numbered() -> None:
+    urls = [
+        "https://media-one.example/financing",
+        "https://media-two.example/financing",
+    ]
+    item = financing(
+        source_urls=urls,
+        evidence=[
+            Evidence(field="title", quote="融资报道一", source_url=urls[0]),
+            Evidence(field="title", quote="融资报道二", source_url=urls[1]),
+        ],
+    )
+
+    text = ReportRenderer(18000).render(
+        make_result(
+            state=StateBundle(financings=[item]),
+            changed_financing_ids=[item.financing_id],
+        )
+    ).markdown
+
+    assert f"[来源1]({urls[0]})" in text
+    assert f"[来源2]({urls[1]})" in text
+
+
 def test_report_has_no_html_or_markdown_table(run_result: RunResult) -> None:
     text = ReportRenderer(18000).render(run_result).markdown
 
@@ -743,7 +1345,7 @@ def test_trend_text_escapes_block_markers_without_creating_headings() -> None:
     text = ReportRenderer(18000).render(result).markdown
     heading_lines = [line for line in text.splitlines() if line.startswith("#")]
 
-    assert len(heading_lines) == 9
+    assert len(heading_lines) == 11
     assert heading_lines[0].startswith("# 中国激光与商业航天情报日报")
     assert all(line.startswith("## ") for line in heading_lines[1:])
     assert (
@@ -774,6 +1376,7 @@ def test_empty_sections_keep_all_headings_and_explicit_empty_notice() -> None:
     assert text.count("- 暂无已核实信息") >= 6
     for heading in (
         "## 过去24小时新增/变化",
+        "## 本轮新核实/历史补录",
         "## 当前可报名及即将启动",
         "## 激光通信",
         "## 激光武器/反无人机",
@@ -781,6 +1384,28 @@ def test_empty_sections_keep_all_headings_and_explicit_empty_notice() -> None:
         "## 商业航天融资",
     ):
         assert heading in text
+
+
+def test_report_marks_information_shortage_and_renders_collection_funnel() -> None:
+    metrics = RunMetrics(
+        started_at=WINDOW_END,
+        finished_at=WINDOW_END,
+        raw_search_count=12,
+        valid_shape_count=10,
+        relevance_pass_count=4,
+        recent_7d_count=3,
+        fallback_8_30d_count=1,
+        final_candidate_count=4,
+        fetch_failure_count=2,
+        information_available=False,
+    )
+
+    text = ReportRenderer(18000).render(make_result(metrics=metrics)).markdown
+
+    assert "信息不足：最终候选 4 条，未达到 5 条验收门槛" in text
+    assert "博查原始 12" in text
+    assert "主题相关 4" in text
+    assert "正文抓取失败 2" in text
 
 
 def test_degraded_coverage_names_search_ai_and_failed_domains() -> None:
@@ -993,11 +1618,12 @@ class _CliRenderer:
 class _CliNotifier:
     def __init__(self) -> None:
         self.calls = 0
+        self.reports: list[RenderedReport] = []
         self.error: BaseException | None = None
 
     def send(self, report: RenderedReport) -> None:
-        del report
         self.calls += 1
+        self.reports.append(report)
         if self.error is not None:
             raise self.error
 
@@ -1041,6 +1667,25 @@ def cli_deps(
 
 
 def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None:
+    cli_deps.pipeline.result = cli_deps.pipeline.result.model_copy(
+        update={
+            "candidate_diagnostics": [
+                CandidateDiagnostic(
+                    source_url="https://news.example/item",
+                    title="微光启航完成融资",
+                    discovery_source="search:bocha",
+                    selected_for_report=True,
+                    category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+                    stage="persisted",
+                    status="pending",
+                    reason="missing_required_fields:published_at",
+                    source_grade=SourceGrade.B,
+                    missing_fields=["published_at"],
+                    elastic_eligible=True,
+                )
+            ]
+        }
+    )
     code = run_cli(
         [
             "--config",
@@ -1055,6 +1700,39 @@ def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None
     assert code == 0
     report_path = tmp_path / "reports" / "2026-07-22.md"
     assert report_path.read_text(encoding="utf-8") == cli_deps.renderer.report.markdown
+    diagnostics_path = tmp_path / "data" / "candidate-diagnostics.json"
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert diagnostics == [
+            {
+                "source_url": "https://news.example/item",
+                "title": "微光启航完成融资",
+                "summary": "",
+                "discovery_source": "search:bocha",
+                "selected_for_report": True,
+                "category_hint": "commercial_space_financing",
+                "organization": None,
+                "published_at": None,
+                "amount": None,
+                "financing_round": None,
+                "evidence_count": 0,
+            "stage": "persisted",
+            "status": "pending",
+            "reason": "missing_required_fields:published_at",
+            "source_grade": "B",
+            "missing_fields": ["published_at"],
+            "elastic_eligible": True,
+            "elastic_ineligible_reason": None,
+            "elastic_attempted": False,
+            "elastic_not_attempted_reason": None,
+            "publication_date_source": None,
+            "verification_event_key": None,
+        }
+    ]
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert delivery["status"] == "skipped"
+    assert delivery["report_kind"] == "standard"
     assert cli_deps.notifier.calls == 0
 
 
@@ -1097,7 +1775,116 @@ def test_push_failure_keeps_report_and_returns_three(cli_deps, tmp_path: Path) -
     assert cli_deps.notifier.calls == 1
 
 
-def test_pipeline_failure_returns_four_and_does_not_push(cli_deps, tmp_path: Path) -> None:
+def test_live_delivery_without_current_strict_item_still_notifies(
+    cli_deps, tmp_path: Path
+) -> None:
+    cli_deps.pipeline.result = make_result()
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert cli_deps.notifier.calls == 1
+    assert not cli_deps.notifier.reports[0].title.startswith("【测试】")
+    assert delivery["status"] == "accepted"
+    assert delivery["report_kind"] == "standard"
+
+
+def test_test_delivery_gate_blocks_run_without_current_strict_item(
+    cli_deps, tmp_path: Path
+) -> None:
+    cli_deps.pipeline.result = make_result()
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--test-label",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert code == 3
+    assert cli_deps.notifier.calls == 0
+    assert delivery["status"] == "failed"
+    assert delivery["error_type"] == "DeliveryGateError"
+
+
+def test_test_delivery_gate_requires_sourced_category_content(
+    cli_deps, tmp_path: Path
+) -> None:
+    cli_deps.renderer.report = RenderedReport(
+        title="# 中国激光与商业航天情报日报｜2026-07-22",
+        markdown=(
+            "# 中国激光与商业航天情报日报｜2026-07-22\n\n"
+            "## 一、商业航天融资新闻\n- 暂无可展示信息\n\n"
+            "## 二、招标采购情况\n- 暂无可展示信息\n"
+        ),
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--test-label",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert code == 3
+    assert cli_deps.notifier.calls == 0
+    assert delivery["status"] == "failed"
+    assert delivery["error_type"] == "DeliveryGateError"
+
+
+def test_test_delivery_gate_allows_qualified_report(cli_deps, tmp_path: Path) -> None:
+    cli_deps.renderer.report = DingTalkShortReportRenderer().render(
+        cli_deps.pipeline.result
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--test-label",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert cli_deps.notifier.calls == 1
+    assert cli_deps.notifier.reports[0].title.startswith("# 【测试】")
+    assert delivery["status"] == "accepted"
+
+
+def test_pipeline_failure_returns_four_and_sends_anomaly_alert(
+    cli_deps, tmp_path: Path
+) -> None:
     cli_deps.pipeline.error = RuntimeError("pipeline exploded")
 
     code = run_cli(
@@ -1106,8 +1893,305 @@ def test_pipeline_failure_returns_four_and_does_not_push(cli_deps, tmp_path: Pat
     )
 
     assert code == 4
-    assert cli_deps.notifier.calls == 0
-    assert not (tmp_path / "reports").exists()
+    assert cli_deps.notifier.calls == 1
+    assert (tmp_path / "reports" / "2026-07-22-degraded.md").exists()
+    manifest = json.loads(
+        (tmp_path / "data" / "run-result.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "degraded"
+    assert manifest["failure_stage"] == "pipeline_run"
+
+
+def test_failure_after_checkpoint_sends_test_labeled_degraded_intelligence(
+    cli_deps, tmp_path: Path
+) -> None:
+    class FailingWithCheckpoint:
+        def run(self, now):
+            cli_deps.settings.data_dir.mkdir(parents=True, exist_ok=True)
+            (cli_deps.settings.data_dir / "candidate-checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "analyzed",
+                        "occurred_at": now.isoformat(),
+                        "candidates": [
+                            {
+                                "title": "光邮星空完成Pre-A轮融资",
+                                "summary": "公司披露融资轮次和投资方。",
+                                "source_url": "https://www.stcn.com/article/1",
+                                "category": "commercial_space_financing",
+                                "organization": "光邮星空",
+                                "published_at": "2026-07-16T00:00:00+08:00",
+                                "amount": None,
+                                "financing_round": "Pre-A轮",
+                                "in_china": True,
+                                "in_scope": True,
+                                "evidence_count": 6,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            raise RuntimeError("failure after checkpoint")
+
+    dependencies = CliDependencies(
+        settings_loader=cli_deps.dependencies.settings_loader,
+        pipeline_factory=lambda loaded: FailingWithCheckpoint(),
+        renderer_factory=cli_deps.dependencies.renderer_factory,
+        notifier_factory=cli_deps.dependencies.notifier_factory,
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--test-label",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=dependencies,
+    )
+
+    assert code == 4
+    assert cli_deps.notifier.calls == 1
+    report = cli_deps.notifier.reports[0]
+    assert report.title.startswith("# 【测试】【降级】")
+    assert "光邮星空完成Pre-A轮融资" in report.markdown
+    assert "均未通过最终严格核验" in report.markdown
+    delivery = json.loads(
+        (tmp_path / "data" / "delivery-status.json").read_text(encoding="utf-8")
+    )
+    assert delivery["status"] == "accepted"
+    assert delivery["report_kind"] == "degraded"
+
+
+def _failing_cli_dependencies(cli_deps, factory) -> CliDependencies:
+    return CliDependencies(
+        settings_loader=cli_deps.dependencies.settings_loader,
+        pipeline_factory=factory,
+        renderer_factory=cli_deps.dependencies.renderer_factory,
+        notifier_factory=cli_deps.dependencies.notifier_factory,
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "expected_stage", "expected_code"),
+    [
+        ("pipeline_build", "pipeline_build", 4),
+        ("pipeline_run", "pipeline_run", 4),
+        ("report_render", "report_render", 4),
+        ("report_write", "report_write", 4),
+        ("diagnostics_write", "diagnostics_write", 4),
+        ("notification", "notification", 3),
+    ],
+)
+def test_cli_failure_diagnostic_records_stable_stage(
+    cli_deps,
+    monkeypatch,
+    failure_point: str,
+    expected_stage: str,
+    expected_code: int,
+) -> None:
+    error = TypeError(
+        "https://example.invalid/?access_token=secret-query-token"
+    )
+    dependencies = cli_deps.dependencies
+    arguments = [
+        "--config",
+        str(cli_deps.config),
+        "--now",
+        "2026-07-22T07:30:00+08:00",
+    ]
+
+    if failure_point == "pipeline_build":
+        def failing_factory(settings):
+            del settings
+            raise error
+
+        dependencies = _failing_cli_dependencies(cli_deps, failing_factory)
+    elif failure_point == "pipeline_run":
+        cli_deps.pipeline.error = error
+    elif failure_point == "report_render":
+        cli_deps.renderer.error = error
+    elif failure_point == "report_write":
+        def failing_report_write(path, report):
+            del path, report
+            raise error
+
+        monkeypatch.setattr(
+            cli_module,
+            "_atomic_write_report",
+            failing_report_write,
+        )
+    elif failure_point == "diagnostics_write":
+        cli_deps.pipeline.result = cli_deps.pipeline.result.model_copy(
+            update={"research_trace": [{"round_index": 1}]}
+        )
+
+        def failing_trace_write(path, trace):
+            del path, trace
+            raise error
+
+        monkeypatch.setattr(
+            cli_module,
+            "_atomic_write_research_trace",
+            failing_trace_write,
+        )
+    else:
+        cli_deps.notifier.error = error
+
+    code = run_cli(arguments, dependencies=dependencies)
+
+    diagnostic_path = (
+        cli_deps.settings.data_dir / "failure-diagnostics.json"
+    )
+    payload = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    assert code == expected_code
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "failure"
+    assert payload["stage"] == expected_stage
+    assert payload["error_type"] == "TypeError"
+    assert payload["occurred_at"] == "2026-07-22T07:30:00+08:00"
+    assert payload["frames"]
+    assert all(
+        set(frame) == {"path", "line", "function"}
+        for frame in payload["frames"]
+    )
+    assert all(
+        not Path(str(frame["path"])).is_absolute()
+        for frame in payload["frames"]
+    )
+
+
+def test_cli_failure_diagnostic_and_log_exclude_exception_secrets(
+    cli_deps,
+    caplog,
+) -> None:
+    cli_deps.pipeline.error = TypeError(
+        "https://example.invalid/?access_token=secret-query-token"
+    )
+
+    with caplog.at_level(logging.ERROR):
+        code = run_cli(
+            [
+                "--config",
+                str(cli_deps.config),
+                "--now",
+                "2026-07-22T07:30:00+08:00",
+            ],
+            dependencies=cli_deps.dependencies,
+        )
+
+    diagnostic_path = (
+        cli_deps.settings.data_dir / "failure-diagnostics.json"
+    )
+    serialized = (
+        diagnostic_path.read_text(encoding="utf-8") + caplog.text
+    )
+    assert code == 4
+    assert "pipeline_run" in caplog.text
+    assert "secret-query-token" not in serialized
+    assert "access_token" not in serialized
+
+
+def test_cli_diagnostic_write_failure_preserves_primary_exit_code(
+    cli_deps,
+    monkeypatch,
+    caplog,
+) -> None:
+    cli_deps.pipeline.error = TypeError("primary-secret")
+
+    def failing_json_write(path, payload):
+        del path, payload
+        raise OSError("diagnostic-secret")
+
+    monkeypatch.setattr(cli_module, "_atomic_write_json", failing_json_write)
+
+    with caplog.at_level(logging.ERROR):
+        code = run_cli(
+            [
+                "--config",
+                str(cli_deps.config),
+                "--now",
+                "2026-07-22T07:30:00+08:00",
+            ],
+            dependencies=cli_deps.dependencies,
+        )
+
+    assert code == 4
+    assert "diagnostic_write_failed error=OSError" in caplog.text
+    assert "primary-secret" not in caplog.text
+    assert "diagnostic-secret" not in caplog.text
+
+
+def test_successful_dry_run_replaces_stale_metadata_with_run_result(
+    cli_deps,
+) -> None:
+    data_dir = cli_deps.settings.data_dir
+    data_dir.mkdir(parents=True)
+    (data_dir / "failure-diagnostics.json").write_text(
+        '{"status":"stale"}\n',
+        encoding="utf-8",
+    )
+    (data_dir / "run-result.json").write_text(
+        '{"status":"stale"}\n',
+        encoding="utf-8",
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--dry-run",
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    assert code == 0
+    assert not (data_dir / "failure-diagnostics.json").exists()
+    payload = json.loads(
+        (data_dir / "run-result.json").read_text(encoding="utf-8")
+    )
+    assert payload == {
+        "schema_version": 1,
+        "status": "success",
+        "occurred_at": "2026-07-22T07:30:00+08:00",
+        "report_path": "reports/2026-07-22.md",
+    }
+
+
+def test_failed_run_replaces_stale_success_manifest_with_degraded_result(
+    cli_deps,
+) -> None:
+    data_dir = cli_deps.settings.data_dir
+    data_dir.mkdir(parents=True)
+    (data_dir / "run-result.json").write_text(
+        '{"status":"stale"}\n',
+        encoding="utf-8",
+    )
+    cli_deps.pipeline.error = TypeError("failure")
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--now",
+            "2026-07-22T07:30:00+08:00",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    assert code == 4
+    payload = json.loads(
+        (data_dir / "run-result.json").read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "degraded"
+    assert payload["failure_stage"] == "pipeline_run"
+    assert (data_dir / "failure-diagnostics.json").exists()
 
 
 def test_config_failure_returns_two_without_secrets_in_output(
@@ -1183,10 +2267,16 @@ def test_atomic_report_write_uses_same_directory_and_leaves_no_temp_file(
     )
 
     report_dir = tmp_path / "reports"
+    data_dir = tmp_path / "data"
     assert code == 0
-    assert len(replacements) == 1
-    assert replacements[0][1] == report_dir / "2026-07-22.md"
+    assert {target for _source, target in replacements} == {
+        report_dir / "2026-07-22.md",
+        data_dir / "candidate-diagnostics.json",
+        data_dir / "run-result.json",
+        data_dir / "delivery-status.json",
+    }
     assert list(report_dir.glob("*.tmp")) == []
+    assert list(data_dir.glob("*.tmp")) == []
 
 
 def test_atomic_report_write_failure_cleans_temp_and_returns_four(
@@ -1237,7 +2327,7 @@ def test_atomic_report_write_normalizes_all_newlines_to_lf(cli_deps, tmp_path: P
     assert raw == b"# title\n\nbody\nend\n"
 
 
-def test_report_too_long_returns_four_and_does_not_push(cli_deps) -> None:
+def test_report_too_long_returns_four_and_sends_anomaly_alert(cli_deps) -> None:
     cli_deps.renderer.error = ReportTooLong("protected content")
 
     code = run_cli(
@@ -1246,7 +2336,7 @@ def test_report_too_long_returns_four_and_does_not_push(cli_deps) -> None:
     )
 
     assert code == 4
-    assert cli_deps.notifier.calls == 0
+    assert cli_deps.notifier.calls == 1
 
 
 def test_cli_parser_exposes_exact_public_arguments() -> None:
@@ -1257,6 +2347,8 @@ def test_cli_parser_exposes_exact_public_arguments() -> None:
         "help": {"-h", "--help"},
         "config": {"--config"},
         "dry_run": {"--dry-run"},
+        "test_label": {"--test-label"},
+        "discovery_mode": {"--discovery-mode"},
         "max_queries": {"--max-queries"},
         "now": {"--now"},
         "log_level": {"--log-level"},
@@ -1290,6 +2382,56 @@ def test_cli_max_queries_overrides_loaded_settings(cli_deps) -> None:
 
     assert code == 0
     assert observed == [4]
+
+
+def test_cli_backfill_mode_allows_40_query_budget(cli_deps) -> None:
+    observed: list[tuple[str, int]] = []
+
+    def pipeline_factory(settings: Settings):
+        observed.append(
+            (settings.discovery.mode, settings.discovery.max_queries)
+        )
+        return cli_deps.pipeline
+
+    dependencies = CliDependencies(
+        settings_loader=cli_deps.dependencies.settings_loader,
+        pipeline_factory=pipeline_factory,
+        renderer_factory=cli_deps.dependencies.renderer_factory,
+        notifier_factory=cli_deps.dependencies.notifier_factory,
+    )
+
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--dry-run",
+            "--discovery-mode",
+            "backfill",
+            "--max-queries",
+            "40",
+        ],
+        dependencies=dependencies,
+    )
+
+    assert code == 0
+    assert observed == [("backfill", 40)]
+
+
+def test_cli_daily_mode_rejects_budget_over_12(cli_deps) -> None:
+    code = run_cli(
+        [
+            "--config",
+            str(cli_deps.config),
+            "--dry-run",
+            "--discovery-mode",
+            "daily",
+            "--max-queries",
+            "13",
+        ],
+        dependencies=cli_deps.dependencies,
+    )
+
+    assert code == 2
 
 
 @pytest.mark.parametrize("value", ["-1", "not-a-number"])

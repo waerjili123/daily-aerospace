@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import re
 import unicodedata
@@ -194,6 +194,8 @@ class SourceRegistry:
 
 
 class RuleVerifier:
+    _FINANCING_CORROBORATION_WINDOW = timedelta(days=45)
+
     def __init__(self, registry: SourceRegistry) -> None:
         self._registry = registry
 
@@ -220,15 +222,26 @@ class RuleVerifier:
 
         if not analysis.in_china or not analysis.in_scope:
             return self._decision(VerificationStatus.REJECTED, "out_of_scope", grade)
-        if (
-            not analysis.title.strip()
-            or not analysis.organization
-            or not analysis.organization.strip()
-            or analysis.published_at is None
-            or analysis.category is None
-            or analysis.event_type is None
-        ):
-            return self._decision(VerificationStatus.PENDING, "missing_required_fields", grade)
+        missing_fields = [
+            name
+            for name, missing in (
+                ("title", not analysis.title.strip()),
+                (
+                    "organization",
+                    not analysis.organization or not analysis.organization.strip(),
+                ),
+                ("published_at", analysis.published_at is None),
+                ("category", analysis.category is None),
+                ("event_type", analysis.event_type is None),
+            )
+            if missing
+        ]
+        if missing_fields:
+            return self._decision(
+                VerificationStatus.PENDING,
+                f"missing_required_fields:{','.join(missing_fields)}",
+                grade,
+            )
         if analysis.source_url != page.final_url:
             return self._decision(VerificationStatus.PENDING, "source_url_mismatch", grade)
         if any(
@@ -236,6 +249,7 @@ class RuleVerifier:
             or not evidence.quote.strip()
             or (
                 evidence.quote not in page.text
+                and evidence.quote not in page.title
                 and not (
                     evidence.field == "in_china"
                     and evidence.quote == page.final_url
@@ -319,7 +333,11 @@ class RuleVerifier:
                 )
 
         if grade in {SourceGrade.A, SourceGrade.B}:
-            financing_failure = self._financing_claim_failure(analysis)
+            financing_failure = (
+                self._financing_claim_failure(analysis)
+                if grade is SourceGrade.A
+                else self._financing_source_event_failure(analysis)
+            )
             if financing_failure is not None:
                 return self._decision(
                     VerificationStatus.PENDING,
@@ -417,27 +435,40 @@ class RuleVerifier:
             )
             for item in by_field["in_china"]
         )
-        category_supported = any(
-            RuleFallbackAnalyzer._category(_normalize(item.quote))
+        if not country_supported:
+            return "classification_country_evidence_invalid"
+        scope_evidence = [
+            *by_field["in_scope"],
+            *by_field["category"],
+            *by_field["event_type"],
+        ]
+        scope_text = "\n".join(item.quote for item in scope_evidence)
+        page_category_supported = (
+            RuleFallbackAnalyzer._category(_normalize(scope_text))
             is analysis.category
-            for item in by_field["category"]
         )
-        event_supported = any(
-            self._evidence_event_type(item.quote, analysis.category)
+        page_event_supported = (
+            self._evidence_event_type(scope_text, analysis.category)
             is analysis.event_type
-            for item in by_field["event_type"]
         )
-        scope_supported = any(
-            RuleFallbackAnalyzer._category(_normalize(item.quote))
-            is analysis.category
-            and self._evidence_event_type(item.quote, analysis.category)
+        if not page_category_supported:
+            return "classification_category_evidence_invalid"
+        if not page_event_supported:
+            return "classification_event_evidence_invalid"
+        in_scope_text = "\n".join(
+            item.quote for item in by_field["in_scope"]
+        )
+        scope_supported = (
+            analysis.category is not None
+            and self._contains_any(
+                in_scope_text,
+                RuleFallbackAnalyzer._CATEGORY_TERMS[analysis.category],
+            )
+            or self._evidence_event_type(in_scope_text, analysis.category)
             is analysis.event_type
-            for item in by_field["in_scope"]
         )
-        if not all(
-            (country_supported, category_supported, event_supported, scope_supported)
-        ):
-            return "classification_evidence_invalid"
+        if not scope_supported:
+            return "classification_scope_evidence_invalid"
         return None
 
     @classmethod
@@ -580,6 +611,153 @@ class RuleVerifier:
         return None
 
     @classmethod
+    def _financing_evidence_gaps(
+        cls,
+        analysis: AnalysisResult,
+    ) -> tuple[str, ...]:
+        gaps: list[str] = []
+        if not analysis.organization or not cls._field_has_quote_containing(
+            analysis.evidence,
+            "organization",
+            analysis.organization or "",
+        ):
+            gaps.append("organization")
+        if analysis.published_at is None or not cls._field_has_date(
+            analysis.evidence,
+            analysis.published_at,
+        ):
+            gaps.append("published_at")
+
+        if analysis.amount:
+            if analysis.amount_disclosed is False or not any(
+                item.field == "amount"
+                and cls._amount_key(item.quote)
+                == cls._amount_key(analysis.amount)
+                for item in analysis.evidence
+            ):
+                gaps.append("amount")
+        elif analysis.amount_disclosed is not False or not any(
+            item.field == "amount" and cls._is_undisclosed(item.quote)
+            for item in analysis.evidence
+        ):
+            gaps.append("amount")
+
+        subtype = analysis.financing_subtype or (
+            "round_equity" if analysis.financing_round else None
+        )
+        if subtype == "round_equity":
+            if not analysis.financing_round or not any(
+                item.field == "financing_round"
+                and cls._contains_round(item.quote, analysis.financing_round)
+                for item in analysis.evidence
+            ):
+                gaps.append("financing_round")
+        elif subtype is None or not any(
+            item.field == "financing_subtype"
+            and cls._financing_subtype_supported(item.quote, subtype)
+            for item in analysis.evidence
+        ):
+            gaps.append("financing_subtype")
+
+        if analysis.investors and any(
+            not cls._field_has_quote_containing(
+                analysis.evidence,
+                "investors",
+                investor,
+            )
+            for investor in analysis.investors
+        ):
+            gaps.append("investors")
+        return tuple(gaps)
+
+    @classmethod
+    def _financing_source_event_failure(
+        cls,
+        analysis: AnalysisResult,
+    ) -> str | None:
+        """Validate one B source without treating omitted attributes as facts."""
+
+        evidence_fields = {item.field for item in analysis.evidence}
+        subtype = analysis.financing_subtype or (
+            "round_equity" if analysis.financing_round else None
+        )
+        required = {"organization", "published_at"}
+        if subtype == "round_equity":
+            required.add("financing_round")
+        else:
+            required.add("financing_subtype")
+        if subtype is None:
+            return "financing_source_event_evidence_missing"
+        missing_required = required - evidence_fields
+        missing_reason = {
+            "organization": "financing_source_organization_evidence_invalid",
+            "published_at": (
+                "financing_source_publication_date_evidence_invalid"
+            ),
+            "financing_round": "financing_source_round_evidence_invalid",
+            "financing_subtype": "financing_source_subtype_evidence_invalid",
+        }
+        for field in (
+            "organization",
+            "published_at",
+            "financing_round",
+            "financing_subtype",
+        ):
+            if field in missing_required:
+                return missing_reason[field]
+        if missing_required:
+            return "financing_source_event_evidence_missing"
+        if not cls._field_has_organization_quote(
+            analysis.evidence, "organization", analysis.organization or ""
+        ):
+            return "financing_source_organization_evidence_invalid"
+        if analysis.published_at is None or not cls._field_has_date(
+            analysis.evidence, analysis.published_at
+        ):
+            return "financing_source_publication_date_evidence_invalid"
+        if subtype == "round_equity":
+            if not analysis.financing_round or not any(
+                item.field in {"financing_round", "title"}
+                and cls._contains_round(item.quote, analysis.financing_round)
+                for item in analysis.evidence
+            ):
+                return "financing_source_round_evidence_invalid"
+        elif not any(
+            item.field == "financing_subtype"
+            and cls._financing_subtype_supported(item.quote, subtype)
+            for item in analysis.evidence
+        ):
+            return "financing_source_subtype_evidence_invalid"
+        if analysis.amount:
+            if analysis.amount_disclosed is False or not any(
+                item.field == "amount"
+                and cls._amount_key(item.quote) == cls._amount_key(analysis.amount)
+                for item in analysis.evidence
+            ):
+                return "financing_source_amount_evidence_invalid"
+        elif analysis.amount_disclosed is False and not any(
+            item.field == "amount" and cls._is_undisclosed(item.quote)
+            for item in analysis.evidence
+        ):
+            return "financing_source_amount_evidence_invalid"
+        for investor in analysis.investors:
+            if not cls._field_has_quote_containing(
+                analysis.evidence, "investors", investor
+            ):
+                return "financing_source_investor_evidence_invalid"
+        if analysis.business_area and not cls._field_has_quote_containing(
+            analysis.evidence, "business_area", analysis.business_area
+        ):
+            return "financing_source_business_area_evidence_invalid"
+        if not any(
+            item.field == "event_type"
+            and cls._contains_any(item.quote, _event_type_terms(EventType.FINANCING))
+            for item in analysis.evidence
+        ):
+            return "financing_source_action_evidence_invalid"
+        return None
+
+    @classmethod
     def _financing_subtype_supported(cls, quote: str, subtype: str) -> bool:
         terms = {
             "strategic": ("战略融资", "战略投资"),
@@ -600,6 +778,26 @@ class RuleVerifier:
         )
 
     @classmethod
+    def _field_has_organization_quote(
+        cls, evidence: Iterable[Evidence], field: str, claim: str
+    ) -> bool:
+        """Accept a legal company name or its unambiguous normalized brand alias."""
+
+        normalized_claim = cls._normalize_claim(claim)
+        organization_key = cls._organization_key(claim)
+        if not normalized_claim:
+            return False
+        for item in evidence:
+            if item.field != field:
+                continue
+            normalized_quote = cls._normalize_claim(item.quote)
+            if normalized_claim in normalized_quote:
+                return True
+            if len(organization_key) >= 4 and organization_key in normalized_quote:
+                return True
+        return False
+
+    @classmethod
     def _field_has_date(
         cls, evidence: Iterable[Evidence], published_at: datetime
     ) -> bool:
@@ -618,7 +816,7 @@ class RuleVerifier:
     ) -> tuple[str, SourceRecord | None]:
         primary_domain = self._registry.financing_registered_domain(page.final_url)
         saw_duplicate = False
-        saw_conflict = False
+        conflict_reason: str | None = None
         saw_analyzed_source = False
 
         for candidate in corroborating:
@@ -647,22 +845,24 @@ class RuleVerifier:
             ):
                 saw_duplicate = True
                 continue
-            if self._normalize_claim(analysis.organization or "") != self._normalize_claim(
-                other_analysis.organization or ""
+            if not self._organizations_match(
+                analysis.organization, other_analysis.organization
             ):
                 continue
             saw_analyzed_source = True
             if self._analysis_page_failure(other_analysis, other, other_grade):
                 continue
-            if not self._critical_financing_fields_agree(analysis, other_analysis):
-                saw_conflict = True
+            if conflict := self._financing_corroboration_conflict(
+                analysis, other_analysis
+            ):
+                conflict_reason = conflict_reason or conflict
                 continue
             return (
                 "verified_financing_two_independent_sources",
                 self._source_record(other_analysis, other, other_grade),
             )
-        if saw_conflict:
-            return "financing_corroboration_conflict", None
+        if conflict_reason is not None:
+            return conflict_reason, None
         if saw_duplicate:
             return "financing_requires_independent_sources", None
         if saw_analyzed_source:
@@ -690,6 +890,7 @@ class RuleVerifier:
             or not item.quote.strip()
             or (
                 item.quote not in page.text
+                and item.quote not in page.title
                 and not (
                     item.field == "in_china"
                     and item.quote == page.final_url
@@ -699,35 +900,103 @@ class RuleVerifier:
             for item in analysis.evidence
         ):
             return "evidence_not_grounded"
-        return self._classification_failure(analysis, page, grade) or self._financing_claim_failure(
-            analysis
+        return self._classification_failure(
+            analysis, page, grade
+        ) or self._financing_source_event_failure(analysis)
+
+    @classmethod
+    def _financing_corroboration_conflict(
+        cls, primary: AnalysisResult, other: AnalysisResult
+    ) -> str | None:
+        if primary.published_at is None or other.published_at is None:
+            return "financing_source_event_evidence_missing"
+        if (
+            abs(primary.published_at.date() - other.published_at.date())
+            > cls._FINANCING_CORROBORATION_WINDOW
+        ):
+            return "financing_corroboration_date_outside_window"
+        primary_subtype = primary.financing_subtype or (
+            "round_equity" if primary.financing_round else None
+        )
+        other_subtype = other.financing_subtype or (
+            "round_equity" if other.financing_round else None
+        )
+        if primary_subtype != other_subtype:
+            return "financing_corroboration_attribute_conflict"
+        if not cls._rounds_compatible(
+            primary.financing_round, other.financing_round
+        ):
+            return "financing_corroboration_round_conflict"
+        if (
+            primary.amount
+            and other.amount
+            and cls._amount_key(primary.amount) != cls._amount_key(other.amount)
+        ):
+            return "financing_corroboration_amount_conflict"
+        return None
+
+    @classmethod
+    def _organizations_match(
+        cls, primary: str | None, other: str | None
+    ) -> bool:
+        return bool(primary and other) and cls._organization_key(
+            primary
+        ) == cls._organization_key(other)
+
+    @classmethod
+    def _organization_key(cls, value: str) -> str:
+        normalized = cls._normalize_claim(value)
+        for suffix in (
+            "股份有限公司",
+            "有限责任公司",
+            "科技有限公司",
+            "有限公司",
+            "公司",
+        ):
+            normalized = normalized.removesuffix(suffix.casefold())
+        for prefix in (
+            "北京",
+            "上海",
+            "深圳",
+            "广州",
+            "杭州",
+            "南京",
+            "武汉",
+            "西安",
+            "成都",
+            "重庆",
+            "天津",
+            "苏州",
+            "无锡",
+        ):
+            if normalized.startswith(prefix.casefold()) and len(normalized) > len(prefix) + 2:
+                normalized = normalized[len(prefix) :]
+                break
+        return normalized
+
+    @classmethod
+    def _rounds_compatible(cls, primary: str | None, other: str | None) -> bool:
+        primary_rounds = cls._round_tokens(primary)
+        other_rounds = cls._round_tokens(other)
+        if not primary_rounds or not other_rounds:
+            return cls._normalize_round(primary) == cls._normalize_round(other)
+        return primary_rounds.issubset(other_rounds) or other_rounds.issubset(
+            primary_rounds
         )
 
     @classmethod
-    def _critical_financing_fields_agree(
-        cls, primary: AnalysisResult, other: AnalysisResult
-    ) -> bool:
-        return (
-            cls._normalize_claim(primary.organization or "")
-            == cls._normalize_claim(other.organization or "")
-            and primary.published_at is not None
-            and other.published_at is not None
-            and primary.published_at.date() == other.published_at.date()
-            and cls._normalize_round(primary.financing_round)
-            == cls._normalize_round(other.financing_round)
-            and (
-                primary.financing_subtype
-                or ("round_equity" if primary.financing_round else None)
-            )
-            == (
-                other.financing_subtype
-                or ("round_equity" if other.financing_round else None)
-            )
-            and cls._analysis_amount_key(primary) == cls._analysis_amount_key(other)
-            and {
-                cls._normalize_claim(investor) for investor in primary.investors
-            }
-            == {cls._normalize_claim(investor) for investor in other.investors}
+    def _round_tokens(cls, value: str | None) -> frozenset[str]:
+        if not value:
+            return frozenset()
+        normalized = unicodedata.normalize("NFKC", value).casefold()
+        normalized = re.sub(r"\s+", "", normalized)
+        matches = re.findall(
+            r"pre-?[a-d]\+{0,2}|series-?[a-d]\+{0,2}|天使\+{0,2}|种子|"
+            r"(?<![a-z])[a-d]\+{0,2}(?![a-z])",
+            normalized,
+        )
+        return frozenset(
+            item.replace("-", "").removeprefix("series") for item in matches
         )
 
     @staticmethod
@@ -849,3 +1118,11 @@ class RuleVerifier:
             evidence=list(evidence),
             source_records=list(source_records),
         )
+
+
+def financing_evidence_gaps(
+    analysis: AnalysisResult,
+) -> tuple[str, ...]:
+    """Return deterministic missing/ungrounded financing evidence fields."""
+
+    return RuleVerifier._financing_evidence_gaps(analysis)

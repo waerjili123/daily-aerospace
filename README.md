@@ -2,7 +2,10 @@
 
 这是一个面向激光通信与商业航天产业的日度情报管道：收集公开线索、核验来源、关联历史项目，并生成可追溯的 Markdown 报告。它只处理本项目范围内的产业与采购情报，**独立于 AI日报**，不包含任何 AI 新闻内容。
 
-> 当前处于采集链路恢复阶段。自动 workflow 已暂停；工作流暂时只允许手动、小规模 `dry_run=true` 验收，不发送钉钉、不提交状态，也不包含定时入口。
+> 工作流每天北京时间 08:00 自动执行 `daily + 12 + dingtalk_live`，并将
+> 可追溯短报发送到钉钉。手动运行仍默认 `delivery_mode=dry_run`；显式选择
+> `dingtalk_test` 会执行严格测试门禁并添加“【测试】”标题，选择
+> `dingtalk_live` 才会发送不带测试标识的正式短报。
 
 ## 架构与目录
 
@@ -15,6 +18,11 @@
 - `.github/workflows/daily-intelligence.yml`：当前仅用于手动、小规模采集验收。
 
 来源按 A/B/C 分级；`pending` 表示线索尚待核验，不能被当作已确认的正式记录。
+
+钉钉与 `reports/` 使用业务短报：固定先展示“商业航天融资新闻”，再展示
+“招标采购情况”，融资金额与项目预算/中标金额互不混算。短报只保留可信状态、
+关键事实和可点击来源；采集漏斗、缺失字段、失败域、研究轨迹等完整技术诊断继续
+保存在 `data/` Artifact。
 
 ## 本地运行
 
@@ -32,7 +40,27 @@ python -m pip install -c constraints.txt -e ".[dev]"
 laser-space-daily --config config.yaml --dry-run
 ```
 
-请检查 `reports/` 中的报告与每条来源链接，再决定是否进行真实推送。不要把密钥写入 `config.yaml`、日志或问题反馈中。
+日常增量最多执行 12 次博查搜索。标准 12 次预算会先覆盖三类招标和一条融资
+综合查询，再使用四个已注册融资来源进行定向种子检索，因此商业航天融资至少
+获得 5 次基础覆盖；剩余预算用于模型追查：
+
+```bash
+laser-space-daily --config config.yaml --dry-run --discovery-mode daily --max-queries 12
+```
+
+一次性近 90 天历史回填最多执行 40 次，并且必须保持 dry-run：
+
+```bash
+laser-space-daily --config config.yaml --dry-run --discovery-mode backfill --max-queries 40
+```
+
+DeepSeek 通过受控的 `search_web` Tool Calling 提出后续查询。本地预算守卫负责执行博查调用，模型不能突破日常 12 次或回填 40 次的硬上限。研究轨迹写入 `data/research-trace.json`，不包含密钥、认证头、完整网页正文或模型隐藏推理。
+
+正常运行会写入 `data/run-result.json` 和脱敏的
+`data/delivery-status.json`。若分析后续阶段失败，本轮候选检查点会生成明确标注的
+“【降级】”快报；检查点产生前失败时只生成“【异常】”告警，绝不回退到旧日报。
+请检查 `reports/` 中的报告与每条来源链接，再决定是否进行真实推送。不要把密钥写入
+`config.yaml`、日志或问题反馈中。
 
 ## 上线验收边界
 
@@ -42,19 +70,27 @@ laser-space-daily --config config.yaml --dry-run
 - [x] 已完成离线全量测试、核心模块逐文件覆盖率、编译和敏感信息扫描；这些测试使用注入的固定客户端，不访问真实 DeepSeek、博查或钉钉。
 - [x] 已配置 `DEEPSEEK_API_KEY`、`BOCHA_API_KEY`、`DINGTALK_WEBHOOK`、`DINGTALK_SECRET` Secrets；仓库当前实际为 public，与原定私有要求不一致。
 - [x] 已定位博查真实响应位于 `data.webPages.value`。
-- [ ] 待运行仅手动、小规模 `workflow_dispatch`，固定保持 `dry_run=true`，下载并人工审核报告与状态 artifact。
-- [ ] 待审核通过后运行一次 `dry_run=false`，验收仅一条钉钉消息及其来源链接。
+- [ ] 待运行一次 40 查询历史回填 dry-run，下载并人工审核三个月项目池。
+- [ ] 待运行一次 12 查询日常 dry-run，核对候选质量、去重和研究轨迹。
+- [ ] 待审核通过后，从一次性测试分支发送一条标题含“【测试】”的钉钉消息，随后立即恢复 dry-run。
 
 本地离线验收环境为 Python 3.12；项目要求的 Python 3.13 以 GitHub Actions 工作流为权威兼容性门禁。Actions 成功只表示程序没有失败，不代表采集到真实信息。
 
 ## GitHub Actions 采集恢复验收
 
-1. 保持自动 workflow 暂停，先合并 `data.webPages.value` 解析修复。
-2. 重新启用不含 `schedule` 的仅手动工作流。
-3. 首次选择 4 次核心查询运行；命令固定包含 `--dry-run`，无法从页面关闭。
-4. 下载包含 `reports/` 与 `data/` 的 artifact，确认候选数大于 0、原始链接存在，并区分抓取、分析和核验失败。
+1. 定时任务固定使用 `daily`、12 次基础查询和 `dingtalk_live`，cron 为
+   `0 0 * * *`（UTC 00:00，即北京时间 08:00）。
+2. 手动日常验证选择 `daily`、12 次查询和默认 `dry_run`；历史回填选择
+   `backfill`、40 次查询并保持 `dry_run`。只有一次性钉钉验收才选择
+   `dingtalk_test`。
+3. 确认正式补发时选择 `dingtalk_live`；该模式不使用测试门禁，但所有非严格
+   内容仍必须明确标注“高可信待核实”或“候选线索”，不得冒充已核实信息。
+4. 下载包含 `reports/` 与 `data/` 的 artifact，确认候选数大于 0、原始链接存在，并核对 `research-trace.json` 中的预算、轮次、查询和停止原因。
 
-自动运行和 `dry_run=false` 均不在本阶段启用。只有真实信息采集验收通过后，才修复并验证北京时间 07:30 调度；日报人工审核通过后，才进行一次正式钉钉验收。
+`dingtalk_test` 仍要求本轮至少 1 条严格已核实信息以及至少一个带来源的业务条目；
+`dingtalk_live` 用于定时和经确认的正式补发，即使本轮没有严格已核实信息，也会发送
+清晰标注可信状态的可读短报或降级快报。钉钉只有返回 `errcode=0` 才记录为投递成功；
+Actions Success 仍只代表流程完成，不等同于采集业务质量达标。
 
 同一个 `data_dir` 必须遵守**单写入者**约束。Actions 的 `concurrency` 组负责串行化云端任务；CLI 同时持有 `data/.laser-space-daily.lock` 操作系统锁，本地第二个进程会直接以退出码 4 结束。锁文件可以保留，进程退出或崩溃时操作系统会释放锁；不要用不同工作目录绕过同一份状态的串行要求。
 

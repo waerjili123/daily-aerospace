@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+from laser_space_daily.analyzer import ResilientAnalyzer, RuleFallbackAnalyzer
 from laser_space_daily.fetcher import (
     FetchRedirectLimit,
     FetchedPage,
@@ -24,7 +25,11 @@ from laser_space_daily.models import (
     SourceGrade,
     VerificationStatus,
 )
-from laser_space_daily.verifier import RuleVerifier, SourceRegistry
+from laser_space_daily.verifier import (
+    RuleVerifier,
+    SourceRegistry,
+    financing_evidence_gaps,
+)
 
 
 NOW = datetime(2026, 7, 22, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -295,6 +300,137 @@ def test_fetcher_falls_back_to_beautifulsoup_when_trafilatura_raises(monkeypatch
     assert "Body text" in fetched.text
 
 
+@pytest.mark.parametrize(
+    ("metadata", "expected_source"),
+    [
+        (
+            '<meta property="article:published_time" content="2026-07-21T14:02:00+08:00">',
+            "metadata",
+        ),
+        ('<meta itemprop="datePublished" content="2026-07-21">', "metadata"),
+        (
+            '<script type="application/ld+json">'
+            '{"@type":"NewsArticle","datePublished":"2026-07-21T14:02:00+08:00"}'
+            "</script>",
+            "json_ld",
+        ),
+    ],
+)
+def test_fetcher_preserves_page_published_metadata_for_grounding(
+    metadata, expected_source
+):
+    html = (
+        f"<html><head><title>融资新闻</title>{metadata}</head>"
+        "<body><main>光邮星空完成Pre-A轮融资。</main></body></html>"
+    )
+
+    fetched = PageFetcher(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, text=html)
+        ),
+        resolver=public_resolver,
+    ).fetch(PUBLIC_CANDIDATE)
+
+    assert "光邮星空完成Pre-A轮融资" in fetched.text
+    assert "页面发布时间：2026-07-21" in fetched.text
+    assert fetched.publication_date_quote.startswith("2026-07-21")
+    assert fetched.publication_date_source == expected_source
+
+
+@pytest.mark.parametrize(
+    ("header", "expected_quote"),
+    [
+        (
+            '<div class="releaseTime">发布时间：2026-07-07 14:13:24</div>',
+            "2026-07-07 14:13:24",
+        ),
+        (
+            '<div class="detail-tags">所属地区：上海 发布日期:2026-07-03</div>',
+            "2026-07-03",
+        ),
+        (
+            '<div class="article-header flex items-center">'
+            "<span>来源：顶端新闻</span><span>2026-07-16 08:36</span></div>",
+            "2026-07-16 08:36",
+        ),
+    ],
+)
+def test_fetcher_preserves_conservative_visible_header_date(
+    header, expected_quote
+):
+    html = (
+        "<html><head><title>融资新闻</title></head><body>"
+        f"{header}<main>光邮星空完成Pre-A轮融资。</main></body></html>"
+    )
+
+    fetched = PageFetcher(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, text=html)
+        ),
+        resolver=public_resolver,
+    ).fetch(PUBLIC_CANDIDATE)
+
+    assert fetched.publication_date_quote == expected_quote
+    assert fetched.publication_date_source == "visible_header"
+    assert expected_quote in fetched.text
+
+
+@pytest.mark.parametrize(
+    "non_publication_date",
+    [
+        '<aside class="related"><span class="releaseTime">'
+        "发布日期：2026-07-03</span></aside>",
+        '<aside class="related"><div><span class="releaseTime">'
+        "发布日期：2026-07-04</span></div></aside>",
+        '<div class="article-header"><span class="update-time">'
+        "最后更新：2026-07-22 09:00</span></div>",
+        '<footer class="footer"><span class="byline">'
+        "2026-07-01 08:00</span></footer>",
+        "<main>该项目计划于2026-08-20投标。</main>",
+    ],
+)
+def test_fetcher_does_not_treat_related_updated_or_body_dates_as_publication(
+    non_publication_date,
+):
+    html = (
+        "<html><head><title>融资新闻</title></head><body>"
+        "<main>光邮星空完成Pre-A轮融资。</main>"
+        f"{non_publication_date}</body></html>"
+    )
+
+    fetched = PageFetcher(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, text=html)
+        ),
+        resolver=public_resolver,
+    ).fetch(PUBLIC_CANDIDATE)
+
+    assert fetched.publication_date_quote is None
+    assert fetched.publication_date_source is None
+    assert "页面发布时间：" not in fetched.text
+
+
+def test_fetcher_does_not_promote_modified_or_invalid_metadata_as_publication_date():
+    html = (
+        "<html><head><title>融资新闻</title>"
+        '<meta property="article:modified_time" content="2026-07-22">'
+        '<meta property="article:published_time" content="not-a-date">'
+        "</head><body><main>正文无发布日期。</main></body></html>"
+    )
+
+    fetched = PageFetcher(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, text=html)
+        ),
+        resolver=public_resolver,
+    ).fetch(PUBLIC_CANDIDATE)
+
+    assert "页面发布时间" not in fetched.text
+    assert "2026-07-22" not in fetched.text
+    assert fetched.publication_date_quote is None
+    assert fetched.publication_date_source is None
+
+
 def test_source_registry_uses_longest_registered_domain():
     registry = SourceRegistry(
         {"example.cn": SourceGrade.B, "official.example.cn": SourceGrade.A}
@@ -397,6 +533,218 @@ def test_single_b_source_financing_stays_pending(media_page, financing_analysis)
     assert decision.reason == "financing_requires_official_or_two_independent_b_sources"
 
 
+def test_same_page_split_category_and_event_evidence_passes_classification(
+    media_page, financing_analysis
+):
+    non_classification = [
+        item
+        for item in financing_analysis.evidence
+        if item.field not in {"in_china", "in_scope", "category", "event_type"}
+    ]
+    financing_analysis.evidence = [
+        *non_classification,
+        *classification_evidence(
+            media_page.final_url,
+            "商业航天",
+            country_quote="中国商业航天企业",
+            category_quote="商业航天",
+            event_quote="financing",
+        ),
+    ]
+
+    decision = RuleVerifier(REGISTRY).verify(financing_analysis, media_page)
+
+    assert decision.status == VerificationStatus.PENDING
+    assert decision.reason == "financing_requires_official_or_two_independent_b_sources"
+
+
+def test_space_laser_business_and_financing_quotes_combine_at_page_level(
+    media_page, financing_analysis
+):
+    media_page.text += " Orbit Corp provides 星地激光通信 products."
+    non_classification = [
+        item
+        for item in financing_analysis.evidence
+        if item.field not in {"in_china", "in_scope", "category", "event_type"}
+    ]
+    financing_analysis.evidence = [
+        *non_classification,
+        *classification_evidence(
+            media_page.final_url,
+            "星地激光通信",
+            country_quote="中国商业航天企业",
+            category_quote="星地激光通信",
+            event_quote="financing",
+        ),
+    ]
+
+    decision = RuleVerifier(REGISTRY).verify(financing_analysis, media_page)
+
+    assert decision.status == VerificationStatus.PENDING
+    assert decision.reason == "financing_requires_official_or_two_independent_b_sources"
+
+
+@pytest.mark.parametrize(
+    ("scope_quote", "country_quote", "category_quote", "event_quote", "expected"),
+    [
+        (
+            "商业航天",
+            "Orbit Corp",
+            "商业航天",
+            "financing",
+            "classification_country_evidence_invalid",
+        ),
+        (
+            "Orbit Corp",
+            "中国商业航天企业",
+            "Orbit Corp",
+            "financing",
+            "classification_category_evidence_invalid",
+        ),
+        (
+            "商业航天",
+            "中国商业航天企业",
+            "商业航天",
+            "Orbit Corp",
+            "classification_event_evidence_invalid",
+        ),
+        (
+            "Orbit Corp",
+            "中国商业航天企业",
+            "商业航天",
+            "financing",
+            "classification_scope_evidence_invalid",
+        ),
+    ],
+)
+def test_classification_evidence_reports_precise_invalid_reason(
+    media_page,
+    financing_analysis,
+    scope_quote,
+    country_quote,
+    category_quote,
+    event_quote,
+    expected,
+):
+    non_classification = [
+        item
+        for item in financing_analysis.evidence
+        if item.field not in {"in_china", "in_scope", "category", "event_type"}
+    ]
+    financing_analysis.evidence = [
+        *non_classification,
+        *classification_evidence(
+            media_page.final_url,
+            scope_quote,
+            country_quote=country_quote,
+            category_quote=category_quote,
+            event_quote=event_quote,
+        ),
+    ]
+
+    decision = RuleVerifier(REGISTRY).verify(financing_analysis, media_page)
+
+    assert decision.status == VerificationStatus.PENDING
+    assert decision.reason == expected
+
+
+def test_two_independent_b_articles_verify_with_deterministic_fallback() -> None:
+    primary = page(
+        "https://media.example.cn/longqing",
+        "2026年7月23日，北京龙擎空天科技有限公司宣布完成近亿元Pre-A+轮融资。\n"
+        "该公司面向商业航天领域研发低轨卫星终端及星载智算产品。",
+    ).model_copy(update={"title": "龙擎空天再获Pre-A+轮融资"})
+    secondary = page(
+        "https://other.example.cn/longqing",
+        "2026年7月23日，北京龙擎空天科技有限公司完成近亿元Pre-A+轮融资。\n"
+        "龙擎空天是一家研发低轨卫星终端的中国商业航天企业。",
+    ).model_copy(update={"title": "龙擎空天完成近亿元Pre-A+轮融资"})
+    analyzer = RuleFallbackAnalyzer()
+    primary_analysis = analyzer.analyze(primary)
+    secondary_analysis = analyzer.analyze(secondary)
+
+    decision = RuleVerifier(REGISTRY).verify(
+        primary_analysis,
+        primary,
+        [(secondary_analysis, secondary)],
+    )
+
+    assert decision.status is VerificationStatus.VERIFIED
+    assert decision.reason == "verified_financing_two_independent_sources"
+    assert {record.source_url for record in decision.source_records} == {
+        primary.final_url,
+        secondary.final_url,
+    }
+
+
+def test_two_independent_space_laser_financing_articles_verify_after_evidence_enrichment():
+    primary = page(
+        "https://media.example.cn/guangyou",
+        "2026年7月21日，北京光邮星空科技有限公司聚焦高速星地激光通信领域。\n"
+        "公司近日完成数千万元Pre-A+轮融资。",
+    ).model_copy(update={"title": "光邮星空完成Pre-A+轮融资"})
+    secondary = page(
+        "https://other.example.cn/guangyou",
+        "2026年7月21日，北京光邮星空科技有限公司提供空间激光通信产品。\n"
+        "北京光邮星空科技有限公司近日完成数千万元Pre-A+轮融资。",
+    ).model_copy(update={"title": "光邮星空完成Pre-A+轮融资"})
+
+    class NarrowPrimary:
+        def analyze(self, source):
+            category_quote = (
+                "星地激光通信"
+                if "星地激光通信" in source.text
+                else "空间激光通信"
+            )
+            return AnalysisResult(
+                in_china=True,
+                in_scope=True,
+                category=Category.COMMERCIAL_SPACE_FINANCING,
+                event_type=EventType.FINANCING,
+                title=source.title,
+                source_url=source.final_url,
+                evidence=[
+                    item
+                    for item in classification_evidence(
+                        source.final_url,
+                        category_quote,
+                        country_quote="北京光邮星空科技有限公司",
+                        category_quote=category_quote,
+                        event_quote="Pre-A+轮融资",
+                    )
+                    if item.field != "in_china"
+                ],
+            )
+
+    analyzer = ResilientAnalyzer(NarrowPrimary(), RuleFallbackAnalyzer())
+    primary_analysis = analyzer.analyze(primary)
+    secondary_analysis = analyzer.analyze(secondary)
+
+    assert primary_analysis.organization == secondary_analysis.organization
+    assert primary_analysis.published_at == secondary_analysis.published_at
+    assert primary_analysis.financing_round == secondary_analysis.financing_round
+    assert primary_analysis.amount == secondary_analysis.amount
+    assert any(
+        item.field == "in_china"
+        and item.quote == "北京光邮星空科技有限公司"
+        for item in primary_analysis.evidence
+    )
+    assert any(
+        item.field == "in_china"
+        and item.quote == "北京光邮星空科技有限公司"
+        for item in secondary_analysis.evidence
+    )
+
+    decision = RuleVerifier(REGISTRY).verify(
+        primary_analysis,
+        primary,
+        [(secondary_analysis, secondary)],
+    )
+
+    assert decision.status is VerificationStatus.VERIFIED
+    assert decision.reason == "verified_financing_two_independent_sources"
+
+
 def test_grade_a_financing_rejects_empty_evidence(financing_analysis):
     official = page(
         PUBLIC_URL,
@@ -416,6 +764,48 @@ def test_grade_a_financing_rejects_empty_evidence(financing_analysis):
 
     assert decision.status == VerificationStatus.PENDING
     assert decision.reason == "financing_missing_required_evidence"
+
+
+def test_financing_evidence_gaps_distinguish_omitted_and_undisclosed_amount(
+    financing_analysis,
+):
+    original = financing_analysis.model_copy(deep=True)
+    financing_analysis.amount = None
+    financing_analysis.amount_disclosed = None
+    financing_analysis.evidence = [
+        item for item in financing_analysis.evidence if item.field != "amount"
+    ]
+
+    assert financing_evidence_gaps(financing_analysis) == ("amount",)
+    assert financing_analysis.amount is None
+    assert financing_analysis.amount_disclosed is None
+
+    financing_analysis.amount_disclosed = False
+    financing_analysis.evidence.append(
+        Evidence(
+            field="amount",
+            quote="具体融资金额未披露",
+            source_url=financing_analysis.source_url,
+        )
+    )
+    assert financing_evidence_gaps(financing_analysis) == ()
+    assert original.amount == "1亿元"
+
+
+def test_financing_evidence_gaps_report_only_required_present_claims(
+    financing_analysis,
+):
+    financing_analysis.evidence = [
+        item
+        for item in financing_analysis.evidence
+        if item.field not in {"published_at", "financing_round", "investors"}
+    ]
+
+    assert financing_evidence_gaps(financing_analysis) == (
+        "published_at",
+        "financing_round",
+        "investors",
+    )
 
 
 def test_grade_a_financing_rejects_unrelated_literal_evidence(financing_analysis):
@@ -515,6 +905,97 @@ def test_two_independent_b_sources_verify_financing(
     assert decision.status == VerificationStatus.VERIFIED, decision.reason
 
 
+def test_chinaventure_single_b_stays_pending_but_pedaily_corroboration_verifies():
+    chinaventure_url = "https://www.chinaventure.com.cn/news/116-test.html"
+    pedaily_url = "https://m.pedaily.cn/news/566-test"
+    chinaventure_page = page(
+        chinaventure_url,
+        "微光启航完成亿元级人民币天使++轮融资\n"
+        "发布时间：2026-07-07 14:13:24\n"
+        "2026年7月7日，北京微光启航科技有限公司宣布完成亿元级人民币天使++轮融资。\n"
+        "资金将用于商业航天液体火箭和发动机研发。\n"
+        "行业背景随后比较了美国SpaceX的可回收火箭路线。",
+    )
+    pedaily_page = page(
+        pedaily_url,
+        "微光启航完成亿元级人民币天使++轮融资\n"
+        "页面发布时间：2026-07-07\n"
+        "2026年7月7日，北京微光启航科技有限公司完成亿元级人民币天使++轮融资。\n"
+        "本轮资金用于商业航天液体火箭、发动机及核心部件研发。",
+    )
+    chinaventure_analysis = RuleFallbackAnalyzer().analyze(chinaventure_page)
+    pedaily_analysis = RuleFallbackAnalyzer().analyze(pedaily_page)
+    verifier = RuleVerifier(
+        SourceRegistry(
+            {},
+            financing_b_domains=(
+                "chinaventure.com.cn",
+                "pedaily.cn",
+            ),
+        )
+    )
+
+    single = verifier.verify(chinaventure_analysis, chinaventure_page)
+    corroborated = verifier.verify(
+        chinaventure_analysis,
+        chinaventure_page,
+        [(pedaily_analysis, pedaily_page)],
+    )
+
+    assert single.status is VerificationStatus.PENDING
+    assert (
+        single.reason
+        == "financing_requires_official_or_two_independent_b_sources"
+    )
+    assert corroborated.status is VerificationStatus.VERIFIED
+    assert (
+        corroborated.reason
+        == "verified_financing_two_independent_sources"
+    )
+    assert {item.source_grade for item in corroborated.source_records} == {
+        SourceGrade.B
+    }
+    assert {item.source_url for item in corroborated.source_records} == {
+        chinaventure_url,
+        pedaily_url,
+    }
+
+
+def test_two_b_financing_sources_with_conflicting_amount_stay_pending():
+    chinaventure_url = "https://www.chinaventure.com.cn/news/conflict.html"
+    pedaily_url = "https://m.pedaily.cn/news/conflict"
+    primary = page(
+        chinaventure_url,
+        "2026年7月7日，北京微光启航科技有限公司宣布完成亿元级天使++轮融资。\n"
+        "公司属于商业航天液体火箭企业。",
+    )
+    conflicting = page(
+        pedaily_url,
+        "2026年7月7日，北京微光启航科技有限公司宣布完成数千万元天使++轮融资。\n"
+        "公司属于商业航天液体火箭企业。",
+    )
+    primary_analysis = RuleFallbackAnalyzer().analyze(primary)
+    conflicting_analysis = RuleFallbackAnalyzer().analyze(conflicting)
+    verifier = RuleVerifier(
+        SourceRegistry(
+            {},
+            financing_b_domains=(
+                "chinaventure.com.cn",
+                "pedaily.cn",
+            ),
+        )
+    )
+
+    decision = verifier.verify(
+        primary_analysis,
+        primary,
+        [(conflicting_analysis, conflicting)],
+    )
+
+    assert decision.status is VerificationStatus.PENDING
+    assert decision.reason == "financing_corroboration_amount_conflict"
+
+
 def test_two_b_sources_on_same_registered_domain_are_not_independent(
     media_page, financing_analysis
 ):
@@ -593,7 +1074,7 @@ def test_missing_fields_take_precedence_over_unavailable_source(official_page, a
 
     decision = RuleVerifier(REGISTRY).verify(analysis, official_page)
 
-    assert decision.reason == "missing_required_fields"
+    assert decision.reason == "missing_required_fields:organization"
 
 
 @pytest.mark.parametrize("field", ["title", "organization", "published_at"])
@@ -835,6 +1316,230 @@ def financing_claim(
     )
 
 
+def financing_matrix_claim(
+    source: FetchedPage,
+    *,
+    organization: str,
+    published_at: str,
+    round_name: str,
+    amount: str | None = None,
+    investors: tuple[str, ...] = (),
+) -> AnalysisResult:
+    evidence = [
+        Evidence(
+            field="organization",
+            quote=organization,
+            source_url=source.final_url,
+        ),
+        Evidence(
+            field="published_at",
+            quote=published_at[:10],
+            source_url=source.final_url,
+        ),
+        Evidence(
+            field="financing_round",
+            quote=round_name,
+            source_url=source.final_url,
+        ),
+        *classification_evidence(
+            source.final_url,
+            source.text,
+            country_quote="中国商业航天企业",
+            category_quote="商业航天",
+            event_quote="融资",
+        ),
+    ]
+    if amount is not None:
+        evidence.append(
+            Evidence(field="amount", quote=amount, source_url=source.final_url)
+        )
+    evidence.extend(
+        Evidence(field="investors", quote=investor, source_url=source.final_url)
+        for investor in investors
+    )
+    return AnalysisResult(
+        in_china=True,
+        in_scope=True,
+        category=Category.COMMERCIAL_SPACE_FINANCING,
+        event_type=EventType.FINANCING,
+        title=source.title,
+        organization=organization,
+        published_at=published_at,
+        financing_round=round_name,
+        amount=amount,
+        investors=list(investors),
+        evidence=evidence,
+        source_url=source.final_url,
+    )
+
+
+def test_two_b_event_matrix_allows_omitted_attributes_and_compatible_rounds():
+    primary = page(
+        "https://media.example.cn/report/guangyou",
+        "中国商业航天企业北京光邮星空科技有限公司于2026-07-02完成"
+        "Pre-A和Pre-A+轮融资。",
+    )
+    secondary = page(
+        "https://other.example.cn/story/guangyou",
+        "中国商业航天企业光邮星空于2026-07-16完成Pre-A+轮融资，"
+        "中关村科学城领投。",
+    )
+    primary_analysis = financing_matrix_claim(
+        primary,
+        organization="北京光邮星空科技有限公司",
+        published_at="2026-07-02T00:00:00+08:00",
+        round_name="Pre-A和Pre-A+轮",
+    )
+    secondary_analysis = financing_matrix_claim(
+        secondary,
+        organization="光邮星空",
+        published_at="2026-07-16T00:00:00+08:00",
+        round_name="Pre-A+轮",
+        investors=("中关村科学城",),
+    )
+
+    decision = RuleVerifier(REGISTRY).verify(
+        primary_analysis,
+        primary,
+        [(secondary_analysis, secondary)],
+    )
+
+    assert decision.status is VerificationStatus.VERIFIED
+    assert decision.reason == "verified_financing_two_independent_sources"
+    assert len(decision.source_records) == 2
+    assert {
+        record.published_at.date() for record in decision.source_records
+    } == {datetime(2026, 7, 2).date(), datetime(2026, 7, 16).date()}
+    assert not any(
+        item.field == "amount" for item in decision.evidence
+    )
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "expected_reason"),
+    [
+        (
+            "organization",
+            "financing_source_organization_evidence_invalid",
+        ),
+        (
+            "published_at",
+            "financing_source_publication_date_evidence_invalid",
+        ),
+        (
+            "financing_round",
+            "financing_source_round_evidence_invalid",
+        ),
+    ],
+)
+def test_financing_event_matrix_reports_missing_required_evidence_field(
+    missing_field, expected_reason
+):
+    source = page(
+        "https://media.example.cn/report/missing-field",
+        "China commercial space company Orbit Corp completed Series B financing.",
+    )
+    analysis = financing_matrix_claim(
+        source,
+        organization="Orbit Corp",
+        published_at="2026-07-21T00:00:00+08:00",
+        round_name="Series B",
+    )
+    analysis.evidence = [
+        item for item in analysis.evidence if item.field != missing_field
+    ]
+
+    reason = RuleVerifier._financing_source_event_failure(analysis)
+
+    assert reason == expected_reason
+
+
+def test_financing_event_matrix_accepts_legal_name_brand_alias_evidence():
+    source = page(
+        "https://media.example.cn/report/guangyou-alias",
+        "中国商业航天企业北京光邮星空科技有限公司于2026-07-16完成Pre-A+轮融资。",
+    )
+    analysis = financing_matrix_claim(
+        source,
+        organization="北京光邮星空科技有限公司",
+        published_at="2026-07-16T00:00:00+08:00",
+        round_name="Pre-A+轮",
+    )
+    for item in analysis.evidence:
+        if item.field == "organization":
+            item.quote = "光邮星空连续完成Pre-A和Pre-A+轮融资"
+
+    reason = RuleVerifier._financing_source_event_failure(analysis)
+
+    assert reason is None
+
+
+def test_financing_event_matrix_rejects_different_company_alias_evidence():
+    source = page(
+        "https://media.example.cn/report/different-company",
+        "中国商业航天企业北京光邮星空科技有限公司于2026-07-16完成Pre-A+轮融资。",
+    )
+    analysis = financing_matrix_claim(
+        source,
+        organization="北京光邮星空科技有限公司",
+        published_at="2026-07-16T00:00:00+08:00",
+        round_name="Pre-A+轮",
+    )
+    for item in analysis.evidence:
+        if item.field == "organization":
+            item.quote = "星邮星空完成Pre-A+轮融资"
+
+    reason = RuleVerifier._financing_source_event_failure(analysis)
+
+    assert reason == "financing_source_organization_evidence_invalid"
+
+
+def test_financing_event_matrix_accepts_complete_combined_round_in_title():
+    source = page(
+        "https://media.example.cn/report/combined-round-title",
+        "中国商业航天企业光邮星空连续完成Pre-A和Pre-A+轮融资。",
+    )
+    analysis = financing_matrix_claim(
+        source,
+        organization="光邮星空",
+        published_at="2026-07-16T00:00:00+08:00",
+        round_name="Pre-A和Pre-A+轮",
+    )
+    analysis.evidence.append(
+        Evidence(field="title", quote=source.title, source_url=source.final_url)
+    )
+    for item in analysis.evidence:
+        if item.field == "financing_round":
+            item.quote = "Pre-A轮"
+
+    reason = RuleVerifier._financing_source_event_failure(analysis)
+
+    assert reason is None
+
+
+def test_financing_event_matrix_rejects_incomplete_round_in_title_and_field():
+    source = page(
+        "https://media.example.cn/report/incomplete-round-title",
+        "中国商业航天企业光邮星空完成Pre-A轮融资。",
+    )
+    analysis = financing_matrix_claim(
+        source,
+        organization="光邮星空",
+        published_at="2026-07-16T00:00:00+08:00",
+        round_name="Pre-A+轮",
+    )
+    analysis.evidence.append(
+        Evidence(field="title", quote=source.title, source_url=source.final_url)
+    )
+    for item in analysis.evidence:
+        if item.field == "financing_round":
+            item.quote = "Pre-A轮"
+
+    reason = RuleVerifier._financing_source_event_failure(analysis)
+
+    assert reason == "financing_source_round_evidence_invalid"
+
+
 def test_two_b_financing_requires_independent_analysis_and_persists_both_records():
     primary = page(
         "https://media.example.cn/report/independent",
@@ -868,25 +1573,23 @@ def test_two_b_financing_requires_independent_analysis_and_persists_both_records
 
 
 @pytest.mark.parametrize(
-    ("secondary_date", "secondary_round", "secondary_amount"),
+    ("secondary_round", "secondary_amount", "expected_reason"),
     [
-        ("2026-07-21T00:00:00+08:00", "Series B", "2亿元"),
-        ("2026-07-21T00:00:00+08:00", "Series C", "1亿元"),
-        ("2026-07-20T00:00:00+08:00", "Series B", "1亿元"),
+        ("Series B", "2亿元", "financing_corroboration_amount_conflict"),
+        ("Series C", "1亿元", "financing_corroboration_round_conflict"),
     ],
 )
-def test_two_b_financing_conflicting_critical_fields_stay_pending(
-    secondary_date, secondary_round, secondary_amount
+def test_two_b_financing_conflicting_attributes_stay_pending(
+    secondary_round, secondary_amount, expected_reason
 ):
     primary = page(
         "https://media.example.cn/report/conflict",
         "中国商业航天企业 Orbit Corp 于 2026-07-21 完成 Series B 融资，"
         "金额1亿元，Capital One投资。",
     )
-    rendered_date = secondary_date[:10]
     secondary = page(
         "https://other.example.cn/story/conflict",
-        f"中国商业航天企业 Orbit Corp 于 {rendered_date} 完成 {secondary_round} 融资，"
+        f"中国商业航天企业 Orbit Corp 于 2026-07-21 完成 {secondary_round} 融资，"
         f"金额{secondary_amount}，Capital One投资。",
     )
 
@@ -898,7 +1601,6 @@ def test_two_b_financing_conflicting_critical_fields_stay_pending(
                 (
                     financing_claim(
                         secondary,
-                        announced_at=secondary_date,
                         round_name=secondary_round,
                         amount=secondary_amount,
                     ),
@@ -910,7 +1612,66 @@ def test_two_b_financing_conflicting_critical_fields_stay_pending(
         pytest.fail(f"verifier did not compare independently analyzed sources: {error}")
 
     assert decision.status is VerificationStatus.PENDING
-    assert decision.reason == "financing_corroboration_conflict"
+    assert decision.reason == expected_reason
+
+
+def test_two_b_financing_source_publication_dates_may_differ():
+    primary = page(
+        "https://media.example.cn/report/date-window",
+        "中国商业航天企业 Orbit Corp 于 2026-07-21 完成 Series B 融资，"
+        "金额1亿元，Capital One投资。",
+    )
+    secondary = page(
+        "https://other.example.cn/story/date-window",
+        "中国商业航天企业 Orbit Corp 于 2026-07-20 完成 Series B 融资，"
+        "金额1亿元，Capital One投资。",
+    )
+
+    decision = RuleVerifier(REGISTRY).verify(
+        financing_claim(primary),
+        primary,
+        [
+            (
+                financing_claim(
+                    secondary,
+                    announced_at="2026-07-20T00:00:00+08:00",
+                ),
+                secondary,
+            )
+        ],
+    )
+
+    assert decision.status is VerificationStatus.VERIFIED
+
+
+def test_two_b_financing_publication_dates_outside_window_stay_pending():
+    primary = page(
+        "https://media.example.cn/report/date-outside",
+        "中国商业航天企业 Orbit Corp 于 2026-07-21 完成 Series B 融资，"
+        "金额1亿元，Capital One投资。",
+    )
+    secondary = page(
+        "https://other.example.cn/story/date-outside",
+        "中国商业航天企业 Orbit Corp 于 2026-05-01 完成 Series B 融资，"
+        "金额1亿元，Capital One投资。",
+    )
+
+    decision = RuleVerifier(REGISTRY).verify(
+        financing_claim(primary),
+        primary,
+        [
+            (
+                financing_claim(
+                    secondary,
+                    announced_at="2026-05-01T00:00:00+08:00",
+                ),
+                secondary,
+            )
+        ],
+    )
+
+    assert decision.status is VerificationStatus.PENDING
+    assert decision.reason == "financing_corroboration_date_outside_window"
 
 
 def test_two_b_passive_company_round_mention_is_not_corroboration():
