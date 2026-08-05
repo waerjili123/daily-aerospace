@@ -38,7 +38,17 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     document = _base_yaml(workflow_path)
 
     assert set(document["on"]) == {"workflow_dispatch", "schedule"}
-    assert document["on"]["schedule"] == [{"cron": "0 0 * * *"}]
+    assert document["on"]["schedule"] == [
+        {"cron": "50 23 * * *"},
+        {"cron": "20 0 * * *"},
+    ]
+    assert document["run-name"] == (
+        "${{ github.event_name == 'schedule' && 'scheduled-live' || "
+        "(inputs.delivery_mode == 'dingtalk_live' && 'manual-live' || "
+        "(inputs.delivery_mode == 'dingtalk_test' && 'manual-test' || "
+        "'manual-dry-run')) }}"
+    )
+    assert document["permissions"] == {"contents": "read", "actions": "read"}
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert "BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}" in workflow
     assert "secrets.DINGTALK_WEBHOOK" in workflow
@@ -89,10 +99,27 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     )
     assert "refs/heads/main" in guard_step["run"]
     assert "refs/heads/codex/verification-promotion-20260728" in guard_step["run"]
+    delivery_guard = _workflow_step(
+        document["jobs"]["run"]["steps"], "Guard daily production delivery"
+    )
+    assert delivery_guard["id"] == "delivery_guard"
+    assert delivery_guard["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
+    assert "laser_space_daily.delivery_guard" in delivery_guard["run"]
+    for step_name in (
+        "Install project and development dependencies",
+        "Run tests",
+        "Run daily pipeline",
+        "Publish report summary",
+        "Publish failure diagnostics summary",
+        "Upload generated report",
+        "Upload failure diagnostics",
+    ):
+        guarded_step = _workflow_step(document["jobs"]["run"]["steps"], step_name)
+        assert "steps.delivery_guard.outputs.should_run == 'true'" in guarded_step["if"]
     summary_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Publish report summary"
     )
-    assert summary_step["if"] == "success()"
+    assert summary_step["if"].startswith("success()")
     assert summary_step["shell"] == "python"
     assert "GITHUB_STEP_SUMMARY" in summary_step["run"]
     assert "data/run-result.json" in summary_step["run"]
@@ -107,7 +134,7 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
         document["jobs"]["run"]["steps"],
         "Publish failure diagnostics summary",
     )
-    assert failure_summary["if"] == "failure()"
+    assert failure_summary["if"].startswith("failure()")
     assert failure_summary["shell"] == "python"
     assert "data/failure-diagnostics.json" in failure_summary["run"]
     assert "GITHUB_STEP_SUMMARY" in failure_summary["run"]
@@ -212,7 +239,7 @@ def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
     job = document["jobs"]["run"]
     steps = job["steps"]
 
-    assert document["permissions"] == {"contents": "read"}
+    assert document["permissions"] == {"contents": "read", "actions": "read"}
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == "45"
     assert any(
@@ -239,7 +266,7 @@ def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
     assert artifact_step["uses"] == (
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     )
-    assert artifact_step["if"] == "success()"
+    assert artifact_step["if"].startswith("success()")
     assert artifact_step["with"]["name"] == "daily-intelligence-report"
     assert artifact_step["with"]["path"].splitlines() == ["reports/", "data/"]
     failure_artifact = _workflow_step(
@@ -249,7 +276,7 @@ def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
     assert failure_artifact["uses"] == (
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     )
-    assert failure_artifact["if"] == "failure()"
+    assert failure_artifact["if"].startswith("failure()")
     assert failure_artifact["with"]["name"] == (
         "daily-intelligence-failure-diagnostics"
     )
@@ -304,7 +331,10 @@ def test_workflow_schedule_is_fixed_and_delivery_is_explicit() -> None:
     ).read_text(encoding="utf-8")
     steps = document["jobs"]["run"]["steps"]
 
-    assert document["on"]["schedule"] == [{"cron": "0 0 * * *"}]
+    assert document["on"]["schedule"] == [
+        {"cron": "50 23 * * *"},
+        {"cron": "20 0 * * *"},
+    ]
     assert "--dry-run" in _workflow_step(steps, "Run daily pipeline")["run"]
     assert "github.event_name == 'schedule'" in workflow
     assert "'dingtalk_live'" in workflow
@@ -330,7 +360,8 @@ def test_readme_documents_required_setup_and_dry_run():
         "delivery_mode=dry_run",
         "dingtalk_test",
         "dingtalk_live",
-        "08:00",
+        "07:50",
+        "08:20",
         "artifact",
         "A/B/C",
         "pending",

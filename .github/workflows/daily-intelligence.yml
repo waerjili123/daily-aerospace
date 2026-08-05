@@ -1,8 +1,11 @@
 name: Daily Laser and Space Intelligence
 
+run-name: ${{ github.event_name == 'schedule' && 'scheduled-live' || (inputs.delivery_mode == 'dingtalk_live' && 'manual-live' || (inputs.delivery_mode == 'dingtalk_test' && 'manual-test' || 'manual-dry-run')) }}
+
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "50 23 * * *"
+    - cron: "20 0 * * *"
   workflow_dispatch:
     inputs:
       discovery_mode:
@@ -35,6 +38,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   run:
@@ -52,14 +56,6 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - name: Install project and development dependencies
-        env:
-          PIP_CONSTRAINT: constraints.txt
-        run: python -m pip install -e ".[dev]"
-
-      - name: Run tests
-        run: python -m pytest -q
-
       - name: Guard production branches
         shell: bash
         run: |
@@ -68,7 +64,26 @@ jobs:
             *) echo "Unsupported workflow branch: ${GITHUB_REF}" >&2; exit 1 ;;
           esac
 
+      - name: Guard daily production delivery
+        id: delivery_guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
+          PYTHONPATH: src
+        run: python -m laser_space_daily.delivery_guard
+
+      - name: Install project and development dependencies
+        if: steps.delivery_guard.outputs.should_run == 'true'
+        env:
+          PIP_CONSTRAINT: constraints.txt
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        if: steps.delivery_guard.outputs.should_run == 'true'
+        run: python -m pytest -q
+
       - name: Run daily pipeline
+        if: steps.delivery_guard.outputs.should_run == 'true'
         id: daily_pipeline
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -98,7 +113,7 @@ jobs:
           laser-space-daily "${args[@]}"
 
       - name: Publish report summary
-        if: success()
+        if: success() && steps.delivery_guard.outputs.should_run == 'true'
         shell: python
         run: |
           import json
@@ -171,7 +186,7 @@ jobs:
                       summary.write("- No report-selected or elastic candidates.\n")
 
       - name: Publish failure diagnostics summary
-        if: failure()
+        if: failure() && steps.delivery_guard.outputs.should_run == 'true'
         shell: python
         run: |
           import json
@@ -223,7 +238,7 @@ jobs:
                               )
 
       - name: Upload generated report
-        if: success()
+        if: success() && steps.delivery_guard.outputs.should_run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daily-intelligence-report
@@ -233,7 +248,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload failure diagnostics
-        if: failure()
+        if: failure() && steps.delivery_guard.outputs.should_run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daily-intelligence-failure-diagnostics
