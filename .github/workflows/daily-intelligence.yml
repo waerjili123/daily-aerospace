@@ -58,7 +58,13 @@ jobs:
 
       - name: Guard production branches
         shell: bash
+        env:
+          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
         run: |
+          if [[ "${GITHUB_EVENT_NAME}" != "schedule" && "${DELIVERY_MODE}" == "dry_run" ]]; then
+            echo "Safe dry-run allowed on ${GITHUB_REF}"
+            exit 0
+          fi
           case "${GITHUB_REF}" in
             refs/heads/main|refs/heads/codex/verification-promotion-20260728) ;;
             *) echo "Unsupported workflow branch: ${GITHUB_REF}" >&2; exit 1 ;;

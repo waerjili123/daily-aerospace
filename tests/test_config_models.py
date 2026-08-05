@@ -97,6 +97,11 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     guard_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Guard production branches"
     )
+    assert guard_step["env"]["DELIVERY_MODE"] == (
+        "${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}"
+    )
+    assert '"${DELIVERY_MODE}" == "dry_run"' in guard_step["run"]
+    assert '"${GITHUB_EVENT_NAME}" != "schedule"' in guard_step["run"]
     assert "refs/heads/main" in guard_step["run"]
     assert "refs/heads/codex/verification-promotion-20260728" in guard_step["run"]
     delivery_guard = _workflow_step(

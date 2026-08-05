@@ -1166,3 +1166,5 @@ Actions #24（提交 `1b35fdc`，分支
 - [x] 分析、流水线与短报定向测试 251 项通过；完整离线测试 530 项通过；
   现有 CLI 固定夹具 dry-run 回归通过，`compileall` 与 `git diff --check` 通过。
 - [ ] GitHub Actions dry-run 待推送分支后执行；本阶段不发送钉钉。
+- [x] 首次分支 dry-run #53 被旧分支门禁在业务运行前拒绝，没有调用采集或钉钉；门禁已调整为任意分支
+  可执行 `dry_run`，而 `dingtalk_test`、`dingtalk_live` 和 scheduled 运行仍只允许生产分支。
