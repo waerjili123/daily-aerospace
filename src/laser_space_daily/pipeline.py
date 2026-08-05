@@ -282,9 +282,10 @@ class Pipeline:
             search_rows,
             now,
             minimum=40 if is_backfill else 5,
-            maximum=40 if is_backfill else 10,
+            maximum=40 if is_backfill else 15,
             fallback_max_days=90 if is_backfill else 30,
             preferred_domains=preferred_financing_domains,
+            balance_business_buckets=not is_backfill,
         )
         metrics.raw_search_count = selection.raw_search_count
         metrics.valid_shape_count = selection.valid_shape_count

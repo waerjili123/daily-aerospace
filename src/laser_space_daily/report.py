@@ -859,6 +859,7 @@ def _short_verified_procurements(result: RunResult) -> list[_ShortItem]:
             )
             lines = _procurement_item_lines(
                 title=value.name,
+                summary="",
                 organization=value.organization,
                 category=value.category,
                 group=group,
@@ -894,6 +895,7 @@ def _short_verified_procurements(result: RunResult) -> list[_ShortItem]:
             )
             lines = _procurement_item_lines(
                 title=value.title,
+                summary="",
                 organization=value.organization,
                 category=value.category,
                 group=group,
@@ -1027,6 +1029,7 @@ def _verified_event_procurement_group(
 def _procurement_item_lines(
     *,
     title: str,
+    summary: str,
     organization: str,
     category: Category,
     group: str,
@@ -1046,9 +1049,18 @@ def _procurement_item_lines(
     clean_title = _clean_procurement_title(title)
     trust = "已核实" if trust_label.startswith("已核实") else trust_label
     lines = [f"- **{clean_title}**"]
-    known = []
-    if organization:
-        known.append(f"采购方：{_safe_text(organization)}")
+    matter_summary = _procurement_matter_summary(
+        title=clean_title,
+        summary=summary,
+        event_type=event_type,
+        status_text=status_text,
+    )
+    if matter_summary:
+        lines.append(f"  - 摘要：{matter_summary}")
+    known = [
+        "采购方："
+        + (_safe_text(organization) if organization else "需核实确认")
+    ]
     known.append(f"方向：{_CATEGORY_LABELS[category]}")
     lines.append("  - " + "｜".join(known))
 
@@ -1059,14 +1071,25 @@ def _procurement_item_lines(
             + f"投标截止：{_format_datetime(bid_deadline)}"
             + f"｜剩余：{remaining}"
         )
-        optional = []
-        if amount:
-            optional.append(f"预算/最高限价：{_safe_text(amount)}")
+        optional = [
+            "预算/最高限价："
+            + (_safe_text(amount) if amount else "需核实确认")
+        ]
         optional.append(f"可信：{trust}")
         lines.append("  - " + "｜".join(optional))
     elif group == "confirmation":
         stage = _EVENT_LABELS.get(event_type, "阶段待确认")
         lines.append(f"  - 疑似阶段：{stage}｜可信：{trust}")
+        lines.append(
+            "  - 预算/最高限价："
+            + (_safe_text(amount) if amount else "需核实确认")
+            + "｜投标截止："
+            + (
+                _format_datetime(bid_deadline)
+                if bid_deadline is not None and deadline_supported
+                else "需核实确认"
+            )
+        )
         missing = []
         if not organization:
             missing.append("采购方")
@@ -1092,18 +1115,25 @@ def _procurement_item_lines(
             + f"结果：{_safe_text(status_text)}"
             + f"｜公示日期：{date_text}"
         )
-        result_details = []
-        if awarded_supplier:
-            result_details.append(
-                f"成交供应商：{_safe_text(awarded_supplier)}"
+        result_details = [
+            "成交供应商："
+            + (
+                _safe_text(awarded_supplier)
+                if awarded_supplier
+                else "需核实确认"
             )
+        ]
         result_amount = awarded_amount or (
             amount if event_type is EventType.AWARD else ""
         )
-        if result_amount:
-            result_details.append(
-                f"中标/成交金额：{_safe_text(result_amount)}"
+        result_details.append(
+            "中标/成交金额："
+            + (
+                _safe_text(result_amount)
+                if result_amount
+                else "需核实确认"
             )
+        )
         result_details.append(f"可信：{trust}")
         lines.append("  - " + "｜".join(result_details))
 
@@ -1116,6 +1146,67 @@ def _procurement_item_lines(
             source_label = "查看官方公告"
         lines.append("  - " + _link(source_label, source_url))
     return lines
+
+
+def _procurement_matter_summary(
+    *,
+    title: str,
+    summary: str,
+    event_type: EventType | None,
+    status_text: str,
+) -> str:
+    extracted = re.search(
+        r"(?:采购内容|采购需求|采购标的|项目内容|项目概况)"
+        r"[：:]\s*([^。；;\n]{4,90})",
+        summary,
+    )
+    if extracted:
+        return _safe_text(f"采购内容：{extracted.group(1).strip()}。")
+
+    subject = title
+    lifecycle_suffixes = (
+        "单一来源采购成交结果公告",
+        "单一来源成交结果公告",
+        "单一来源采购成交公告",
+        "单一来源成交公告",
+        "中标候选人公示",
+        "中标结果公告",
+        "成交结果公告",
+        "中标公告",
+        "成交公告",
+        "重新招标公告",
+        "竞争性磋商公告",
+        "竞争性谈判公告",
+        "询价公告",
+        "比选公告",
+        "招标公告",
+        "采购公告",
+        "废标公告",
+        "流标公告",
+        "终止公告",
+    )
+    for suffix in lifecycle_suffixes:
+        if subject.endswith(suffix):
+            subject = subject[: -len(suffix)].rstrip(" -｜|_：:")
+            break
+    parts = [f"事项：{subject or title}"]
+    methods = (
+        ("单一来源", "单一来源"),
+        ("公开招标", "公开招标"),
+        ("竞争性磋商", "竞争性磋商"),
+        ("竞争性谈判", "竞争性谈判"),
+        ("询价", "询价"),
+        ("比选", "比选"),
+    )
+    method = next((label for token, label in methods if token in title), None)
+    if method:
+        parts.append(f"方式：{method}")
+    stage = _EVENT_LABELS.get(event_type, status_text)
+    if "成交" in title and event_type is EventType.AWARD:
+        stage = "成交结果"
+    if stage:
+        parts.append(f"当前：{_safe_text(stage)}")
+    return _safe_text("；".join(parts) + "。")
 
 
 def _remaining_deadline_text(deadline: datetime, now: datetime) -> str:
@@ -1433,6 +1524,7 @@ def _short_signal_item(
         )
         lines = _procurement_item_lines(
             title=signal.title,
+            summary=signal.summary,
             organization=signal.organization,
             category=signal.category,
             group=group,

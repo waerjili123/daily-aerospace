@@ -21,8 +21,8 @@ class DiscoverySettings(BaseModel):
 
     mode: Literal["daily", "backfill"] = "daily"
     max_queries: int = Field(default=12, ge=0, le=40)
-    daily_search_budget: int = Field(default=12, ge=0, le=12)
-    daily_elastic_budget: int = Field(default=3, ge=0, le=3)
+    daily_search_budget: int = Field(default=20, ge=0, le=20)
+    daily_elastic_budget: int = Field(default=5, ge=0, le=5)
     backfill_search_budget: int = Field(default=40, ge=0, le=40)
     verification_pool_days: int = Field(default=90, ge=30, le=90)
     verification_max_targets: int = Field(default=3, ge=1, le=3)
@@ -43,8 +43,8 @@ class DiscoverySettings(BaseModel):
             raise ValueError(
                 f"{self.mode} max_queries must not exceed configured budget {hard_limit}"
             )
-        if self.daily_search_budget + self.daily_elastic_budget > 15:
-            raise ValueError("daily total search budget must not exceed 15")
+        if self.daily_search_budget + self.daily_elastic_budget > 25:
+            raise ValueError("daily total search budget must not exceed 25")
         return self
 
 

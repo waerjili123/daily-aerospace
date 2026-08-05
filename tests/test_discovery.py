@@ -87,6 +87,8 @@ def test_planner_covers_incremental_backfill_and_overdue(project_factory, fixed_
     kinds = {query.kind for query in queries}
     assert kinds == {
         "incremental",
+        "procurement_open",
+        "procurement_result",
         "project_followup",
         "rolling_recheck",
         "overdue_result",
@@ -101,7 +103,12 @@ def test_planner_caps_queries_in_stable_priority_order(project_factory, fixed_no
     queries = QueryPlanner(max_queries=5).plan(fixed_now, [project_factory(), project_factory()])
 
     assert len(queries) == 5
-    assert [query.kind for query in queries[:4]] == ["incremental"] * 4
+    assert [query.kind for query in queries[:4]] == [
+        "procurement_open",
+        "procurement_open",
+        "procurement_open",
+        "incremental",
+    ]
     assert [query.category for query in queries[:4]] == [
         Category.LASER_COMMUNICATION,
         Category.LASER_WEAPON,
@@ -110,7 +117,43 @@ def test_planner_caps_queries_in_stable_priority_order(project_factory, fixed_no
     ]
     assert "采购" not in queries[3].text
     assert "招标" not in queries[3].text
-    assert queries[4].kind == "project_followup"
+    assert queries[4].kind == "procurement_open"
+
+
+def test_planner_reserves_twenty_daily_queries_by_business_stage(
+    project_factory, fixed_now
+):
+    project = project_factory()
+    project.deadlines = {
+        "bid_submission": datetime(
+            2026, 7, 21, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai")
+        )
+    }
+    project.deadline_precision = {"bid_submission": "minute"}
+    project.deadline_evidence = {
+        "bid_submission": "投标截止：2026-07-21 17:00"
+    }
+    queries = QueryPlanner(
+        max_queries=20,
+        financing_domains=(
+            "stcn.com",
+            "pedaily.cn",
+            "chinaventure.com.cn",
+            "cls.cn",
+        ),
+    ).plan(fixed_now, [project])
+
+    assert len(queries) == 20
+    assert sum(query.kind == "procurement_open" for query in queries) == 6
+    assert sum(query.kind == "procurement_result" for query in queries) == 6
+    assert sum(
+        query.category is Category.COMMERCIAL_SPACE_FINANCING
+        for query in queries
+    ) == 5
+    assert sum(
+        query.kind in {"project_followup", "rolling_recheck", "overdue_result"}
+        for query in queries
+    ) == 3
 
 
 def test_planner_scopes_every_query_to_china_and_excludes_ai_news(
@@ -128,6 +171,8 @@ def test_planner_scopes_every_query_to_china_and_excludes_ai_news(
 
     assert {query.kind for query in queries} == {
         "incremental",
+        "procurement_open",
+        "procurement_result",
         "project_followup",
         "rolling_recheck",
         "overdue_result",
@@ -425,6 +470,53 @@ def test_search_selection_rejects_reports_and_market_commentary(
 
     assert selection.candidates == ()
     assert selection.filter_rejected_count == 1
+
+
+def test_balanced_daily_selection_supplements_fallback_after_minimum_is_met(
+    fixed_now,
+) -> None:
+    rows = [
+        _search_candidate(
+            title=f"商业航天企业星航{index}完成A轮融资",
+            summary=f"卫星公司星航{index}完成股权融资。",
+            url=f"https://finance.example/recent/{index}",
+            category=Category.COMMERCIAL_SPACE_FINANCING,
+            published_at=fixed_now - timedelta(days=1),
+        )
+        for index in range(5)
+    ]
+    rows.extend(
+        (
+            _search_candidate(
+                title="空间激光通信终端招标公告",
+                summary="空间激光通信终端采购项目正在招标。",
+                url="https://procurement.example/open",
+                category=Category.LASER_COMMUNICATION,
+                published_at=fixed_now - timedelta(days=12),
+            ),
+            _search_candidate(
+                title="无人机光电吊舱中标结果公告",
+                summary="无人机光电吊舱采购项目发布中标结果。",
+                url="https://procurement.example/award",
+                category=Category.EO_TURRET,
+                published_at=fixed_now - timedelta(days=15),
+            ),
+        )
+    )
+
+    selection = select_search_candidates(
+        rows,
+        fixed_now,
+        minimum=5,
+        maximum=15,
+        balance_business_buckets=True,
+    )
+
+    selected_urls = {item.url for item in selection.candidates}
+    assert "https://procurement.example/open" in selected_urls
+    assert "https://procurement.example/award" in selected_urls
+    assert selection.fallback_8_30d_count == 2
+    assert len(selection.candidates) == 7
 
 
 def test_search_selection_accepts_specific_space_company_financing_without_generic_subject():

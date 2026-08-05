@@ -638,7 +638,7 @@ def test_short_report_separates_financing_before_procurement_and_keeps_links(
     assert "[查看官方公告](https://official.example/open)" in procurement
     assert "融资统计：已核实" in financing
     assert "招标统计：已核实" in procurement
-    assert 600 <= len(text) <= 1400
+    assert 600 <= len(text) <= 1500
 
 
 def test_short_report_compacts_items_before_raising_length_error(
@@ -714,6 +714,10 @@ def test_procurement_candidate_cleans_site_suffix_and_omits_raw_summary() -> Non
     assert "四川招投标网" not in text
     assert "字号" not in text
     assert "打印" not in text
+    assert (
+        "摘要：事项：电子科技大学光电吊舱系统材料采购项目；"
+        "方式：单一来源；当前：成交结果。"
+    ) in text
     assert "成交供应商：某光电科技有限公司" in text
     assert "中标/成交金额：86万元" in text
     assert "[查看结果公告](https://scbid.com/bx/detail/1)" in text
@@ -2527,7 +2531,7 @@ def test_cli_backfill_mode_allows_40_query_budget(cli_deps) -> None:
     assert observed == [("backfill", 40)]
 
 
-def test_cli_daily_mode_rejects_budget_over_12(cli_deps) -> None:
+def test_cli_daily_mode_rejects_budget_over_20(cli_deps) -> None:
     code = run_cli(
         [
             "--config",
@@ -2536,7 +2540,7 @@ def test_cli_daily_mode_rejects_budget_over_12(cli_deps) -> None:
             "--discovery-mode",
             "daily",
             "--max-queries",
-            "13",
+            "21",
         ],
         dependencies=cli_deps.dependencies,
     )
