@@ -3,7 +3,7 @@
 这是一个面向激光通信与商业航天产业的日度情报管道：收集公开线索、核验来源、关联历史项目，并生成可追溯的 Markdown 报告。它只处理本项目范围内的产业与采购情报，**独立于 AI日报**，不包含任何 AI 新闻内容。
 
 > 工作流每天北京时间 07:50 执行主投递，并在 08:20 提供独立兜底；两次均使用
-> `daily + 12 + dingtalk_live`。当天已有成功正式投递时，后续运行在采集前跳过。
+> `daily + 20 + dingtalk_live`。当天已有成功正式投递时，后续运行在采集前跳过。
 > 手动运行仍默认 `delivery_mode=dry_run`；显式选择
 > `dingtalk_test` 会执行严格测试门禁并添加“【测试】”标题，选择
 > `dingtalk_live` 才会发送不带测试标识的正式短报。
@@ -41,12 +41,12 @@ python -m pip install -c constraints.txt -e ".[dev]"
 laser-space-daily --config config.yaml --dry-run
 ```
 
-日常增量最多执行 12 次博查搜索。标准 12 次预算会先覆盖三类招标和一条融资
-综合查询，再使用四个已注册融资来源进行定向种子检索，因此商业航天融资至少
-获得 5 次基础覆盖；剩余预算用于模型追查：
+日常基础执行 20 次博查搜索：商业航天融资保留 5 次，三个采购方向的在招公告
+保留 6 次、结果公示保留 6 次，最多 3 次用于已有项目跟踪或模型追查。另有最多
+5 次弹性核验，总硬上限为 25 次：
 
 ```bash
-laser-space-daily --config config.yaml --dry-run --discovery-mode daily --max-queries 12
+laser-space-daily --config config.yaml --dry-run --discovery-mode daily --max-queries 20
 ```
 
 一次性近 90 天历史回填最多执行 40 次，并且必须保持 dry-run：
@@ -55,7 +55,7 @@ laser-space-daily --config config.yaml --dry-run --discovery-mode daily --max-qu
 laser-space-daily --config config.yaml --dry-run --discovery-mode backfill --max-queries 40
 ```
 
-DeepSeek 通过受控的 `search_web` Tool Calling 提出后续查询。本地预算守卫负责执行博查调用，模型不能突破日常 12 次或回填 40 次的硬上限。研究轨迹写入 `data/research-trace.json`，不包含密钥、认证头、完整网页正文或模型隐藏推理。
+DeepSeek 通过受控的 `search_web` Tool Calling 提出后续查询。本地预算守卫负责执行博查调用，模型不能突破日常 20 次基础搜索、5 次弹性核验或回填 40 次的硬上限。研究轨迹写入 `data/research-trace.json`，不包含密钥、认证头、完整网页正文或模型隐藏推理。
 
 正常运行会写入 `data/run-result.json` 和脱敏的
 `data/delivery-status.json`。若分析后续阶段失败，本轮候选检查点会生成明确标注的
@@ -79,10 +79,10 @@ DeepSeek 通过受控的 `search_web` Tool Calling 提出后续查询。本地�
 
 ## GitHub Actions 采集恢复验收
 
-1. 定时任务固定使用 `daily`、12 次基础查询和 `dingtalk_live`；主 cron 为
+1. 定时任务固定使用 `daily`、20 次基础查询和 `dingtalk_live`；主 cron 为
    `50 23 * * *`（北京时间 07:50），兜底 cron 为 `20 0 * * *`（北京时间
    08:20）。当天已有成功的 `scheduled-live` 或 `manual-live` 时，后续运行跳过。
-2. 手动日常验证选择 `daily`、12 次查询和默认 `dry_run`；历史回填选择
+2. 手动日常验证选择 `daily`、20 次查询和默认 `dry_run`；历史回填选择
    `backfill`、40 次查询并保持 `dry_run`。只有一次性钉钉验收才选择
    `dingtalk_test`。
 3. 确认正式补发时选择 `dingtalk_live`；该模式不使用测试门禁，但所有非严格

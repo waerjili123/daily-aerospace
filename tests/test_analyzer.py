@@ -178,6 +178,24 @@ def test_rule_fallback_extracts_evidence_backed_procurement_deadlines():
     }
 
 
+def test_rule_fallback_extracts_evidence_backed_award_result_fields():
+    source = make_page(
+        "中国境内光电吊舱系统材料采购成交结果公告\n"
+        "采购单位：电子科技大学\n发布日期：2026-07-30\n"
+        "成交供应商：某光电科技有限公司\n成交金额：86万元",
+        title="中国境内光电吊舱系统材料采购成交结果公告",
+    )
+
+    result = RuleFallbackAnalyzer().analyze(source)
+
+    assert result.event_type is EventType.AWARD
+    assert result.awarded_supplier == "某光电科技有限公司"
+    assert result.awarded_amount == "86万元"
+    evidence = {item.field: item.quote for item in result.evidence}
+    assert evidence["awarded_supplier"] == "成交供应商：某光电科技有限公司"
+    assert evidence["awarded_amount"] == "成交金额：86万元"
+
+
 def test_deepseek_returns_schema_valid_analysis(fake_client, official_page, valid_analysis):
     fake_client.reply_json(valid_analysis)
 

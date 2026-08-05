@@ -92,7 +92,7 @@ class AgenticSearchOrchestrator:
         max_results_per_call: int,
         stop_after_no_new_rounds: int,
     ) -> None:
-        hard_limit = 12 if mode == "daily" else 40
+        hard_limit = 20 if mode == "daily" else 40
         if search_budget < 0 or search_budget > hard_limit:
             raise ValueError(f"{mode} search budget must be between 0 and {hard_limit}")
         if max_agent_rounds < 0:
@@ -131,8 +131,33 @@ class AgenticSearchOrchestrator:
         duplicate_query_count = 0
 
         planned_queries = self._fallback_planner.plan(now, projects)
-        seed_queries = planned_queries[: min(4, self._search_budget)]
-        if self._mode == "daily" and self._search_budget >= 12:
+        if self._mode == "daily" and self._search_budget >= 20:
+            seed_queries = [
+                *[
+                    query
+                    for query in planned_queries
+                    if query.kind == "procurement_open"
+                ][:6],
+                *[
+                    query
+                    for query in planned_queries
+                    if query.kind == "procurement_result"
+                ][:6],
+                *[
+                    query
+                    for query in planned_queries
+                    if query.category is Category.COMMERCIAL_SPACE_FINANCING
+                ][:5],
+                *[
+                    query
+                    for query in planned_queries
+                    if query.kind
+                    in {"project_followup", "rolling_recheck", "overdue_result"}
+                ][:3],
+            ][: self._search_budget]
+        else:
+            seed_queries = planned_queries[: min(4, self._search_budget)]
+        if self._mode == "daily" and 12 <= self._search_budget < 20:
             financing_seed_count = sum(
                 query.category is Category.COMMERCIAL_SPACE_FINANCING
                 for query in seed_queries

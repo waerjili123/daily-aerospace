@@ -635,22 +635,128 @@ def test_short_report_separates_financing_before_procurement_and_keeps_links(
     assert "星河动力" not in procurement
     assert "[企业公告](https://company.example/financing)" in financing
     assert "[权威媒体报道](https://media.example/financing)" in financing
-    assert "[官方原始公告](https://official.example/open)" in procurement
+    assert "[查看官方公告](https://official.example/open)" in procurement
     assert "融资统计：已核实" in financing
     assert "招标统计：已核实" in procurement
-    assert 600 <= len(text) <= 1200
+    assert 600 <= len(text) <= 1500
 
 
 def test_short_report_compacts_items_before_raising_length_error(
     run_result: RunResult,
 ) -> None:
-    compact = DingTalkShortReportRenderer(max_chars=900).render(run_result)
+    compact = DingTalkShortReportRenderer(max_chars=1600).render(run_result)
 
-    assert len(compact.markdown) <= 900
+    assert len(compact.markdown) <= 1600
     assert "## 一、商业航天融资新闻" in compact.markdown
     assert "## 二、招标采购情况" in compact.markdown
     with pytest.raises(ReportTooLong):
         DingTalkShortReportRenderer(max_chars=200).render(run_result)
+
+
+def test_procurement_brief_uses_three_business_sections(
+    run_result: RunResult,
+) -> None:
+    text = DingTalkShortReportRenderer().render(run_result).markdown
+    procurement = text.split("## 二、招标采购情况", 1)[1].split(
+        "## 三、其他行业动态", 1
+    )[0]
+
+    headings = (
+        "### 🟢 可投标机会",
+        "### 🟡 需核实确认",
+        "### 🔵 结果与行业动态",
+    )
+    assert [procurement.index(heading) for heading in headings] == sorted(
+        procurement.index(heading) for heading in headings
+    )
+    opportunity = procurement.split(headings[0], 1)[1].split(headings[1], 1)[0]
+    confirmation = procurement.split(headings[1], 1)[1].split(headings[2], 1)[0]
+    results = procurement.split(headings[2], 1)[1]
+    assert "星间激光通信终端采购" in opportunity
+    assert "投标截止：2026-07-25 17:00" in opportunity
+    assert "剩余：3天" in opportunity
+    assert "疑似同项目公告" in confirmation
+    assert "待确认：" in confirmation
+    assert "2026-04-22边界项目" in results
+    assert "结果：已中标" in results
+    assert "搜索结果摘要" not in procurement
+
+
+def test_procurement_candidate_cleans_site_suffix_and_omits_raw_summary() -> None:
+    diagnostic = CandidateDiagnostic(
+        source_url="https://scbid.com/bx/detail/1",
+        title=(
+            "电子科技大学光电吊舱系统材料采购项目单一来源成交公告-"
+            "四川招投标网-官网-四川省招投标公共服务平台"
+        ),
+        summary="发布日期:2026年07月30日 【字号 特大 大 中 小】【打印】【关闭】",
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.EO_TURRET,
+        organization="电子科技大学",
+        published_at=dt(7, 30),
+        event_type=EventType.AWARD,
+        awarded_supplier="某光电科技有限公司",
+        awarded_amount="86万元",
+        evidence_count=6,
+        stage="persisted",
+        status="pending",
+        reason="tender_requires_grade_a",
+        source_grade=SourceGrade.B,
+    )
+    result = make_result().model_copy(
+        update={"candidate_diagnostics": [diagnostic]}
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+
+    assert "**电子科技大学光电吊舱系统材料采购项目单一来源成交公告**" in text
+    assert "四川招投标网" not in text
+    assert "字号" not in text
+    assert "打印" not in text
+    assert (
+        "摘要：事项：电子科技大学光电吊舱系统材料采购项目；"
+        "方式：单一来源；当前：成交结果。"
+    ) in text
+    assert "成交供应商：某光电科技有限公司" in text
+    assert "中标/成交金额：86万元" in text
+    assert "[查看结果公告](https://scbid.com/bx/detail/1)" in text
+
+
+def test_verified_open_procurement_without_deadline_requires_confirmation() -> None:
+    notice = event(
+        "e-no-deadline",
+        "无人机激光反制系统招标公告",
+        dt(7, 22, 8),
+        "https://official.example/no-deadline",
+        category=Category.LASER_WEAPON,
+        event_type=EventType.TENDER,
+    )
+    item = project(
+        "p-no-deadline",
+        "无人机激光反制系统",
+        Category.LASER_WEAPON,
+        "open",
+        [notice.event_id],
+        notice.published_at,
+        notice.source_url,
+        current_stage=EventType.TENDER,
+    )
+    result = make_result(
+        state=StateBundle(events=[notice], projects=[item])
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+    opportunity = text.split("### 🟢 可投标机会", 1)[1].split(
+        "### 🟡 需核实确认", 1
+    )[0]
+    confirmation = text.split("### 🟡 需核实确认", 1)[1].split(
+        "### 🔵 结果与行业动态", 1
+    )[0]
+
+    assert "无人机激光反制系统" not in opportunity
+    assert "无人机激光反制系统" in confirmation
+    assert "待确认：投标截止时间" in confirmation
 
 
 def test_short_report_marks_changed_old_financing_as_historical_backfill() -> None:
@@ -717,7 +823,7 @@ def test_short_report_keeps_financing_and_tender_candidates_in_separate_sections
     assert "无人机激光反制设备" not in financing_section
     assert "无人机激光反制设备" in tender_section
     assert "光邮星空" not in tender_section
-    assert "[聚合线索](https://shanghai.jianyu360.cn/item)" in tender_section
+    assert "[查看聚合线索](https://shanghai.jianyu360.cn/item)" in tender_section
     assert "采购联系人" not in text
     assert "采购电话" not in text
 
@@ -1712,8 +1818,16 @@ def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None
                 "category_hint": "commercial_space_financing",
                 "organization": None,
                 "published_at": None,
+                "event_type": None,
                 "amount": None,
+                "awarded_supplier": None,
+                "awarded_amount": None,
                 "financing_round": None,
+                "registration_deadline": None,
+                "bid_submission_deadline": None,
+                "opening_deadline": None,
+                "deadline_precision": {},
+                "deadline_evidence_fields": [],
                 "evidence_count": 0,
             "stage": "persisted",
             "status": "pending",
@@ -2417,7 +2531,7 @@ def test_cli_backfill_mode_allows_40_query_budget(cli_deps) -> None:
     assert observed == [("backfill", 40)]
 
 
-def test_cli_daily_mode_rejects_budget_over_12(cli_deps) -> None:
+def test_cli_daily_mode_rejects_budget_over_20(cli_deps) -> None:
     code = run_cli(
         [
             "--config",
@@ -2426,7 +2540,7 @@ def test_cli_daily_mode_rejects_budget_over_12(cli_deps) -> None:
             "--discovery-mode",
             "daily",
             "--max-queries",
-            "13",
+            "21",
         ],
         dependencies=cli_deps.dependencies,
     )

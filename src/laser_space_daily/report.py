@@ -60,6 +60,14 @@ class _ShortSignal:
     summary: str
     source_urls: tuple[str, ...]
     identity: str
+    event_type: EventType | None = None
+    registration_deadline: datetime | None = None
+    bid_submission_deadline: datetime | None = None
+    opening_deadline: datetime | None = None
+    deadline_precision: dict[str, str] | None = None
+    deadline_evidence_fields: tuple[str, ...] = ()
+    awarded_supplier: str = ""
+    awarded_amount: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,8 @@ class _ShortItem:
     daily: bool
     historical: bool
     followup: str | None = None
+    procurement_group: str | None = None
+    sort_at: datetime | None = None
 
 
 _CATEGORY_LABELS = {
@@ -598,13 +608,17 @@ def _render_short_document(
             for signal in financing_candidates
         ),
     ][:max_items]
-    procurement_items = [
+    procurement_pool = [
         *_short_verified_procurements(result),
         *(
             _short_signal_item(signal, summary_limit=summary_limit)
             for signal in procurement_candidates
         ),
-    ][:max_items]
+    ]
+    procurement_items = _select_procurement_items(
+        procurement_pool,
+        max_items=max_items,
+    )
 
     displayed = [*financing_items, *procurement_items]
     daily_financing = sum(
@@ -636,12 +650,7 @@ def _render_short_document(
             empty_text="过去24小时及滚动池内暂无可展示的融资信息。",
             statistics_label="融资统计",
         ),
-        _short_section(
-            "二、招标采购情况",
-            procurement_items,
-            empty_text="过去24小时及滚动池内暂无可展示的招标采购信息。",
-            statistics_label="招标统计",
-        ),
+        _short_procurement_section(procurement_items),
         _short_other_dynamics(procurement_items),
     ]
     if include_followups:
@@ -838,45 +847,90 @@ def _short_verified_procurements(result: RunResult) -> list[_ShortItem]:
             source_url = value.latest_source_url or (
                 latest.source_url if latest is not None else ""
             )
-            details = [
-                f"时间：{_format_date(published_at)}",
-                f"方向：{_CATEGORY_LABELS[value.category]}",
-                f"采购方：{_safe_text(value.organization)}",
-                (
-                    "状态："
-                    + _STATUS_LABELS.get(
-                        value.status,
-                        _safe_text(value.status),
-                    )
+            event_type = latest.event_type if latest is not None else value.current_stage
+            group, bid_deadline = _verified_project_procurement_group(
+                value,
+                event_type=event_type,
+                now=result.window_end,
+            )
+            status_text = _STATUS_LABELS.get(
+                value.status,
+                _safe_text(value.status),
+            )
+            lines = _procurement_item_lines(
+                title=value.name,
+                summary="",
+                organization=value.organization,
+                category=value.category,
+                group=group,
+                status_text=status_text,
+                published_at=published_at,
+                bid_deadline=bid_deadline,
+                amount=value.amount or "",
+                awarded_supplier=(
+                    latest.analysis.awarded_supplier
+                    if latest is not None and latest.analysis is not None
+                    else None
                 ),
-            ]
-            if value.amount:
-                details.append(f"金额：{_safe_text(value.amount)}")
-            deadline = _deadline_text(value)
-            if deadline:
-                details.append(f"截止：{deadline}")
-            title = value.name
+                awarded_amount=(
+                    latest.analysis.awarded_amount
+                    if latest is not None and latest.analysis is not None
+                    else None
+                ),
+                trust_label=label,
+                source_url=source_url,
+                event_type=event_type,
+                source_is_aggregator=False,
+                now=result.window_end,
+                deadline_supported=(
+                    "bid_submission" in value.deadline_evidence
+                ),
+            )
             category = value.category
         else:
             source_url = value.source_url
-            details = [
-                f"时间：{_format_date(value.published_at)}",
-                f"方向：{_CATEGORY_LABELS[value.category]}",
-                f"采购方：{_safe_text(value.organization)}",
-                f"状态：{_EVENT_LABELS[value.event_type]}",
-            ]
-            if value.analysis and value.analysis.amount:
-                details.append(f"金额：{_safe_text(value.analysis.amount)}")
-            title = value.title
-            category = value.category
-        lines = [
-            f"- **【{label}】{_safe_text(title)}**",
-            "  - " + "；".join(details),
-        ]
-        if source_url:
-            lines.append(
-                "  - 来源：" + _link("官方原始公告", source_url)
+            group, bid_deadline = _verified_event_procurement_group(
+                value,
+                now=result.window_end,
             )
+            lines = _procurement_item_lines(
+                title=value.title,
+                summary="",
+                organization=value.organization,
+                category=value.category,
+                group=group,
+                status_text=_EVENT_LABELS[value.event_type],
+                published_at=value.published_at,
+                bid_deadline=bid_deadline,
+                amount=(
+                    value.analysis.amount
+                    if value.analysis is not None and value.analysis.amount
+                    else ""
+                ),
+                awarded_supplier=(
+                    value.analysis.awarded_supplier
+                    if value.analysis is not None
+                    else None
+                ),
+                awarded_amount=(
+                    value.analysis.awarded_amount
+                    if value.analysis is not None
+                    else None
+                ),
+                trust_label=label,
+                source_url=source_url,
+                event_type=value.event_type,
+                source_is_aggregator=False,
+                now=result.window_end,
+                deadline_supported=(
+                    value.analysis is not None
+                    and any(
+                        evidence.field == "bid_submission_deadline"
+                        for evidence in value.analysis.evidence
+                    )
+                ),
+            )
+            category = value.category
         items.append(
             _ShortItem(
                 lines=tuple(lines),
@@ -885,9 +939,296 @@ def _short_verified_procurements(result: RunResult) -> list[_ShortItem]:
                 strict=True,
                 daily=daily,
                 historical=historical,
+                procurement_group=group,
+                sort_at=bid_deadline or published_at,
             )
         )
     return items
+
+
+_PROCUREMENT_ACTIONABLE_TYPES = {
+    EventType.TENDER,
+    EventType.INQUIRY,
+    EventType.COMPARISON,
+    EventType.REBID,
+    EventType.CHANGE,
+    EventType.EXTENSION,
+}
+_PROCUREMENT_RESULT_TYPES = {
+    EventType.PROCUREMENT_INTENTION,
+    EventType.CANDIDATE,
+    EventType.AWARD,
+    EventType.FAILED,
+    EventType.TERMINATION,
+}
+
+
+def _verified_project_procurement_group(
+    project: Project,
+    *,
+    event_type: EventType | None,
+    now: datetime,
+) -> tuple[str, datetime | None]:
+    deadline = project.deadlines.get("bid_submission")
+    precision = project.deadline_precision.get("bid_submission")
+    evidence = project.deadline_evidence.get("bid_submission")
+    if event_type in _PROCUREMENT_RESULT_TYPES or project.status in {
+        "evaluating",
+        "awarded",
+        "terminated",
+        "failed",
+        "completed",
+        "closed",
+    }:
+        return "results", deadline
+    if deadline is not None and precision is not None:
+        if not deadline_is_current(deadline, precision, now):
+            return "results", deadline
+        if evidence is not None and event_type in _PROCUREMENT_ACTIONABLE_TYPES:
+            return "opportunities", deadline
+    if event_type in _PROCUREMENT_ACTIONABLE_TYPES or project.status in {
+        "upcoming",
+        "open",
+    }:
+        return "confirmation", deadline
+    return "results", deadline
+
+
+def _verified_event_procurement_group(
+    event: Event,
+    *,
+    now: datetime,
+) -> tuple[str, datetime | None]:
+    analysis = event.analysis
+    deadline = analysis.bid_submission_deadline if analysis is not None else None
+    precision = (
+        analysis.deadline_precision.get("bid_submission")
+        if analysis is not None
+        else None
+    )
+    evidence_fields = (
+        {item.field for item in analysis.evidence}
+        if analysis is not None
+        else set()
+    )
+    if event.event_type in _PROCUREMENT_RESULT_TYPES:
+        return "results", deadline
+    if deadline is not None and precision is not None:
+        if not deadline_is_current(deadline, precision, now):
+            return "results", deadline
+        if (
+            "bid_submission_deadline" in evidence_fields
+            and event.event_type in _PROCUREMENT_ACTIONABLE_TYPES
+        ):
+            return "opportunities", deadline
+    if event.event_type in _PROCUREMENT_ACTIONABLE_TYPES:
+        return "confirmation", deadline
+    return "results", deadline
+
+
+def _procurement_item_lines(
+    *,
+    title: str,
+    summary: str,
+    organization: str,
+    category: Category,
+    group: str,
+    status_text: str,
+    published_at: datetime | None,
+    bid_deadline: datetime | None,
+    amount: str,
+    awarded_supplier: str | None,
+    awarded_amount: str | None,
+    trust_label: str,
+    source_url: str,
+    event_type: EventType | None,
+    source_is_aggregator: bool,
+    now: datetime,
+    deadline_supported: bool,
+) -> list[str]:
+    clean_title = _clean_procurement_title(title)
+    trust = "已核实" if trust_label.startswith("已核实") else trust_label
+    lines = [f"- **{clean_title}**"]
+    matter_summary = _procurement_matter_summary(
+        title=clean_title,
+        summary=summary,
+        event_type=event_type,
+        status_text=status_text,
+    )
+    if matter_summary:
+        lines.append(f"  - 摘要：{matter_summary}")
+    known = [
+        "采购方："
+        + (_safe_text(organization) if organization else "需核实确认")
+    ]
+    known.append(f"方向：{_CATEGORY_LABELS[category]}")
+    lines.append("  - " + "｜".join(known))
+
+    if group == "opportunities" and bid_deadline is not None:
+        remaining = _remaining_deadline_text(bid_deadline, now)
+        lines.append(
+            "  - "
+            + f"投标截止：{_format_datetime(bid_deadline)}"
+            + f"｜剩余：{remaining}"
+        )
+        optional = [
+            "预算/最高限价："
+            + (_safe_text(amount) if amount else "需核实确认")
+        ]
+        optional.append(f"可信：{trust}")
+        lines.append("  - " + "｜".join(optional))
+    elif group == "confirmation":
+        stage = _EVENT_LABELS.get(event_type, "阶段待确认")
+        lines.append(f"  - 疑似阶段：{stage}｜可信：{trust}")
+        lines.append(
+            "  - 预算/最高限价："
+            + (_safe_text(amount) if amount else "需核实确认")
+            + "｜投标截止："
+            + (
+                _format_datetime(bid_deadline)
+                if bid_deadline is not None and deadline_supported
+                else "需核实确认"
+            )
+        )
+        missing = []
+        if not organization:
+            missing.append("采购方")
+        if bid_deadline is None:
+            missing.append("投标截止时间")
+        elif not deadline_supported:
+            missing.append("投标截止时间证据")
+        if source_is_aggregator:
+            missing.append("官方原始公告")
+        if event_type is None:
+            missing.append("公告阶段")
+        if not missing:
+            missing.append("是否仍可投标")
+        lines.append("  - 待确认：" + "、".join(missing))
+    else:
+        date_text = (
+            _format_date(published_at)
+            if published_at is not None
+            else "待确认"
+        )
+        lines.append(
+            "  - "
+            + f"结果：{_safe_text(status_text)}"
+            + f"｜公示日期：{date_text}"
+        )
+        result_details = [
+            "成交供应商："
+            + (
+                _safe_text(awarded_supplier)
+                if awarded_supplier
+                else "需核实确认"
+            )
+        ]
+        result_amount = awarded_amount or (
+            amount if event_type is EventType.AWARD else ""
+        )
+        result_details.append(
+            "中标/成交金额："
+            + (
+                _safe_text(result_amount)
+                if result_amount
+                else "需核实确认"
+            )
+        )
+        result_details.append(f"可信：{trust}")
+        lines.append("  - " + "｜".join(result_details))
+
+    if source_url:
+        if source_is_aggregator:
+            source_label = "查看聚合线索"
+        elif group == "results":
+            source_label = "查看结果公告"
+        else:
+            source_label = "查看官方公告"
+        lines.append("  - " + _link(source_label, source_url))
+    return lines
+
+
+def _procurement_matter_summary(
+    *,
+    title: str,
+    summary: str,
+    event_type: EventType | None,
+    status_text: str,
+) -> str:
+    extracted = re.search(
+        r"(?:采购内容|采购需求|采购标的|项目内容|项目概况)"
+        r"[：:]\s*([^。；;\n]{4,90})",
+        summary,
+    )
+    if extracted:
+        return _safe_text(f"采购内容：{extracted.group(1).strip()}。")
+
+    subject = title
+    lifecycle_suffixes = (
+        "单一来源采购成交结果公告",
+        "单一来源成交结果公告",
+        "单一来源采购成交公告",
+        "单一来源成交公告",
+        "中标候选人公示",
+        "中标结果公告",
+        "成交结果公告",
+        "中标公告",
+        "成交公告",
+        "重新招标公告",
+        "竞争性磋商公告",
+        "竞争性谈判公告",
+        "询价公告",
+        "比选公告",
+        "招标公告",
+        "采购公告",
+        "废标公告",
+        "流标公告",
+        "终止公告",
+    )
+    for suffix in lifecycle_suffixes:
+        if subject.endswith(suffix):
+            subject = subject[: -len(suffix)].rstrip(" -｜|_：:")
+            break
+    parts = [f"事项：{subject or title}"]
+    methods = (
+        ("单一来源", "单一来源"),
+        ("公开招标", "公开招标"),
+        ("竞争性磋商", "竞争性磋商"),
+        ("竞争性谈判", "竞争性谈判"),
+        ("询价", "询价"),
+        ("比选", "比选"),
+    )
+    method = next((label for token, label in methods if token in title), None)
+    if method:
+        parts.append(f"方式：{method}")
+    stage = _EVENT_LABELS.get(event_type, status_text)
+    if "成交" in title and event_type is EventType.AWARD:
+        stage = "成交结果"
+    if stage:
+        parts.append(f"当前：{_safe_text(stage)}")
+    return _safe_text("；".join(parts) + "。")
+
+
+def _remaining_deadline_text(deadline: datetime, now: datetime) -> str:
+    days = (
+        _as_beijing(deadline).date() - _as_beijing(now).date()
+    ).days
+    if days <= 0:
+        return "今日截止"
+    return f"{days}天"
+
+
+def _clean_procurement_title(value: str) -> str:
+    text = " ".join(value.replace("_", " ").split())
+    text = re.sub(
+        r"\s*[-｜|]\s*(?:官网[-｜|]?)?(?:[^-｜|]{0,30})?"
+        r"(?:招投标|招标采购|公共服务平台|招标网|采购网).*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s*[-｜|]\s*(?:官网|公告详情|详情页).*$", "", text)
+    return _safe_text(text.strip(" -｜|"))
 
 
 def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
@@ -951,6 +1292,16 @@ def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
                 ),
                 source_urls=source_urls,
                 identity=key,
+                event_type=representative.event_type,
+                registration_deadline=representative.registration_deadline,
+                bid_submission_deadline=representative.bid_submission_deadline,
+                opening_deadline=representative.opening_deadline,
+                deadline_precision=dict(representative.deadline_precision),
+                deadline_evidence_fields=tuple(
+                    representative.deadline_evidence_fields
+                ),
+                awarded_supplier=representative.awarded_supplier or "",
+                awarded_amount=representative.awarded_amount or "",
             )
         )
 
@@ -1144,6 +1495,14 @@ def _combine_short_financing_signals(
         summary=representative.summary or left.summary or right.summary,
         source_urls=source_urls,
         identity=f"{left.identity}||{right.identity}",
+        event_type=representative.event_type,
+        registration_deadline=representative.registration_deadline,
+        bid_submission_deadline=representative.bid_submission_deadline,
+        opening_deadline=representative.opening_deadline,
+        deadline_precision=representative.deadline_precision,
+        deadline_evidence_fields=representative.deadline_evidence_fields,
+        awarded_supplier=representative.awarded_supplier,
+        awarded_amount=representative.awarded_amount,
     )
 
 
@@ -1153,20 +1512,63 @@ def _short_signal_item(
     summary_limit: int,
 ) -> _ShortItem:
     financing = signal.category is Category.COMMERCIAL_SPACE_FINANCING
+    if not financing:
+        group = (
+            "results"
+            if signal.event_type in _PROCUREMENT_RESULT_TYPES
+            else "confirmation"
+        )
+        source_url = signal.source_urls[0] if signal.source_urls else ""
+        source_is_aggregator = bool(
+            source_url and _looks_like_aggregator(source_url)
+        )
+        lines = _procurement_item_lines(
+            title=signal.title,
+            summary=signal.summary,
+            organization=signal.organization,
+            category=signal.category,
+            group=group,
+            status_text=_EVENT_LABELS.get(
+                signal.event_type,
+                "阶段待确认",
+            ),
+            published_at=signal.published_at,
+            bid_deadline=signal.bid_submission_deadline,
+            amount=signal.amount,
+            awarded_supplier=signal.awarded_supplier or None,
+            awarded_amount=signal.awarded_amount or None,
+            trust_label=signal.label,
+            source_url=source_url,
+            event_type=signal.event_type,
+            source_is_aggregator=source_is_aggregator,
+            now=signal.published_at or datetime(1970, 1, 1, tzinfo=UTC),
+            deadline_supported=(
+                "bid_submission_deadline"
+                in signal.deadline_evidence_fields
+            ),
+        )
+        subject = signal.organization or _clean_procurement_title(signal.title)
+        return _ShortItem(
+            lines=tuple(lines),
+            category=signal.category,
+            status=signal.label,
+            strict=False,
+            daily=False,
+            historical=False,
+            followup=f"- 核实{_safe_text(subject)}的官方采购原始公告和投标截止时间。",
+            procurement_group=group,
+            sort_at=signal.bid_submission_deadline or signal.published_at,
+        )
+
     title = _safe_text(signal.title)
     lines = [f"- **【{signal.label}】{title}**"]
     details: list[str] = []
     if signal.published_at is not None:
         details.append(f"时间：{_format_date(signal.published_at)}")
-    if financing:
-        if signal.organization:
-            details.append(f"企业：{_safe_text(signal.organization)}")
-        if signal.round_name:
-            details.append(f"轮次：{_safe_text(signal.round_name)}")
-    else:
-        details.append(f"方向：{_CATEGORY_LABELS[signal.category]}")
-        if signal.organization:
-            details.append(f"采购方：{_safe_text(signal.organization)}")
+    if signal.organization:
+        details.append(f"企业：{_safe_text(signal.organization)}")
+    if signal.round_name:
+        details.append(f"轮次：{_safe_text(signal.round_name)}")
     if signal.amount:
         details.append(f"明确金额：{_safe_text(signal.amount)}")
     summary = _short_summary(signal.summary, summary_limit)
@@ -1178,11 +1580,7 @@ def _short_signal_item(
     if source_links:
         lines.append("  - 来源：" + "｜".join(source_links))
     subject = signal.organization or signal.title
-    followup = (
-        f"- 核实{_safe_text(subject)}的企业或投资方官方融资公告。"
-        if financing
-        else f"- 查找{_safe_text(subject)}的官方采购原始公告。"
-    )
+    followup = f"- 核实{_safe_text(subject)}的企业或投资方官方融资公告。"
     return _ShortItem(
         lines=tuple(lines),
         category=signal.category,
@@ -1251,6 +1649,69 @@ def _short_summary(value: str, limit: int) -> str:
     if len(text) > limit:
         text = text[: max(1, limit - 1)].rstrip(" ，,。；;：:") + "…"
     return _safe_text(text)
+
+
+def _select_procurement_items(
+    items: list[_ShortItem],
+    *,
+    max_items: int,
+) -> list[_ShortItem]:
+    selected: list[_ShortItem] = []
+    for group in ("opportunities", "confirmation", "results"):
+        rows = [item for item in items if item.procurement_group == group]
+        rows.sort(
+            key=lambda item: (
+                (
+                    _as_beijing(item.sort_at).timestamp()
+                    if item.sort_at is not None
+                    else float("inf")
+                )
+                if group == "opportunities"
+                else -(
+                    _as_beijing(item.sort_at).timestamp()
+                    if item.sort_at is not None
+                    else 0
+                )
+            )
+        )
+        selected.extend(rows[:max_items])
+    return selected
+
+
+def _short_procurement_section(items: list[_ShortItem]) -> str:
+    definitions = (
+        (
+            "opportunities",
+            "### 🟢 可投标机会",
+            "- 暂无已确认且仍在投标期内的机会。",
+        ),
+        (
+            "confirmation",
+            "### 🟡 需核实确认",
+            "- 暂无需要人工确认的行动线索。",
+        ),
+        (
+            "results",
+            "### 🔵 结果与行业动态",
+            "- 暂无新的结果或行业动态。",
+        ),
+    )
+    blocks = ["## 二、招标采购情况"]
+    for group, heading, empty_text in definitions:
+        rows = [item for item in items if item.procurement_group == group]
+        lines = [line for item in rows for line in item.lines]
+        blocks.append(heading + "\n" + "\n".join(lines or [empty_text]))
+    strict = sum(item.strict for item in items)
+    high_confidence = sum(item.status == "高可信待核实" for item in items)
+    candidates = sum(item.status == "候选线索" for item in items)
+    blocks.append(
+        (
+            f"**招标统计：已核实 {strict} 条；"
+            f"高可信待核实 {high_confidence} 条；"
+            f"候选线索 {candidates} 条。**"
+        )
+    )
+    return "\n\n".join(blocks)
 
 
 def _short_section(

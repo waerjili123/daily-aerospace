@@ -8,9 +8,9 @@ bocha:
   timeout_seconds: 30
 discovery:
   mode: daily
-  max_queries: 12
-  daily_search_budget: 12
-  daily_elastic_budget: 3
+  max_queries: 20
+  daily_search_budget: 20
+  daily_elastic_budget: 5
   backfill_search_budget: 40
   verification_pool_days: 90
   verification_max_targets: 3

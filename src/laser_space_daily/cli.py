@@ -161,8 +161,10 @@ def build_pipeline(settings: Settings) -> Pipeline:
         client=model_client,
         search_provider=search_provider,
         fallback_planner=QueryPlanner(
-            max_queries=min(8, settings.discovery.max_queries),
-            financing_domains=registry.financing_domains,
+            max_queries=min(20, settings.discovery.max_queries),
+            financing_domains=(
+                settings.financing_sources.independent_media_domains
+            ),
         ),
         model=settings.deepseek.pro_model,
         mode=settings.discovery.mode,

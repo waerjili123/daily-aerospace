@@ -108,8 +108,8 @@ class VerificationFollowupPlanner:
         max_targets: int = 3,
         stop_after_no_new: int = 2,
     ) -> None:
-        if not 0 <= elastic_budget <= 3:
-            raise ValueError("verification elastic budget must be between 0 and 3")
+        if not 0 <= elastic_budget <= 5:
+            raise ValueError("verification elastic budget must be between 0 and 5")
         if not 30 <= pool_days <= 90:
             raise ValueError("verification pool must be between 30 and 90 days")
         if not 1 <= max_targets <= 3:

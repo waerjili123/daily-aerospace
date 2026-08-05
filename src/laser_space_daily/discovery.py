@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import re
-from typing import Iterable, Literal
+from typing import Callable, Iterable, Literal
 import unicodedata
 from urllib.parse import unquote_plus, urljoin, urlsplit, urlunsplit
 
@@ -19,7 +19,14 @@ from .deadlines import deadline_is_expired
 from .timebox import beijing_now
 
 
-QueryKind = Literal["incremental", "project_followup", "rolling_recheck", "overdue_result"]
+QueryKind = Literal[
+    "incremental",
+    "procurement_open",
+    "procurement_result",
+    "project_followup",
+    "rolling_recheck",
+    "overdue_result",
+]
 SearchFailureReason = Literal[
     "authentication",
     "quota_or_rate_limit",
@@ -100,26 +107,97 @@ class QueryPlanner:
     """Build a bounded search queue that preserves category coverage first."""
 
     _DISCOVERY_SCOPE = "中国 境内 -人工智能新闻 -AI新闻"
-    _INCREMENTAL_QUERIES = (
+    _PROCUREMENT_QUERIES = (
         (
+            "procurement_open",
             Category.LASER_COMMUNICATION,
             "激光通信 空间激光通信 星间激光通信 激光通信终端 "
-            "采购 招标 中标 结果 变更 延期 终止",
+            "采购公告 招标公告 询价 比选 竞争性谈判 竞争性磋商 重新招标",
+        ),
+        (
+            "procurement_open",
+            Category.LASER_COMMUNICATION,
+            "激光通信 激光通信终端 采购公告 招标公告 "
+            "中国政府采购网 公共资源交易中心 军队采购网",
+        ),
+        (
+            "procurement_result",
+            Category.LASER_COMMUNICATION,
+            "激光通信 激光通信终端 中标候选人 中标公告 成交公告 "
+            "结果公告 废标 流标 终止",
+        ),
+        (
+            "procurement_result",
+            Category.LASER_COMMUNICATION,
+            "激光通信 激光通信终端 中标 成交 结果公示 "
+            "中国政府采购网 公共资源交易中心 军队采购网",
+        ),
+        (
+            "procurement_open",
+            Category.LASER_WEAPON,
+            "激光武器 高能激光 定向能激光 激光反无人机 激光反制 "
+            "采购公告 招标公告 询价 比选 竞争性谈判 竞争性磋商 重新招标",
+        ),
+        (
+            "procurement_open",
+            Category.LASER_WEAPON,
+            "激光反无人机 激光反制 定向能 采购公告 招标公告 "
+            "中国政府采购网 公共资源交易中心 军队采购网",
+        ),
+        (
+            "procurement_result",
+            Category.LASER_WEAPON,
+            "激光武器 激光反无人机 激光反制 中标候选人 中标公告 "
+            "成交公告 结果公告 废标 流标 终止",
+        ),
+        (
+            "procurement_result",
+            Category.LASER_WEAPON,
+            "激光反无人机 激光反制 定向能 中标 成交 结果公示 "
+            "中国政府采购网 公共资源交易中心 军队采购网",
+        ),
+        (
+            "procurement_open",
+            Category.EO_TURRET,
+            "光电转塔 光电吊舱 机载光电 舰载光电 无人机光电载荷 "
+            "采购公告 招标公告 询价 比选 竞争性谈判 竞争性磋商 重新招标",
+        ),
+        (
+            "procurement_open",
+            Category.EO_TURRET,
+            "光电转塔 光电吊舱 光电载荷 采购公告 招标公告 "
+            "中国政府采购网 公共资源交易中心 军队采购网",
+        ),
+        (
+            "procurement_result",
+            Category.EO_TURRET,
+            "光电转塔 光电吊舱 光电载荷 中标候选人 中标公告 "
+            "成交公告 结果公告 废标 流标 终止",
+        ),
+        (
+            "procurement_result",
+            Category.EO_TURRET,
+            "光电转塔 光电吊舱 光电载荷 中标 成交 结果公示 "
+            "中国政府采购网 公共资源交易中心 军队采购网",
+        ),
+    )
+    _FINANCING_QUERY = (
+        Category.COMMERCIAL_SPACE_FINANCING,
+        "商业航天 融资 运载火箭 卫星公司 卫星制造 卫星运营 "
+        "股权投资 战略投资 增资 天使轮 种子轮 Pre-A轮 A轮 B轮",
+    )
+    _FALLBACK_TRACKING_QUERIES = (
+        (
+            Category.LASER_COMMUNICATION,
+            "激光通信项目 变更 延期 截止时间 重新招标",
         ),
         (
             Category.LASER_WEAPON,
-            "激光武器 高能激光 定向能激光 激光反无人机 激光反制 "
-            "采购 招标 中标 结果 变更 延期 终止",
+            "激光反无人机 定向能项目 变更 延期 截止时间 重新招标",
         ),
         (
             Category.EO_TURRET,
-            "光电转塔 光电吊舱 机载光电 舰载光电 无人机光电载荷 "
-            "采购 招标 中标 结果 变更 延期 终止",
-        ),
-        (
-            Category.COMMERCIAL_SPACE_FINANCING,
-            "商业航天 融资 运载火箭 卫星公司 卫星制造 卫星运营 "
-            "股权投资 战略投资 增资 天使轮 种子轮 Pre-A轮 A轮 B轮",
+            "光电转塔 光电吊舱项目 变更 延期 截止时间 重新招标",
         ),
     )
     _INACTIVE_STATUSES = frozenset({"completed", "closed", "cancelled", "terminated"})
@@ -138,18 +216,55 @@ class QueryPlanner:
         """Return category queries then three lifecycle follow-ups per active project."""
         if not isinstance(now, datetime):
             raise TypeError("planner now must be a datetime")
-        queries = [
-            SearchQuery(kind="incremental", text=text, category=category)
-            for category, text in self._INCREMENTAL_QUERIES
+        procurement_queries = [
+            SearchQuery(kind=kind, text=text, category=category)
+            for kind, category, text in self._PROCUREMENT_QUERIES
         ]
-        queries.extend(
+        broad_open = [
+            query
+            for query in procurement_queries
+            if query.kind == "procurement_open"
+            and "中国政府采购网" not in query.text
+        ]
+        official_open = [
+            query
+            for query in procurement_queries
+            if query.kind == "procurement_open"
+            and "中国政府采购网" in query.text
+        ]
+        broad_results = [
+            query
+            for query in procurement_queries
+            if query.kind == "procurement_result"
+            and "中国政府采购网" not in query.text
+        ]
+        official_results = [
+            query
+            for query in procurement_queries
+            if query.kind == "procurement_result"
+            and "中国政府采购网" in query.text
+        ]
+        financing_query = SearchQuery(
+            kind="incremental",
+            text=self._FINANCING_QUERY[1],
+            category=self._FINANCING_QUERY[0],
+        )
+        financing_queries = [
             SearchQuery(
                 kind="incremental",
                 text=f"site:{domain} 商业航天 融资 投资 增资",
                 category=Category.COMMERCIAL_SPACE_FINANCING,
             )
             for domain in self.financing_domains
-        )
+        ]
+        queries = [
+            *broad_open,
+            financing_query,
+            *financing_queries,
+            *official_open,
+            *broad_results,
+            *official_results,
+        ]
         for project in projects:
             if project.status.lower() in self._INACTIVE_STATUSES:
                 continue
@@ -178,6 +293,14 @@ class QueryPlanner:
                         category=project.category,
                     )
                 )
+        queries.extend(
+            SearchQuery(
+                kind="rolling_recheck",
+                text=text,
+                category=category,
+            )
+            for category, text in self._FALLBACK_TRACKING_QUERIES
+        )
         return [
             SearchQuery(
                 kind=query.kind,
@@ -585,6 +708,7 @@ def select_search_candidates(
     maximum: int = 10,
     fallback_max_days: int = 30,
     preferred_domains: Iterable[str] = (),
+    balance_business_buckets: bool = False,
 ) -> CandidateSelection:
     """Apply the approved shape, relevance and date gates to web-search rows."""
     if now.tzinfo is None:
@@ -687,17 +811,36 @@ def select_search_candidates(
     fallback.sort(key=candidate_rank)
     unknown.sort(key=candidate_rank)
 
-    selected = recent[:maximum]
-    fallback_used: list[tuple[Candidate, int]] = []
-    unknown_used: list[tuple[Candidate, int]] = []
-    if len(selected) < minimum:
-        fallback_used = fallback[: min(minimum - len(selected), maximum - len(selected))]
-        selected.extend(fallback_used)
-    if len(selected) < minimum:
-        unknown_used = unknown[
-            : min(2, minimum - len(selected), maximum - len(selected))
+    if balance_business_buckets:
+        selected = _balanced_business_selection(
+            [*recent, *fallback, *unknown],
+            maximum=maximum,
+        )
+        selected_urls = {row.url for row, _score in selected}
+        fallback_used = [
+            item for item in fallback if item[0].url in selected_urls
         ]
-        selected.extend(unknown_used)
+        unknown_used = [
+            item for item in unknown if item[0].url in selected_urls
+        ]
+        recent_used_count = sum(
+            item[0].url in selected_urls for item in recent
+        )
+    else:
+        selected = recent[:maximum]
+        fallback_used = []
+        unknown_used = []
+        if len(selected) < minimum:
+            fallback_used = fallback[
+                : min(minimum - len(selected), maximum - len(selected))
+            ]
+            selected.extend(fallback_used)
+        if len(selected) < minimum:
+            unknown_used = unknown[
+                : min(2, minimum - len(selected), maximum - len(selected))
+            ]
+            selected.extend(unknown_used)
+        recent_used_count = min(len(recent), maximum)
 
     corroborating_candidates = tuple(
         candidate
@@ -714,12 +857,68 @@ def select_search_candidates(
         raw_search_count=len(input_rows),
         valid_shape_count=len(valid),
         relevance_pass_count=len(relevant),
-        recent_7d_count=min(len(recent), maximum),
+        recent_7d_count=recent_used_count,
         fallback_8_30d_count=len(fallback_used),
         unknown_date_count=len(unknown_used),
         filter_rejected_count=len(valid) - len(relevant),
         event_duplicate_count=event_duplicate_count,
     )
+
+
+_PROCUREMENT_CATEGORIES = (
+    Category.LASER_COMMUNICATION,
+    Category.LASER_WEAPON,
+    Category.EO_TURRET,
+)
+_OPEN_SEARCH_STAGES = frozenset({"intention", "tender", "change"})
+_RESULT_SEARCH_STAGES = frozenset(
+    {"candidate", "award", "termination", "delivery"}
+)
+
+
+def _balanced_business_selection(
+    ranked: list[tuple[Candidate, int]],
+    *,
+    maximum: int,
+) -> list[tuple[Candidate, int]]:
+    """Reserve daily capacity for financing, open bids and result notices."""
+    selected: list[tuple[Candidate, int]] = []
+    selected_urls: set[str] = set()
+
+    def take(predicate: Callable[[Candidate], bool], limit: int) -> None:
+        for item in ranked:
+            if len(selected) >= maximum or limit <= 0:
+                return
+            row, _score = item
+            if row.url in selected_urls or not predicate(row):
+                continue
+            selected.append(item)
+            selected_urls.add(row.url)
+            limit -= 1
+
+    take(
+        lambda row: row.category_hint
+        is Category.COMMERCIAL_SPACE_FINANCING,
+        3,
+    )
+    for category in _PROCUREMENT_CATEGORIES:
+        take(
+            lambda row, category=category: (
+                row.category_hint is category
+                and _event_stage(row) in _OPEN_SEARCH_STAGES
+            ),
+            2,
+        )
+    for category in _PROCUREMENT_CATEGORIES:
+        take(
+            lambda row, category=category: (
+                row.category_hint is category
+                and _event_stage(row) in _RESULT_SEARCH_STAGES
+            ),
+            2,
+        )
+    take(lambda _row: True, maximum - len(selected))
+    return selected
 
 
 def _select_corroborating_candidates(

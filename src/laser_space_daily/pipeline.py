@@ -67,8 +67,16 @@ class CandidateDiagnostic(DomainModel):
     category_hint: Category | None = None
     organization: str | None = None
     published_at: datetime | None = None
+    event_type: EventType | None = None
     amount: str | None = None
+    awarded_supplier: str | None = None
+    awarded_amount: str | None = None
     financing_round: str | None = None
+    registration_deadline: datetime | None = None
+    bid_submission_deadline: datetime | None = None
+    opening_deadline: datetime | None = None
+    deadline_precision: dict[str, str] = Field(default_factory=dict)
+    deadline_evidence_fields: list[str] = Field(default_factory=list)
     evidence_count: int = Field(default=0, ge=0)
     stage: str
     status: str
@@ -274,9 +282,10 @@ class Pipeline:
             search_rows,
             now,
             minimum=40 if is_backfill else 5,
-            maximum=40 if is_backfill else 10,
+            maximum=40 if is_backfill else 15,
             fallback_max_days=90 if is_backfill else 30,
             preferred_domains=preferred_financing_domains,
+            balance_business_buckets=not is_backfill,
         )
         metrics.raw_search_count = selection.raw_search_count
         metrics.valid_shape_count = selection.valid_shape_count
@@ -726,9 +735,45 @@ class Pipeline:
                     if analyzed is not None
                     else item.source_published_at
                 ),
+                event_type=(
+                    analyzed.event_type if analyzed is not None else None
+                ),
                 amount=analyzed.amount if analyzed is not None else None,
+                awarded_supplier=(
+                    analyzed.awarded_supplier if analyzed is not None else None
+                ),
+                awarded_amount=(
+                    analyzed.awarded_amount if analyzed is not None else None
+                ),
                 financing_round=(
                     analyzed.financing_round if analyzed is not None else None
+                ),
+                registration_deadline=(
+                    analyzed.registration_deadline
+                    if analyzed is not None
+                    else None
+                ),
+                bid_submission_deadline=(
+                    analyzed.bid_submission_deadline
+                    if analyzed is not None
+                    else None
+                ),
+                opening_deadline=(
+                    analyzed.opening_deadline if analyzed is not None else None
+                ),
+                deadline_precision=(
+                    dict(analyzed.deadline_precision)
+                    if analyzed is not None
+                    else {}
+                ),
+                deadline_evidence_fields=(
+                    sorted(
+                        evidence.field
+                        for evidence in analyzed.evidence
+                        if evidence.field.endswith("_deadline")
+                    )
+                    if analyzed is not None
+                    else []
                 ),
                 evidence_count=(
                     len(analyzed.evidence) if analyzed is not None else 0

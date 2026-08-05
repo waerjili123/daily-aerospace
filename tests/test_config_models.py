@@ -55,10 +55,10 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     assert "secrets.DINGTALK_SECRET" in workflow
     assert "concurrency:" in workflow
     assert document["on"]["workflow_dispatch"]["inputs"]["max_queries"] == {
-        "description": "Bocha hard query budget (daily <=12, backfill <=40)",
+        "description": "Bocha hard query budget (daily <=20, backfill <=40)",
         "type": "choice",
-        "options": ["4", "12", "40"],
-        "default": "12",
+        "options": ["4", "12", "20", "40"],
+        "default": "20",
     }
     assert document["on"]["workflow_dispatch"]["inputs"]["discovery_mode"] == {
         "description": "Daily incremental or one-time 90-day backfill",
@@ -89,7 +89,7 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
         "${{ github.event_name == 'schedule' && 'daily' || inputs.discovery_mode }}"
     )
     assert pipeline_step["env"]["MAX_QUERIES"] == (
-        "${{ github.event_name == 'schedule' && '12' || inputs.max_queries }}"
+        "${{ github.event_name == 'schedule' && '20' || inputs.max_queries }}"
     )
     assert pipeline_step["env"]["DELIVERY_MODE"] == (
         "${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}"
@@ -97,6 +97,11 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     guard_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Guard production branches"
     )
+    assert guard_step["env"]["DELIVERY_MODE"] == (
+        "${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}"
+    )
+    assert '"${DELIVERY_MODE}" == "dry_run"' in guard_step["run"]
+    assert '"${GITHUB_EVENT_NAME}" != "schedule"' in guard_step["run"]
     assert "refs/heads/main" in guard_step["run"]
     assert "refs/heads/codex/verification-promotion-20260728" in guard_step["run"]
     delivery_guard = _workflow_step(
@@ -152,9 +157,9 @@ def test_committed_config_contains_no_secret_values():
         "bocha": {"timeout_seconds": "30"},
         "discovery": {
             "mode": "daily",
-                "max_queries": "12",
-                "daily_search_budget": "12",
-                "daily_elastic_budget": "3",
+                "max_queries": "20",
+                "daily_search_budget": "20",
+                "daily_elastic_budget": "5",
                 "backfill_search_budget": "40",
                 "verification_pool_days": "90",
                 "verification_max_targets": "3",
@@ -402,17 +407,17 @@ def test_windows_use_beijing_time_and_calendar_months():
     assert rolling_start(now).isoformat() == "2026-04-22T07:30:00+08:00"
 
 
-def test_daily_base_plus_elastic_budget_never_exceeds_fifteen():
+def test_daily_base_plus_elastic_budget_never_exceeds_twenty_five():
     settings = DiscoverySettings(
-        daily_search_budget=12,
-        daily_elastic_budget=3,
+        daily_search_budget=20,
+        daily_elastic_budget=5,
     )
 
-    assert settings.daily_search_budget + settings.daily_elastic_budget == 15
-    with pytest.raises(ValidationError, match="less than or equal to 3"):
+    assert settings.daily_search_budget + settings.daily_elastic_budget == 25
+    with pytest.raises(ValidationError, match="less than or equal to 5"):
         DiscoverySettings(
-            daily_search_budget=12,
-            daily_elastic_budget=4,
+            daily_search_budget=20,
+            daily_elastic_budget=6,
         )
 
 
@@ -485,7 +490,7 @@ def test_production_financing_registry_is_explicit_and_used_by_pipeline(monkeypa
     pipeline = build_pipeline(settings)
     registry = pipeline._verifier._registry
 
-    assert pipeline._verification_followup.elastic_budget == 3
+    assert pipeline._verification_followup.elastic_budget == 5
     assert pipeline._verification_followup.pool_days == 90
 
     assert settings.financing_sources.official_company_domains["landspace.com"] == "蓝箭航天"

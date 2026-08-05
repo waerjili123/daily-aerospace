@@ -16,13 +16,14 @@ on:
           - "backfill"
         default: "daily"
       max_queries:
-        description: "Bocha hard query budget (daily <=12, backfill <=40)"
+        description: "Bocha hard query budget (daily <=20, backfill <=40)"
         type: choice
         options:
           - "4"
           - "12"
+          - "20"
           - "40"
-        default: "12"
+        default: "20"
       delivery_mode:
         description: "Generate only, send a gated test, or send a production report"
         type: choice
@@ -58,7 +59,13 @@ jobs:
 
       - name: Guard production branches
         shell: bash
+        env:
+          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
         run: |
+          if [[ "${GITHUB_EVENT_NAME}" != "schedule" && "${DELIVERY_MODE}" == "dry_run" ]]; then
+            echo "Safe dry-run allowed on ${GITHUB_REF}"
+            exit 0
+          fi
           case "${GITHUB_REF}" in
             refs/heads/main|refs/heads/codex/verification-promotion-20260728) ;;
             *) echo "Unsupported workflow branch: ${GITHUB_REF}" >&2; exit 1 ;;
@@ -91,7 +98,7 @@ jobs:
           DINGTALK_WEBHOOK: ${{ (github.event_name == 'schedule' || inputs.delivery_mode != 'dry_run') && secrets.DINGTALK_WEBHOOK || 'https://example.invalid/manual-dry-run' }}
           DINGTALK_SECRET: ${{ (github.event_name == 'schedule' || inputs.delivery_mode != 'dry_run') && secrets.DINGTALK_SECRET || 'unused-manual-dry-run-secret' }}
           DISCOVERY_MODE: ${{ github.event_name == 'schedule' && 'daily' || inputs.discovery_mode }}
-          MAX_QUERIES: ${{ github.event_name == 'schedule' && '12' || inputs.max_queries }}
+          MAX_QUERIES: ${{ github.event_name == 'schedule' && '20' || inputs.max_queries }}
           DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
         shell: bash
         run: |
