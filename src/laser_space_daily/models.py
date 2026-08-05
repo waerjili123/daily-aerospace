@@ -74,6 +74,8 @@ class AnalysisResult(DomainModel):
     project_codes: list[str] = Field(default_factory=list)
     amount: str | None = None
     amount_disclosed: bool | None = None
+    awarded_supplier: str | None = None
+    awarded_amount: str | None = None
     financing_round: str | None = None
     financing_subtype: Literal[
         "round_equity", "strategic", "capital_increase", "merger_acquisition"

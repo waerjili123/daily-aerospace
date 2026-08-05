@@ -399,6 +399,16 @@ class RuleFallbackAnalyzer:
             if category is not Category.COMMERCIAL_SPACE_FINANCING
             else {}
         )
+        awarded_supplier, awarded_supplier_quote = (
+            _extract_awarded_supplier(page.text)
+            if event_type is EventType.AWARD
+            else (None, None)
+        )
+        awarded_amount, awarded_amount_quote = (
+            _extract_awarded_amount(page.text)
+            if event_type is EventType.AWARD
+            else (None, None)
+        )
         evidence: list[Evidence] = []
         if in_china:
             country_quote = _domestic_subject_quote(
@@ -496,6 +506,22 @@ class RuleFallbackAnalyzer:
                     source_url=page.final_url,
                 )
             )
+        if awarded_supplier and awarded_supplier_quote:
+            evidence.append(
+                Evidence(
+                    field="awarded_supplier",
+                    quote=awarded_supplier_quote,
+                    source_url=page.final_url,
+                )
+            )
+        if awarded_amount and awarded_amount_quote:
+            evidence.append(
+                Evidence(
+                    field="awarded_amount",
+                    quote=awarded_amount_quote,
+                    source_url=page.final_url,
+                )
+            )
         for deadline_name, (_, _, quote) in deadlines.items():
             evidence.append(
                 Evidence(
@@ -514,6 +540,8 @@ class RuleFallbackAnalyzer:
             published_at=published_at,
             amount=amount,
             amount_disclosed=amount_disclosed,
+            awarded_supplier=awarded_supplier,
+            awarded_amount=awarded_amount,
             financing_round=financing_round,
             financing_subtype=(
                 "round_equity" if financing_round is not None else None
@@ -629,6 +657,8 @@ class ResilientAnalyzer:
             "event_type",
             "organization",
             "published_at",
+            "awarded_supplier",
+            "awarded_amount",
             "financing_round",
             "financing_subtype",
             "registration_deadline",
@@ -736,7 +766,14 @@ def guard_grounded_output(
         ):
             raise UngroundedOutput("evidence")
 
-    for field_name in ("organization", "amount", "financing_round", "business_area"):
+    for field_name in (
+        "organization",
+        "amount",
+        "awarded_supplier",
+        "awarded_amount",
+        "financing_round",
+        "business_area",
+    ):
         value = getattr(result, field_name)
         if value is not None and (
             not value.strip()
@@ -1003,6 +1040,36 @@ def _extract_organization(text: str) -> tuple[str | None, str | None]:
         return None, None
     value = match.group(1).strip()
     return value, match.group(0).strip()
+
+
+def _extract_awarded_supplier(text: str) -> tuple[str | None, str | None]:
+    match = re.search(
+        r"(?:中标|成交)(?:供应商|单位|人)\s*[:：]\s*"
+        r"([^\r\n。；;]{2,100})",
+        text,
+    )
+    if not match:
+        return None, None
+    value = re.split(
+        r"\s+(?:中标|成交)金额\s*[:：]",
+        match.group(1),
+        maxsplit=1,
+    )[0].strip(" ，,：:")
+    if not value or set(value) <= {"*", "-", "—"}:
+        return None, None
+    return value, match.group(0).strip()
+
+
+def _extract_awarded_amount(text: str) -> tuple[str | None, str | None]:
+    match = re.search(
+        r"(?:中标|成交)(?:总)?金额\s*[:：]\s*"
+        r"((?:人民币)?(?:近|超|逾|约|数)?\d+(?:\.\d+)?"
+        r"(?:亿元|万元|元|万|亿))",
+        text,
+    )
+    if not match:
+        return None, None
+    return match.group(1).strip(), match.group(0).strip()
 
 
 _FINANCING_COMPANY_ACTION = re.compile(

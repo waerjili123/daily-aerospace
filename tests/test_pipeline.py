@@ -387,6 +387,32 @@ def test_pipeline_routes_verified_and_pending(deps) -> None:
     assert diagnostics[rejected_url].source_grade is SourceGrade.C
 
 
+def test_pipeline_diagnostic_preserves_procurement_stage_and_deadline(deps) -> None:
+    deadline = NOW + timedelta(days=5)
+    analyzed = analysis(event_type=EventType.TENDER).model_copy(
+        update={
+            "bid_submission_deadline": deadline,
+            "deadline_precision": {"bid_submission": "minute"},
+            "evidence": [
+                Evidence(
+                    field="bid_submission_deadline",
+                    quote="投标截止时间：2026-07-27 09:30",
+                    source_url=OFFICIAL_URL,
+                )
+            ],
+        }
+    )
+    deps.analyzer.results[OFFICIAL_URL] = analyzed
+
+    result = Pipeline(**deps.as_kwargs()).run(NOW)
+
+    diagnostic = result.candidate_diagnostics[0]
+    assert diagnostic.event_type is EventType.TENDER
+    assert diagnostic.bid_submission_deadline == deadline
+    assert diagnostic.deadline_precision == {"bid_submission": "minute"}
+    assert diagnostic.deadline_evidence_fields == ["bid_submission_deadline"]
+
+
 def test_pipeline_analyzes_each_corroborating_source_before_verification(deps) -> None:
     deps.official_collector.rows = [candidate(), candidate(SECOND_URL)]
 
