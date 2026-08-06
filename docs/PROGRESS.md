@@ -5,13 +5,13 @@
 ## 当前结论
 
 ```text
-当前生产版本：检索扩量与招标短报版本已合并到 main（79617ca）
+当前生产版本：检索扩量、招标短报与原生调度重登记版本已合并到 main（72adc64）
 最近真实 dry-run：Actions #56 成功，144 条原始结果、9 条候选、1 条严格已核实
 离线测试：532 passed
-定时任务：已启用；北京时间 07:50 主任务，08:20 去重兜底
+定时任务：独立 daily-scheduler.yml 已启用；北京时间 07:50 主任务，08:20 去重兜底
 定时运行参数：daily + 20 + dingtalk_live，弹性最多 5 次，单日硬上限 25 次
 投递规则：钉钉返回 errcode=0 才视为成功；当天成功正式投递后兜底在采集前跳过
-GitHub workflow：active
+GitHub scheduler workflow：新 ID 328250774，状态 active，2026-08-06 重新登记
 仓库可见性：public，未修改
 ```
 
