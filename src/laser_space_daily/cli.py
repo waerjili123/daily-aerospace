@@ -137,7 +137,6 @@ def build_pipeline(settings: Settings) -> Pipeline:
     deepseek = DeepSeekAnalyzer(
         model_client,
         flash_model=settings.deepseek.flash_model,
-        pro_model=settings.deepseek.pro_model,
         max_attempts=1,
     )
     analyzer = ResilientAnalyzer(deepseek, RuleFallbackAnalyzer())
@@ -166,7 +165,7 @@ def build_pipeline(settings: Settings) -> Pipeline:
                 settings.financing_sources.independent_media_domains
             ),
         ),
-        model=settings.deepseek.pro_model,
+        model=settings.deepseek.flash_model,
         mode=settings.discovery.mode,
         search_budget=settings.discovery.max_queries,
         max_agent_rounds=settings.discovery.max_agent_rounds,

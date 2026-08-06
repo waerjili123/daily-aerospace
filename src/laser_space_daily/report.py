@@ -562,8 +562,8 @@ class DingTalkShortReportRenderer:
     def render(self, result: RunResult) -> RenderedReport:
         attempts = (
             (3, 80, True),
-            (2, 50, True),
-            (1, 0, False),
+            (2, 60, True),
+            (1, 40, False),
         )
         for max_items, summary_limit, include_followups in attempts:
             markdown = _render_short_document(
@@ -636,9 +636,9 @@ def _render_short_document(
         "\n".join(
             (
                 title,
-                f"统计截至：北京时间 {end_text}",
+                f"- 统计截至：北京时间 {end_text}",
                 (
-                    f"概览：过去24小时融资新增 {daily_financing} 条；"
+                    f"- 概览：过去24小时融资新增 {daily_financing} 条；"
                     f"招标变化 {daily_procurement} 条；历史补录 {historical} 条；"
                     f"待核实线索 {pending} 条。"
                 ),
@@ -716,10 +716,13 @@ def _short_verified_financings(result: RunResult) -> list[_ShortItem]:
             }.get(item.financing_subtype, "融资")
         )
         headline = f"- **【{label}】{_safe_text(item.company)}完成{round_text}**"
-        details = [f"时间：{_format_date(item.announced_at)}"]
+        details = [
+            f"企业：{_safe_text(item.company)}",
+            f"时间：{_format_date(item.announced_at)}",
+            f"轮次：{round_text}",
+        ]
         amount_text = _financing_amount(item)
-        if amount_text is not None:
-            details.append(f"金额：{amount_text}")
+        details.append(f"金额：{amount_text or '未明确披露'}")
         if item.investors:
             details.append(
                 "投资方："
@@ -729,7 +732,9 @@ def _short_verified_financings(result: RunResult) -> list[_ShortItem]:
             )
         if item.business_area:
             details.append(f"业务方向：{_safe_text(item.business_area)}")
-        lines = [headline, "  - " + "；".join(details)]
+        summary = item.brief_summary or _structured_financing_summary(item)
+        details.append(f"摘要：{_short_summary(summary, 120)}")
+        lines = [headline, *(f"  - {detail}" for detail in details)]
         source_links = _short_financing_source_links(item)
         if source_links:
             lines.append("  - 来源：" + "｜".join(source_links))
@@ -859,7 +864,11 @@ def _short_verified_procurements(result: RunResult) -> list[_ShortItem]:
             )
             lines = _procurement_item_lines(
                 title=value.name,
-                summary="",
+                summary=(
+                    latest.analysis.brief_summary
+                    if latest is not None and latest.analysis is not None
+                    else ""
+                ),
                 organization=value.organization,
                 category=value.category,
                 group=group,
@@ -895,7 +904,11 @@ def _short_verified_procurements(result: RunResult) -> list[_ShortItem]:
             )
             lines = _procurement_item_lines(
                 title=value.title,
-                summary="",
+                summary=(
+                    value.analysis.brief_summary
+                    if value.analysis is not None
+                    else ""
+                ),
                 organization=value.organization,
                 category=value.category,
                 group=group,
@@ -1155,6 +1168,10 @@ def _procurement_matter_summary(
     event_type: EventType | None,
     status_text: str,
 ) -> str:
+    if summary:
+        concise = _short_summary(summary, 120)
+        if concise:
+            return concise
     extracted = re.search(
         r"(?:采购内容|采购需求|采购标的|项目内容|项目概况)"
         r"[：:]\s*([^。；;\n]{4,90})",
@@ -1232,9 +1249,6 @@ def _clean_procurement_title(value: str) -> str:
 
 
 def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
-    candidates_by_url = {
-        item.url: item for item in result.discovery_candidates
-    }
     groups: dict[str, list[object]] = {}
     for item in result.candidate_diagnostics:
         if item.status != "pending" or item.category_hint is None:
@@ -1273,7 +1287,6 @@ def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
             sorted({item.source_url for item in rows})
         )
         surfaced_urls.update(source_urls)
-        candidate = candidates_by_url.get(representative.source_url)
         signals.append(
             _ShortSignal(
                 category=representative.category_hint,
@@ -1287,9 +1300,7 @@ def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
                 published_at=representative.published_at,
                 amount=representative.amount or "",
                 round_name=representative.financing_round or "",
-                summary=representative.summary or (
-                    candidate.summary if candidate is not None else ""
-                ),
+                summary=representative.brief_summary,
                 source_urls=source_urls,
                 identity=key,
                 event_type=representative.event_type,
@@ -1333,7 +1344,7 @@ def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
                 published_at=item.source_published_at,
                 amount="",
                 round_name="",
-                summary=item.summary,
+                summary="",
                 source_urls=(item.source_url,),
                 identity=f"pending:{item.item_id}",
             )
@@ -1364,7 +1375,7 @@ def _short_candidate_signals(result: RunResult) -> list[_ShortSignal]:
                 published_at=item.source_published_at,
                 amount="",
                 round_name="",
-                summary=item.summary,
+                summary="",
                 source_urls=(item.url,),
                 identity=f"candidate:{item.url}",
             )
@@ -1562,20 +1573,31 @@ def _short_signal_item(
 
     title = _safe_text(signal.title)
     lines = [f"- **【{signal.label}】{title}**"]
-    details: list[str] = []
-    if signal.published_at is not None:
-        details.append(f"时间：{_format_date(signal.published_at)}")
-    if signal.organization:
-        details.append(f"企业：{_safe_text(signal.organization)}")
-    if signal.round_name:
-        details.append(f"轮次：{_safe_text(signal.round_name)}")
-    if signal.amount:
-        details.append(f"明确金额：{_safe_text(signal.amount)}")
+    details: list[str] = [
+        "企业：" + (
+            _safe_text(signal.organization) if signal.organization else "需核实确认"
+        ),
+        "时间：" + (
+            _format_date(signal.published_at)
+            if signal.published_at is not None
+            else "需核实确认"
+        ),
+        "轮次：" + (
+            _safe_text(signal.round_name) if signal.round_name else "需核实确认"
+        ),
+        "金额：" + (
+            _safe_text(signal.amount) if signal.amount else "需核实确认"
+        ),
+    ]
     summary = _short_summary(signal.summary, summary_limit)
-    if summary:
-        details.append(summary)
-    if details:
-        lines.append("  - " + "；".join(details))
+    details.append(
+        "摘要："
+        + (
+            summary
+            or "当前仅确认该融资线索与商业航天相关，关键事实仍需核实。"
+        )
+    )
+    lines.extend(f"  - {detail}" for detail in details)
     source_links = _short_signal_source_links(signal)
     if source_links:
         lines.append("  - 来源：" + "｜".join(source_links))
@@ -1604,6 +1626,19 @@ def _short_financing_source_links(item: Financing) -> list[str]:
             label = f"{label}{indexes[label]}"
         links.append(_link(label, url))
     return links
+
+
+def _structured_financing_summary(item: Financing) -> str:
+    round_text = item.round_name or "股权融资"
+    sentence = f"{item.company}完成{round_text}"
+    amount = _financing_amount(item)
+    if amount:
+        sentence += f"，披露金额{amount}"
+    if item.investors:
+        sentence += "，投资方包括" + "、".join(sorted(item.investors)[:3])
+    if item.business_area:
+        sentence += f"，业务聚焦{item.business_area}"
+    return sentence[:120]
 
 
 def _short_signal_source_links(signal: _ShortSignal) -> list[str]:
@@ -1796,7 +1831,6 @@ def _short_system_status(
         f"形成 {result.metrics.final_candidate_count} 条候选；"
         f"本期展示严格已核实 {strict} 条；"
         f"覆盖{_coverage_status_text(result)}。"
-        "完整采集与诊断见 GitHub Artifact。"
     )
 
 

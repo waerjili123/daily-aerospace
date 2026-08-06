@@ -33,7 +33,6 @@ from .models import (
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 DEFAULT_FLASH_MODEL = "deepseek-v4-flash"
-DEFAULT_PRO_MODEL = "deepseek-v4-pro"
 MAX_BODY_CHARS = 50_000
 
 
@@ -83,6 +82,13 @@ ANALYSIS_SYSTEM_PROMPT = """你是中国激光与商业航天情报分析器。�
 不要使用外部知识。标题和所有结构化事实均须可在页面标题或正文中核验。"""
 
 
+ANALYSIS_SYSTEM_PROMPT += """
+摘要字段要求：brief_summary 必须用自己的话凝练页面中的核心事实，目标 40—80 个中文字符，最多 120 字。
+融资新闻应概括企业、轮次、明确披露的金额、投资方和资金用途；采购公告应概括采购内容、阶段、截止时间或中标结果。
+不得复制正文首段，不得加入页面没有披露的事实；信息不足时只总结已确认字段。
+"""
+
+
 MATCH_SYSTEM_PROMPT = """你是项目匹配助手。只依据给定的新事件字段和候选项目摘要输出 JSON。
 不得修改或合并项目。输出 relation、confidence、reason；所有建议必须由人工复核。信息不足时选择 suspected 并降低置信度。"""
 
@@ -95,7 +101,6 @@ class DeepSeekAnalyzer:
         client: Any,
         *,
         flash_model: str = DEFAULT_FLASH_MODEL,
-        pro_model: str = DEFAULT_PRO_MODEL,
         max_attempts: int = 2,
         max_body_chars: int = MAX_BODY_CHARS,
     ) -> None:
@@ -105,7 +110,6 @@ class DeepSeekAnalyzer:
             raise ValueError("max_body_chars must be positive")
         self._client = client
         self._flash_model = flash_model
-        self._pro_model = pro_model
         self._max_attempts = max_attempts
         self._max_body_chars = max_body_chars
         self._deepseek_tokens = 0
@@ -139,7 +143,8 @@ class DeepSeekAnalyzer:
                 )
                 result = AnalysisResult.model_validate_json(content, strict=True)
                 result = guard_grounded_output(result, page)
-                return _apply_financing_exclusions(result, page)
+                result = _apply_financing_exclusions(result, page)
+                return _ensure_brief_summary(result, page)
             except _CONTROLLED_MODEL_ERRORS as exc:
                 last_error = exc
         raise AnalysisExhausted("analysis failed after bounded model attempts") from last_error
@@ -169,7 +174,7 @@ class DeepSeekAnalyzer:
         }
         try:
             content = self._complete(
-                model=self._pro_model,
+                model=self._flash_model,
                 system_prompt=(
                     MATCH_SYSTEM_PROMPT
                     + "\nJSON Schema: "
@@ -536,6 +541,16 @@ class RuleFallbackAnalyzer:
             category=category,
             event_type=event_type,
             title=page.title.strip() or _first_nonempty_line(page.text),
+            brief_summary=_compose_brief_summary(
+                category=category,
+                title=page.title.strip() or _first_nonempty_line(page.text),
+                organization=organization,
+                event_type=event_type,
+                amount=amount,
+                financing_round=financing_round,
+                awarded_supplier=awarded_supplier,
+                awarded_amount=awarded_amount,
+            ),
             organization=organization,
             published_at=published_at,
             amount=amount,
@@ -825,6 +840,85 @@ def _claim_is_grounded(
     return any(
         item.field in aliases and needle in _normalize(item.quote) for item in evidence
     )
+
+
+def _ensure_brief_summary(
+    result: AnalysisResult,
+    page: FetchedPage,
+) -> AnalysisResult:
+    """Keep a grounded abstractive summary or replace copied/raw prose with facts."""
+    summary = " ".join(result.brief_summary.split()).strip(" ，,。；;：:")
+    body_opening = " ".join(page.text.split()).strip()
+    normalized_summary = _normalize(summary)
+    normalized_opening = _normalize(body_opening[: max(160, len(summary) * 2)])
+    copied = bool(
+        summary
+        and normalized_summary
+        and (
+            normalized_opening.startswith(normalized_summary)
+            or (
+                len(normalized_summary) >= 24
+                and normalized_summary in normalized_opening
+            )
+        )
+    )
+    if not summary or copied:
+        summary = _compose_brief_summary(
+            category=result.category,
+            title=result.title,
+            organization=result.organization,
+            event_type=result.event_type,
+            amount=result.amount,
+            financing_round=result.financing_round,
+            investors=result.investors,
+            business_area=result.business_area,
+            awarded_supplier=result.awarded_supplier,
+            awarded_amount=result.awarded_amount,
+        )
+    return result.model_copy(update={"brief_summary": summary[:120]})
+
+
+def _compose_brief_summary(
+    *,
+    category: Category | None,
+    title: str,
+    organization: str | None = None,
+    event_type: EventType | None = None,
+    amount: str | None = None,
+    financing_round: str | None = None,
+    investors: Sequence[str] = (),
+    business_area: str | None = None,
+    awarded_supplier: str | None = None,
+    awarded_amount: str | None = None,
+) -> str:
+    subject = (organization or title).strip()
+    if category is Category.COMMERCIAL_SPACE_FINANCING:
+        sentence = f"{subject}完成{financing_round or '股权融资'}"
+        if amount:
+            sentence += f"，披露金额{amount}"
+        if investors:
+            sentence += "，投资方包括" + "、".join(investors[:3])
+        if business_area:
+            sentence += f"，资金及业务聚焦{business_area}"
+        return sentence[:120]
+    stage = {
+        EventType.PROCUREMENT_INTENTION: "发布采购意向",
+        EventType.TENDER: "启动招标采购",
+        EventType.INQUIRY: "启动询价采购",
+        EventType.COMPARISON: "启动比选采购",
+        EventType.AWARD: "公布中标结果",
+        EventType.CANDIDATE: "公布候选结果",
+        EventType.CHANGE: "发布采购变更",
+        EventType.TERMINATION: "终止采购",
+    }.get(event_type, "发布采购信息")
+    sentence = f"{subject}{stage}"
+    if awarded_supplier:
+        sentence += f"，中标供应商为{awarded_supplier}"
+    if awarded_amount:
+        sentence += f"，中标金额{awarded_amount}"
+    elif amount:
+        sentence += f"，项目金额{amount}"
+    return sentence[:120]
 
 
 def _apply_financing_exclusions(

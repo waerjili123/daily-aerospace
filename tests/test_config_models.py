@@ -162,7 +162,6 @@ def test_committed_config_contains_no_secret_values():
             "max_retries": "0",
             "base_url": "https://api.deepseek.com",
             "flash_model": "deepseek-v4-flash",
-            "pro_model": "deepseek-v4-pro",
         },
         "bocha": {"timeout_seconds": "30"},
         "discovery": {

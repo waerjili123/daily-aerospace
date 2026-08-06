@@ -904,7 +904,7 @@ def test_short_report_renders_same_verified_source_bundle_once() -> None:
         "## 二、招标采购情况", 1
     )[0]
 
-    assert financing_section.count("光邮星空") == 1
+    assert financing_section.count("**【已核实·历史补录】光邮星空完成") == 1
     assert "融资统计：已核实 1 条" in financing_section
 
 
@@ -967,7 +967,7 @@ def test_short_report_hides_combined_round_candidate_covered_by_verified_subroun
         "## 二、招标采购情况", 1
     )[0]
 
-    assert financing_section.count("光邮星空") == 1
+    assert financing_section.count("**【已核实·历史补录】光邮星空完成") == 1
     assert "候选线索 0 条" in financing_section
 
 
@@ -1813,6 +1813,7 @@ def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None
                 "source_url": "https://news.example/item",
                 "title": "微光启航完成融资",
                 "summary": "",
+                "brief_summary": "",
                 "discovery_source": "search:bocha",
                 "selected_for_report": True,
                 "category_hint": "commercial_space_financing",
@@ -1848,6 +1849,59 @@ def test_dry_run_writes_report_without_posting(cli_deps, tmp_path: Path) -> None
     assert delivery["status"] == "skipped"
     assert delivery["report_kind"] == "standard"
     assert cli_deps.notifier.calls == 0
+
+
+def test_short_financing_fields_are_separate_and_ai_summary_is_preserved() -> None:
+    item = financing(company="光邮星空", announced_at=dt(7, 16)).model_copy(
+        update={
+            "round_name": "Pre-A轮",
+            "brief_summary": (
+                "光邮星空完成Pre-A轮融资，资金将用于高速星地激光通信产品研发。"
+            ),
+        }
+    )
+    result = make_result(
+        state=StateBundle(financings=[item]),
+        changed_financing_ids=[item.financing_id],
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+
+    assert "  - 企业：光邮星空\n" in text
+    assert "  - 时间：2026-07-16\n" in text
+    assert "  - 轮次：Pre-A轮\n" in text
+    assert "  - 金额：1.00亿元\n" in text
+    assert "  - 摘要：光邮星空完成Pre-A轮融资" in text
+    assert "完整采集与诊断见 GitHub Artifact" not in text
+
+
+def test_short_report_never_uses_raw_search_summary_as_financing_summary() -> None:
+    raw = "这是搜索引擎直接复制的原文第一段，不应进入钉钉短报。"
+    brief = "光邮星空完成Pre-A轮融资，投资方与资金用途仍需进一步核实。"
+    diagnostic = CandidateDiagnostic(
+        source_url="https://www.stcn.com/article/guangyou",
+        title="光邮星空完成Pre-A轮融资",
+        summary=raw,
+        brief_summary=brief,
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.COMMERCIAL_SPACE_FINANCING,
+        organization="光邮星空",
+        published_at=dt(7, 16),
+        financing_round="Pre-A轮",
+        stage="persisted",
+        status="pending",
+        reason="missing_required_fields:amount",
+        source_grade=SourceGrade.B,
+    )
+    result = make_result().model_copy(
+        update={"candidate_diagnostics": [diagnostic]}
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+
+    assert "摘要：光邮星空完成Pre-A轮融资" in text
+    assert raw not in text
 
 
 def test_local_run_lock_rejects_overlap_and_is_reusable(tmp_path: Path) -> None:

@@ -55,7 +55,6 @@ class DeepSeekSettings(BaseModel):
     max_retries: int = Field(default=0, ge=0, le=1)
     base_url: str = "https://api.deepseek.com"
     flash_model: str = "deepseek-v4-flash"
-    pro_model: str = "deepseek-v4-pro"
 
 
 class ReportSettings(BaseModel):

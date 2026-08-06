@@ -839,18 +839,42 @@ def test_rule_fallback_extracts_financing_company_across_article_phrasings(
     assert result.organization == expected
 
 
-def test_pro_model_suggestion_cannot_auto_merge(fake_client, event, projects):
+def test_flash_model_suggestion_cannot_auto_merge(fake_client, event, projects):
     fake_client.reply_json(
         {"relation": "same_project", "confidence": 0.84, "reason": "标题相似"}
     )
 
-    suggestion = DeepSeekAnalyzer(
-        fake_client, pro_model="deepseek-v4-pro"
-    ).suggest_match(event, projects)
+    suggestion = DeepSeekAnalyzer(fake_client).suggest_match(event, projects)
 
-    assert fake_client.last_call["model"] == "deepseek-v4-pro"
+    assert fake_client.last_call["model"] == "deepseek-v4-flash"
     assert suggestion.requires_human_review is True
     assert projects[0].event_ids == []
+
+
+def test_analysis_uses_flash_and_keeps_abstractive_brief_summary(
+    fake_client, valid_analysis, official_page
+):
+    valid_analysis["brief_summary"] = (
+        "研究院启动激光通信终端招标，公告披露采购主体和发布日期。"
+    )
+    fake_client.reply_json(valid_analysis)
+
+    result = DeepSeekAnalyzer(fake_client).analyze(official_page)
+
+    assert fake_client.last_call["model"] == "deepseek-v4-flash"
+    assert result.brief_summary == valid_analysis["brief_summary"].rstrip("。")
+
+
+def test_analysis_replaces_copied_opening_with_structured_summary(
+    fake_client, valid_analysis, official_page
+):
+    valid_analysis["brief_summary"] = official_page.text.splitlines()[0]
+    fake_client.reply_json(valid_analysis)
+
+    result = DeepSeekAnalyzer(fake_client).analyze(official_page)
+
+    assert result.brief_summary != valid_analysis["brief_summary"]
+    assert "National Optics Institute" in result.brief_summary
 
 
 def test_invalid_match_suggestion_is_conservative(fake_client, event, projects):

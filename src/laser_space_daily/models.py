@@ -69,6 +69,7 @@ class AnalysisResult(DomainModel):
     category: Category | None = None
     event_type: EventType | None = None
     title: str
+    brief_summary: str = Field(default="", max_length=120)
     organization: str | None = None
     published_at: datetime | None = None
     project_codes: list[str] = Field(default_factory=list)
@@ -180,6 +181,7 @@ class Project(DomainModel):
 class Financing(DomainModel):
     financing_id: str
     company: str
+    brief_summary: str = Field(default="", max_length=120)
     announced_at: datetime
     round_name: str | None = None
     financing_subtype: Literal[

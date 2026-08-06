@@ -62,6 +62,7 @@ class CandidateDiagnostic(DomainModel):
     source_url: str
     title: str
     summary: str = ""
+    brief_summary: str = ""
     discovery_source: str
     selected_for_report: bool = False
     category_hint: Category | None = None
@@ -721,6 +722,9 @@ class Pipeline:
                 source_url=_diagnostic_url(item.url),
                 title=item.title,
                 summary=item.summary,
+                brief_summary=(
+                    analyzed.brief_summary if analyzed is not None else ""
+                ),
                 discovery_source=item.discovery_source,
                 selected_for_report=normalized_url in selected_report_urls,
                 category_hint=(
@@ -1247,6 +1251,7 @@ def _make_financing(
     financing = Financing(
         financing_id="pending-stable-id",
         company=cast(str, result.organization),
+        brief_summary=result.brief_summary,
         announced_at=cast(datetime, result.published_at),
         round_name=result.financing_round,
         financing_subtype=result.financing_subtype,
@@ -1324,6 +1329,7 @@ def _merge_financing(existing: Financing, incoming: Financing) -> Financing:
     )
     return existing.model_copy(
         update={
+            "brief_summary": incoming.brief_summary or existing.brief_summary,
             "source_urls": source_urls,
             "source_published_at": source_published_at,
             "evidence": [evidence_by_key[key] for key in sorted(evidence_by_key)],
