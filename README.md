@@ -16,7 +16,8 @@
 - `config/official_sources.yaml`：官方来源及分级规则。
 - `data/`：项目、融资、事件与待核验状态。
 - `reports/`：每日 Markdown 报告；GitHub Actions 会上传为 artifact。
-- `.github/workflows/daily-intelligence.yml`：当前仅用于手动、小规模采集验收。
+- `.github/workflows/daily-scheduler.yml`：只负责北京时间 07:50 主调度与 08:20 兜底调度。
+- `.github/workflows/daily-intelligence.yml`：可复用的业务流水线，同时保留安全的手动入口。
 
 来源按 A/B/C 分级；`pending` 表示线索尚待核验，不能被当作已确认的正式记录。
 
@@ -79,9 +80,11 @@ DeepSeek 通过受控的 `search_web` Tool Calling 提出后续查询。本地�
 
 ## GitHub Actions 采集恢复验收
 
-1. 定时任务固定使用 `daily`、20 次基础查询和 `dingtalk_live`；主 cron 为
+1. 独立的 `daily-scheduler.yml` 定时入口固定调用可复用业务流水线，使用 `daily`、
+   20 次基础查询和 `dingtalk_live`；主 cron 为
    `50 23 * * *`（北京时间 07:50），兜底 cron 为 `20 0 * * *`（北京时间
-   08:20）。当天已有成功的 `scheduled-live` 或 `manual-live` 时，后续运行跳过。
+   08:20）。投递门禁查询仓库全部 Actions 运行；当天已有成功的 `scheduled-live` 或
+   `manual-live` 时，后续运行跳过。
 2. 手动日常验证选择 `daily`、20 次查询和默认 `dry_run`；历史回填选择
    `backfill`、40 次查询并保持 `dry_run`。只有一次性钉钉验收才选择
    `dingtalk_test`。

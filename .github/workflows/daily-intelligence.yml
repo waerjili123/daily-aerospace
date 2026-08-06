@@ -1,11 +1,19 @@
 name: Daily Laser and Space Intelligence
 
-run-name: ${{ github.event_name == 'schedule' && 'scheduled-live' || (inputs.delivery_mode == 'dingtalk_live' && 'manual-live' || (inputs.delivery_mode == 'dingtalk_test' && 'manual-test' || 'manual-dry-run')) }}
+run-name: ${{ inputs.delivery_mode == 'dingtalk_live' && 'manual-live' || (inputs.delivery_mode == 'dingtalk_test' && 'manual-test' || 'manual-dry-run') }}
 
 on:
-  schedule:
-    - cron: "50 23 * * *"
-    - cron: "20 0 * * *"
+  workflow_call:
+    inputs:
+      discovery_mode:
+        required: true
+        type: string
+      max_queries:
+        required: true
+        type: string
+      delivery_mode:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       discovery_mode:
@@ -60,9 +68,9 @@ jobs:
       - name: Guard production branches
         shell: bash
         env:
-          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
+          DELIVERY_MODE: ${{ inputs.delivery_mode }}
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" != "schedule" && "${DELIVERY_MODE}" == "dry_run" ]]; then
+          if [[ "${DELIVERY_MODE}" == "dry_run" ]]; then
             echo "Safe dry-run allowed on ${GITHUB_REF}"
             exit 0
           fi
@@ -75,7 +83,7 @@ jobs:
         id: delivery_guard
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
+          DELIVERY_MODE: ${{ inputs.delivery_mode }}
           PYTHONPATH: src
         run: python -m laser_space_daily.delivery_guard
 
@@ -95,11 +103,11 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}
-          DINGTALK_WEBHOOK: ${{ (github.event_name == 'schedule' || inputs.delivery_mode != 'dry_run') && secrets.DINGTALK_WEBHOOK || 'https://example.invalid/manual-dry-run' }}
-          DINGTALK_SECRET: ${{ (github.event_name == 'schedule' || inputs.delivery_mode != 'dry_run') && secrets.DINGTALK_SECRET || 'unused-manual-dry-run-secret' }}
-          DISCOVERY_MODE: ${{ github.event_name == 'schedule' && 'daily' || inputs.discovery_mode }}
-          MAX_QUERIES: ${{ github.event_name == 'schedule' && '20' || inputs.max_queries }}
-          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}
+          DINGTALK_WEBHOOK: ${{ inputs.delivery_mode != 'dry_run' && secrets.DINGTALK_WEBHOOK || 'https://example.invalid/manual-dry-run' }}
+          DINGTALK_SECRET: ${{ inputs.delivery_mode != 'dry_run' && secrets.DINGTALK_SECRET || 'unused-manual-dry-run-secret' }}
+          DISCOVERY_MODE: ${{ inputs.discovery_mode }}
+          MAX_QUERIES: ${{ inputs.max_queries }}
+          DELIVERY_MODE: ${{ inputs.delivery_mode }}
         shell: bash
         run: |
           args=(

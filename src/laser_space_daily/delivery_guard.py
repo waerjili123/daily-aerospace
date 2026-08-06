@@ -58,7 +58,6 @@ def decide_daily_delivery(
 def fetch_workflow_runs(
     *,
     repository: str,
-    workflow: str,
     token: str,
     attempts: int = 3,
     opener: Callable[..., Any] = urlopen,
@@ -69,10 +68,7 @@ def fetch_workflow_runs(
     if attempts < 1 or attempts > 5:
         raise ValueError("attempts must be between one and five")
     query = urlencode({"per_page": 100})
-    url = (
-        f"https://api.github.com/repos/{repository}/actions/workflows/"
-        f"{workflow}/runs?{query}"
-    )
+    url = f"https://api.github.com/repos/{repository}/actions/runs?{query}"
     request = Request(
         url,
         headers={
@@ -111,7 +107,6 @@ def main() -> int:
     else:
         runs = fetch_workflow_runs(
             repository=_required_env("GITHUB_REPOSITORY"),
-            workflow="daily-intelligence.yml",
             token=_required_env("GITHUB_TOKEN"),
         )
         decision = decide_daily_delivery(

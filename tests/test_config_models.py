@@ -36,18 +36,28 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     workflow_path = ".github/workflows/daily-intelligence.yml"
     workflow = _repository_file(workflow_path).read_text(encoding="utf-8")
     document = _base_yaml(workflow_path)
+    scheduler = _base_yaml(".github/workflows/daily-scheduler.yml")
 
-    assert set(document["on"]) == {"workflow_dispatch", "schedule"}
-    assert document["on"]["schedule"] == [
+    assert set(document["on"]) == {"workflow_dispatch", "workflow_call"}
+    assert scheduler["on"]["schedule"] == [
         {"cron": "50 23 * * *"},
         {"cron": "20 0 * * *"},
     ]
     assert document["run-name"] == (
-        "${{ github.event_name == 'schedule' && 'scheduled-live' || "
-        "(inputs.delivery_mode == 'dingtalk_live' && 'manual-live' || "
+        "${{ inputs.delivery_mode == 'dingtalk_live' && 'manual-live' || "
         "(inputs.delivery_mode == 'dingtalk_test' && 'manual-test' || "
-        "'manual-dry-run')) }}"
+        "'manual-dry-run') }}"
     )
+    assert scheduler["run-name"] == "scheduled-live"
+    assert scheduler["jobs"]["daily"] == {
+        "uses": "./.github/workflows/daily-intelligence.yml",
+        "with": {
+            "discovery_mode": "daily",
+            "max_queries": "20",
+            "delivery_mode": "dingtalk_live",
+        },
+        "secrets": "inherit",
+    }
     assert document["permissions"] == {"contents": "read", "actions": "read"}
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert "BOCHA_API_KEY: ${{ secrets.BOCHA_API_KEY }}" in workflow
@@ -86,22 +96,22 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     assert '"${MAX_QUERIES}"' in pipeline_step["run"]
     assert '"${DELIVERY_MODE}" == "dingtalk_live"' in pipeline_step["run"]
     assert pipeline_step["env"]["DISCOVERY_MODE"] == (
-        "${{ github.event_name == 'schedule' && 'daily' || inputs.discovery_mode }}"
+        "${{ inputs.discovery_mode }}"
     )
     assert pipeline_step["env"]["MAX_QUERIES"] == (
-        "${{ github.event_name == 'schedule' && '20' || inputs.max_queries }}"
+        "${{ inputs.max_queries }}"
     )
     assert pipeline_step["env"]["DELIVERY_MODE"] == (
-        "${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}"
+        "${{ inputs.delivery_mode }}"
     )
     guard_step = _workflow_step(
         document["jobs"]["run"]["steps"], "Guard production branches"
     )
     assert guard_step["env"]["DELIVERY_MODE"] == (
-        "${{ github.event_name == 'schedule' && 'dingtalk_live' || inputs.delivery_mode }}"
+        "${{ inputs.delivery_mode }}"
     )
     assert '"${DELIVERY_MODE}" == "dry_run"' in guard_step["run"]
-    assert '"${GITHUB_EVENT_NAME}" != "schedule"' in guard_step["run"]
+    assert "GITHUB_EVENT_NAME" not in guard_step["run"]
     assert "refs/heads/main" in guard_step["run"]
     assert "refs/heads/codex/verification-promotion-20260728" in guard_step["run"]
     delivery_guard = _workflow_step(
@@ -331,19 +341,22 @@ def test_readme_documents_schema_migration_and_single_writer_lock() -> None:
 
 def test_workflow_schedule_is_fixed_and_delivery_is_explicit() -> None:
     document = _base_yaml(".github/workflows/daily-intelligence.yml")
+    scheduler = _base_yaml(".github/workflows/daily-scheduler.yml")
     workflow = _repository_file(
         ".github/workflows/daily-intelligence.yml"
     ).read_text(encoding="utf-8")
     steps = document["jobs"]["run"]["steps"]
 
-    assert document["on"]["schedule"] == [
+    assert "schedule" not in document["on"]
+    assert scheduler["on"]["schedule"] == [
         {"cron": "50 23 * * *"},
         {"cron": "20 0 * * *"},
     ]
     assert "--dry-run" in _workflow_step(steps, "Run daily pipeline")["run"]
-    assert "github.event_name == 'schedule'" in workflow
+    assert "github.event_name == 'schedule'" not in workflow
     assert "'dingtalk_live'" in workflow
     assert "inputs.delivery_mode != 'dry_run'" in workflow
+    assert scheduler["run-name"] == "scheduled-live"
     assert document["on"]["workflow_dispatch"]["inputs"]["delivery_mode"][
         "default"
     ] == "dry_run"

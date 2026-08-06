@@ -107,7 +107,6 @@ def test_fetch_workflow_runs_retries_without_exposing_token() -> None:
 
     rows = fetch_workflow_runs(
         repository="owner/repo",
-        workflow="daily-intelligence.yml",
         token="sensitive-token",
         opener=opener,
         sleeper=sleeps.append,
@@ -116,6 +115,11 @@ def test_fetch_workflow_runs_retries_without_exposing_token() -> None:
     assert rows == [run_row(10)]
     assert sleeps == [1.0, 2.0]
     assert all(call.timeout == 15 for call in calls)
+    assert all(
+        call.request.full_url
+        == "https://api.github.com/repos/owner/repo/actions/runs?per_page=100"
+        for call in calls
+    )
     assert all("sensitive-token" not in call.request.full_url for call in calls)
 
 
@@ -131,7 +135,6 @@ def test_fetch_workflow_runs_fails_closed_after_bounded_retries() -> None:
     with pytest.raises(RuntimeError, match="unable to query prior workflow runs"):
         fetch_workflow_runs(
             repository="owner/repo",
-            workflow="daily-intelligence.yml",
             token="token",
             opener=opener,
             sleeper=lambda _seconds: None,
