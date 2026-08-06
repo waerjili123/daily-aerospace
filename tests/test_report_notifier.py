@@ -1904,6 +1904,35 @@ def test_short_report_never_uses_raw_search_summary_as_financing_summary() -> No
     assert raw not in text
 
 
+def test_procurement_title_like_summary_falls_back_to_structured_facts() -> None:
+    diagnostic = CandidateDiagnostic(
+        source_url="https://scbid.com/bx/detail/1",
+        title="电子科技大学光电吊舱系统材料采购项目单一来源成交公告",
+        summary="搜索摘要原文不应展示",
+        brief_summary=(
+            "电子科技大学光电吊舱系统材料采购项目单一来源成交公告-"
+            "四川招投标网-官网公布中标结果"
+        ),
+        discovery_source="search:bocha",
+        selected_for_report=True,
+        category_hint=Category.EO_TURRET,
+        published_at=dt(7, 30),
+        event_type=EventType.AWARD,
+        stage="persisted",
+        status="pending",
+        reason="missing_required_fields:organization",
+        source_grade=SourceGrade.C,
+    )
+    result = make_result().model_copy(
+        update={"candidate_diagnostics": [diagnostic]}
+    )
+
+    text = DingTalkShortReportRenderer().render(result).markdown
+
+    assert "摘要：事项：电子科技大学光电吊舱系统材料采购项目" in text
+    assert "四川招投标网-官网公布中标结果" not in text
+
+
 def test_local_run_lock_rejects_overlap_and_is_reusable(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
 

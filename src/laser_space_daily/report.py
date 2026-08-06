@@ -1170,7 +1170,17 @@ def _procurement_matter_summary(
 ) -> str:
     if summary:
         concise = _short_summary(summary, 120)
-        if concise:
+        title_identity = _identity_text(title)
+        summary_identity = _identity_text(concise)
+        title_like = bool(
+            title_identity
+            and summary_identity
+            and (
+                title_identity in summary_identity
+                or summary_identity in title_identity
+            )
+        )
+        if concise and not title_like:
             return concise
     extracted = re.search(
         r"(?:采购内容|采购需求|采购标的|项目内容|项目概况)"
