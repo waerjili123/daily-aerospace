@@ -1205,6 +1205,8 @@ Actions #24（提交 `1b35fdc`，分支
   `dry_run`。
 - [x] 保留生产分支门禁、仓库级同日去重、单一 concurrency、现有 Secrets 和钉钉
   `accepted` 回执规则。
-- [ ] 推送 `main` 后执行一次手动 `dry_run`，确认直接定时结构没有破坏手动安全入口。
+- [x] 推送 `main` 后执行手动 `dry_run` #31348081142：提交 `58308d6`、运行成功、
+  `run-result=success`、`delivery_status=skipped`，确认直接定时结构没有破坏手动安全入口，
+  本轮没有发送钉钉。
 - [ ] 次日以 GitHub 运行 `created_at` 和钉钉送达时间验证直接 schedule 的准时性；验证前
   不宣称问题已彻底解决。
