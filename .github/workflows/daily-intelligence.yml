@@ -5,7 +5,6 @@ run-name: ${{ github.event_name == 'schedule' && 'scheduled-live' || (inputs.del
 on:
   schedule:
     - cron: "50 23 * * *"
-    - cron: "20 0 * * *"
   workflow_dispatch:
     inputs:
       discovery_mode:
@@ -80,15 +79,11 @@ jobs:
           PYTHONPATH: src
         run: python -m laser_space_daily.delivery_guard
 
-      - name: Install project and development dependencies
+      - name: Install production dependencies
         if: steps.delivery_guard.outputs.should_run == 'true'
         env:
           PIP_CONSTRAINT: constraints.txt
-        run: python -m pip install -e ".[dev]"
-
-      - name: Run tests
-        if: steps.delivery_guard.outputs.should_run == 'true'
-        run: python -m pytest -q
+        run: python -m pip install -e .
 
       - name: Run daily pipeline
         if: steps.delivery_guard.outputs.should_run == 'true'

@@ -40,7 +40,6 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     assert set(document["on"]) == {"workflow_dispatch", "schedule"}
     assert document["on"]["schedule"] == [
         {"cron": "50 23 * * *"},
-        {"cron": "20 0 * * *"},
     ]
     assert document["run-name"] == (
         "${{ github.event_name == 'schedule' && 'scheduled-live' || "
@@ -108,8 +107,7 @@ def test_workflow_schedules_daily_delivery_and_manual_defaults_to_dry_run():
     assert delivery_guard["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
     assert "laser_space_daily.delivery_guard" in delivery_guard["run"]
     for step_name in (
-        "Install project and development dependencies",
-        "Run tests",
+        "Install production dependencies",
         "Run daily pipeline",
         "Publish report summary",
         "Publish failure diagnostics summary",
@@ -233,7 +231,7 @@ def test_committed_config_contains_no_secret_values():
     assert ".worktrees/" in ignored
 
 
-def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
+def test_workflow_uses_python_313_production_dependencies_and_artifacts():
     workflow_path = ".github/workflows/daily-intelligence.yml"
     workflow = _repository_file(workflow_path).read_text(encoding="utf-8")
     document = _base_yaml(workflow_path)
@@ -256,13 +254,13 @@ def test_workflow_uses_python_313_tests_and_artifact_without_state_commit():
         and step.get("with", {}).get("cache") == "pip"
         for step in steps
     )
-    assert 'python -m pip install -e ".[dev]"' in workflow
-    install_step = _workflow_step(steps, "Install project and development dependencies")
+    assert "python -m pip install -e ." in workflow
+    assert 'python -m pip install -e ".[dev]"' not in workflow
+    install_step = _workflow_step(steps, "Install production dependencies")
     assert install_step["env"] == {"PIP_CONSTRAINT": "constraints.txt"}
-    assert "python -m pytest -q" in workflow
-    assert steps.index(_workflow_step(steps, "Run tests")) < steps.index(
-        _workflow_step(steps, "Run daily pipeline")
-    )
+    assert "python -m pytest" not in workflow
+    assert all(step.get("name") != "Run tests" for step in steps)
+    assert steps.index(install_step) < steps.index(_workflow_step(steps, "Run daily pipeline"))
     artifact_step = _workflow_step(steps, "Upload generated report")
     assert artifact_step["uses"] == (
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
@@ -334,7 +332,6 @@ def test_workflow_schedule_is_fixed_and_delivery_is_explicit() -> None:
 
     assert document["on"]["schedule"] == [
         {"cron": "50 23 * * *"},
-        {"cron": "20 0 * * *"},
     ]
     assert "--dry-run" in _workflow_step(steps, "Run daily pipeline")["run"]
     assert "github.event_name == 'schedule'" in workflow

@@ -1210,3 +1210,17 @@ Actions #24（提交 `1b35fdc`，分支
   本轮没有发送钉钉。
 - [ ] 次日以 GitHub 运行 `created_at` 和钉钉送达时间验证直接 schedule 的准时性；验证前
   不宣称问题已彻底解决。
+
+### 2026-08-11 最小直连定时生产链路
+
+- [x] 对照稳定运行的“AI日报”仓库，确认其采用单一 cron、实际生产 workflow 直连执行、
+  长期不改动定时声明且不在每日生产运行中执行完整测试。
+- [x] `daily-intelligence.yml` 收敛为唯一 `50 23 * * *` cron，即北京时间每天 07:50；
+  删除北京时间 08:20 的备用 cron，不引入 wrapper 或外部定时器。
+- [x] 每日生产 workflow 删除完整 pytest 步骤，依赖安装由 `.[dev]` 改为生产依赖 `.`；
+  采集、核实、DeepSeek Flash 摘要、钉钉模板、投递门禁和失败诊断均未修改。
+- [x] workflow 静态契约测试更新为明确约束单一 cron、无每日 pytest 及只安装生产依赖。
+- [x] workflow 定向测试 22 项通过，完整离线测试 537 项通过，YAML 单 cron 解析检查和
+  `git diff --check` 通过。
+- [ ] 推送 `main` 后等待下一次北京时间 07:50 原生 schedule，分别核对 GitHub
+  `created_at`、`run_started_at`、采集耗时和钉钉成功回执；实际验证前不承诺分钟级准时。
