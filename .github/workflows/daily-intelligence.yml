@@ -3,8 +3,6 @@ name: Daily Laser and Space Intelligence
 run-name: ${{ github.event_name == 'schedule' && 'scheduled-live' || (inputs.delivery_mode == 'dingtalk_live' && 'manual-live' || (inputs.delivery_mode == 'dingtalk_test' && 'manual-test' || 'manual-dry-run')) }}
 
 on:
-  schedule:
-    - cron: "50 23 * * *"
   workflow_dispatch:
     inputs:
       discovery_mode:
